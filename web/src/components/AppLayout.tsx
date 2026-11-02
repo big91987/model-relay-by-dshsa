@@ -3,6 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { Icon, type IconName } from './Icon'
+import { ThemeSwitcher } from './ThemeSwitcher'
 
 const navigation: { to: string; label: string; icon: IconName }[] = [
   { to: '/dashboard', label: 'Dashboard', icon: 'dashboard' },
@@ -91,6 +92,7 @@ export function AppLayout() {
             <span>{title}</span>
           </div>
           <div className="topbar-actions">
+            <ThemeSwitcher />
             <span className="user-chip">
               <span className="avatar">{initial}</span>
               <span>{user?.username}</span>

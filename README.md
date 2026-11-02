@@ -95,6 +95,8 @@ Changing `SECRET_KEY` invalidates admin sessions and makes existing channel keys
 
 The **Models** page shows the public catalog, serving channels and the lowest configured price per model. The screenshots above use the local mock upstream in `scripts/mock-upstream.py` (`python3 scripts/mock-upstream.py 19090`), so `127.0.0.1` URLs are demo data rather than real providers.
 
+Use the theme control in the top bar, or on the sign-in screen, to switch between light, dark and follow-system themes. The console remembers the selection in the browser.
+
 ## Routing and accounting
 
 - A channel serves a model when the model appears in its **models** list, or when it is a **public name in the model mapping**.
