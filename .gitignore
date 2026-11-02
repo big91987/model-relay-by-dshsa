@@ -2,6 +2,10 @@
 /bin/
 /internal/server/dist/
 
+# local secrets
+/.env
+.env.local
+
 # runtime data
 /data/
 *.db
