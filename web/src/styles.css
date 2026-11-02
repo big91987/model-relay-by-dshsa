@@ -1181,6 +1181,19 @@ select.input {
   background: linear-gradient(90deg, #6366f1, #a855f7);
 }
 
+.quota-reserved {
+  color: var(--warning);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cost-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
 .token-models {
   margin-top: 6px;
 }

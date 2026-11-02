@@ -284,6 +284,9 @@ export default function Tokens() {
                             <span style={{ width: `${quotaProgress(token)}%` }} />
                           </span>
                         ) : null}
+                        {token.reserved_quota > 0 ? (
+                          <span className="quota-reserved">{formatCost(token.reserved_quota)} in flight</span>
+                        ) : null}
                       </div>
                     </td>
                     <td className="muted">{token.rpm_limit > 0 ? `${token.rpm_limit} RPM` : 'Unlimited'}</td>

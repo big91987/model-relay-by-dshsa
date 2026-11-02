@@ -12,6 +12,13 @@ import (
 	"unicode/utf8"
 )
 
+// streamStartError marks a failure that happened before any bytes of a
+// synthesized stream were written to the client.
+type streamStartError struct{ err error }
+
+func (e *streamStartError) Error() string { return e.err.Error() }
+func (e *streamStartError) Unwrap() error { return e.err }
+
 // estimateChatPrompt approximates prompt tokens when an upstream omits usage.
 func estimateChatPrompt(p openAIChatPayload) int64 {
 	var total int64
@@ -61,8 +68,10 @@ func contentText(raw json.RawMessage) string {
 	return b.String()
 }
 
-// openAIUsage extracts usage from a non-streaming completion, estimating missing numbers.
-func openAIUsage(data []byte, promptFallback int64) (prompt, completion int64) {
+// openAIUsage extracts usage from a non-streaming completion, estimating missing
+// numbers. reported is false when the upstream omitted a usable usage block, in
+// which case the resulting charge is an estimate rather than a verified cost.
+func openAIUsage(data []byte, promptFallback int64) (prompt, completion int64, reported bool) {
 	var parsed struct {
 		Usage struct {
 			PromptTokens     int64 `json:"prompt_tokens"`
@@ -81,6 +90,7 @@ func openAIUsage(data []byte, promptFallback int64) (prompt, completion int64) {
 	}
 	_ = json.Unmarshal(data, &parsed)
 	prompt, completion = parsed.Usage.PromptTokens, parsed.Usage.CompletionTokens
+	reported = prompt > 0 && completion > 0
 	if prompt == 0 {
 		prompt = promptFallback
 	}
@@ -94,14 +104,14 @@ func openAIUsage(data []byte, promptFallback int64) (prompt, completion int64) {
 		}
 		completion = estimateTokens(b.String())
 	}
-	return prompt, completion
+	return prompt, completion, reported
 }
 
 // streamOpenAI copies an SSE stream to the client while tracking usage. Some
 // providers ignore stream=true and return a normal JSON completion; in that
 // case the completion is replayed as OpenAI SSE chunks so clients still receive
 // a well-formed stream.
-func (g *Gateway) streamOpenAI(w http.ResponseWriter, resp *http.Response, promptFallback int64, requestedModel string) (int64, int64, error) {
+func (g *Gateway) streamOpenAI(w http.ResponseWriter, resp *http.Response, promptFallback int64, requestedModel string) (int64, int64, bool, error) {
 	if !strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
 		return g.streamOpenAIFallback(w, resp, promptFallback, requestedModel)
 	}
@@ -119,12 +129,15 @@ func (g *Gateway) streamOpenAI(w http.ResponseWriter, resp *http.Response, promp
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	var prompt, completion int64
+	var usagePrompt, usageCompletion int64
 	var content, toolArgs strings.Builder
+	reported := false
+	done := false
 
 	for scanner.Scan() {
 		line := scanner.Text()
 		if _, err := io.WriteString(w, line+"\n"); err != nil {
-			return prompt, completion, err
+			return prompt, completion, reported, err
 		}
 		if flusher != nil {
 			flusher.Flush()
@@ -133,8 +146,12 @@ func (g *Gateway) streamOpenAI(w http.ResponseWriter, resp *http.Response, promp
 			continue
 		}
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "" || payload == "[DONE]" {
+		if payload == "" {
 			continue
+		}
+		if payload == "[DONE]" {
+			done = true
+			break
 		}
 		var chunk struct {
 			Usage *struct {
@@ -158,9 +175,14 @@ func (g *Gateway) streamOpenAI(w http.ResponseWriter, resp *http.Response, promp
 		if chunk.Usage != nil {
 			if chunk.Usage.PromptTokens > 0 {
 				prompt = chunk.Usage.PromptTokens
+				usagePrompt = chunk.Usage.PromptTokens
 			}
 			if chunk.Usage.CompletionTokens > 0 {
 				completion = chunk.Usage.CompletionTokens
+				usageCompletion = chunk.Usage.CompletionTokens
+			}
+			if usagePrompt > 0 && usageCompletion > 0 {
+				reported = true
 			}
 		}
 		for _, c := range chunk.Choices {
@@ -176,15 +198,22 @@ func (g *Gateway) streamOpenAI(w http.ResponseWriter, resp *http.Response, promp
 	if completion == 0 {
 		completion = estimateTokens(content.String()) + estimateTokens(toolArgs.String())
 	}
-	return prompt, completion, scanner.Err()
+	reported = usagePrompt > 0 && usageCompletion > 0
+	if err := scanner.Err(); err != nil {
+		return prompt, completion, reported, err
+	}
+	if !done {
+		return prompt, completion, reported, fmt.Errorf("upstream stream ended before the [DONE] marker")
+	}
+	return prompt, completion, reported, nil
 }
 
 // streamOpenAIFallback turns a non-streaming completion into OpenAI SSE chunks.
-func (g *Gateway) streamOpenAIFallback(w http.ResponseWriter, resp *http.Response, promptFallback int64, requestedModel string) (int64, int64, error) {
+func (g *Gateway) streamOpenAIFallback(w http.ResponseWriter, resp *http.Response, promptFallback int64, requestedModel string) (int64, int64, bool, error) {
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, false, &streamStartError{err: err}
 	}
 	var payload struct {
 		ID      string `json:"id"`
@@ -210,10 +239,10 @@ func (g *Gateway) streamOpenAIFallback(w http.ResponseWriter, resp *http.Respons
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
-		return 0, 0, fmt.Errorf("upstream returned a non-streaming body that is not JSON: %w", err)
+		return 0, 0, false, &streamStartError{err: fmt.Errorf("upstream returned a non-streaming body that is not JSON: %w", err)}
 	}
 	if len(payload.Choices) == 0 {
-		return 0, 0, fmt.Errorf("upstream completion contained no choices")
+		return 0, 0, false, &streamStartError{err: fmt.Errorf("upstream completion contained no choices")}
 	}
 	choice := payload.Choices[0]
 	id := payload.ID
@@ -228,6 +257,7 @@ func (g *Gateway) streamOpenAIFallback(w http.ResponseWriter, resp *http.Respons
 	if model == "" {
 		model = "unknown"
 	}
+	reported := payload.Usage.PromptTokens > 0 && payload.Usage.CompletionTokens > 0
 	prompt := payload.Usage.PromptTokens
 	if prompt == 0 {
 		prompt = promptFallback
@@ -280,7 +310,7 @@ func (g *Gateway) streamOpenAIFallback(w http.ResponseWriter, resp *http.Respons
 		role = "assistant"
 	}
 	if err := writeChunk(map[string]any{"role": role, "content": ""}, nil); err != nil {
-		return prompt, completion, err
+		return prompt, completion, reported, err
 	}
 	remaining := choice.Message.Content
 	for remaining != "" {
@@ -292,7 +322,7 @@ func (g *Gateway) streamOpenAIFallback(w http.ResponseWriter, resp *http.Respons
 		part := string(runes[:count])
 		remaining = string(runes[count:])
 		if err := writeChunk(map[string]any{"content": part}, nil); err != nil {
-			return prompt, completion, err
+			return prompt, completion, reported, err
 		}
 	}
 	for index, call := range choice.Message.ToolCalls {
@@ -309,7 +339,7 @@ func (g *Gateway) streamOpenAIFallback(w http.ResponseWriter, resp *http.Respons
 				"arguments": "",
 			},
 		}}}, nil); err != nil {
-			return prompt, completion, err
+			return prompt, completion, reported, err
 		}
 		remainingArgs := call.Function.Arguments
 		for remainingArgs != "" {
@@ -324,7 +354,7 @@ func (g *Gateway) streamOpenAIFallback(w http.ResponseWriter, resp *http.Respons
 				"index":    index,
 				"function": map[string]any{"arguments": part},
 			}}}, nil); err != nil {
-				return prompt, completion, err
+				return prompt, completion, reported, err
 			}
 		}
 	}
@@ -333,11 +363,11 @@ func (g *Gateway) streamOpenAIFallback(w http.ResponseWriter, resp *http.Respons
 		finishReason = "stop"
 	}
 	if err := writeChunk(map[string]any{}, finishReason); err != nil {
-		return prompt, completion, err
+		return prompt, completion, reported, err
 	}
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
-		return prompt, completion, err
+		return prompt, completion, reported, err
 	}
 	flush()
-	return prompt, completion, nil
+	return prompt, completion, reported, nil
 }
