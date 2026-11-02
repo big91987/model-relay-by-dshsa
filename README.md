@@ -9,6 +9,7 @@ A self-hosted model gateway written in Go, with a React admin console. It expose
 - **OpenAI-compatible relay** — `POST /v1/chat/completions` (streaming and non-streaming), `POST /v1/embeddings`, `GET /v1/models`.
 - **Two upstream protocols** — OpenAI-compatible channels (OpenAI, DeepSeek, Moonshot, Qwen, vLLM, Ollama, …) and Anthropic Messages channels, translated to and from the OpenAI format.
 - **Channel routing** — priority first, weighted load balancing inside a priority, public-to-upstream model aliases, and automatic failover on connection errors, `401`, `403`, `404`, `429` and `5xx`.
+- **Upstream model discovery** — fetch the provider's model list in the channel form, tick the models to import, and keep manual entries and public aliases.
 - **Gateway keys** — per-key USD quota, model allowlists, requests-per-minute limit, expiry, enable/disable, and a one-time plaintext reveal at creation.
 - **Usage accounting** — prompt/completion tokens and cost from per-channel input/output prices, request logs with status, upstream model, latency and error detail.
 - **Admin console** — dashboard with 7-day traffic, top models and recent requests; channel, model, API key and log pages.
@@ -30,7 +31,7 @@ Open <http://localhost:8080> and sign in with the development credentials `admin
 
 ### First request
 
-1. **Channels** → *Add channel*. Use an OpenAI-compatible base URL including the version, e.g. `https://api.openai.com/v1`, enter the upstream key and list the upstream models.
+1. **Channels** → *Add channel*. Use an OpenAI-compatible base URL including the version, e.g. `https://api.openai.com/v1`, enter the upstream key and list the upstream models — or click *Fetch models* and tick the ones to import.
 2. **API keys** → *Create key*. Copy the `sk-…` value shown once.
 3. Call the relay:
 
@@ -97,6 +98,10 @@ The **Models** page shows the public catalog, serving channels and the lowest co
 
 Use the theme control in the top bar, or on the sign-in screen, to switch between light, dark and follow-system themes. The console remembers the selection in the browser.
 
+The channel form can fetch the provider's model list and import selected models with checkboxes. Manual entries and model aliases stay editable, and a failed fetch leaves the form and the saved channel untouched.
+
+![Fetching upstream models in the channel form](docs/screenshots/channel-modal-fetch.png)
+
 ## Routing and accounting
 
 - A channel serves a model when the model appears in its **models** list, or when it is a **public name in the model mapping**.
@@ -119,6 +124,7 @@ Admin endpoints use the `mr_session` HttpOnly cookie created by `POST /api/auth/
 | `GET /api/dashboard` | session | Totals, 7-day series, top models and recent logs. |
 | `GET/POST /api/channels` | session | List/create channels. |
 | `GET/PUT/DELETE /api/channels/{id}` | session | Read/update/delete a channel. |
+| `POST /api/channels/upstream-models` | session | Fetch the provider's model list for the form; an existing channel reuses its stored key. |
 | `POST /api/channels/{id}/test` | session | Send a minimal upstream request and report latency. |
 | `GET/POST /api/tokens` | session | List/create gateway keys. Creation returns the plaintext key once. |
 | `PUT/DELETE /api/tokens/{id}` | session | Update/delete a key. |

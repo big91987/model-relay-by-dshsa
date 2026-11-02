@@ -48,14 +48,11 @@ func (in *channelInput) normalize(requireKey bool) error {
 	if in.Type != "openai" && in.Type != "anthropic" {
 		return errors.New("type must be openai or anthropic")
 	}
-	in.BaseURL = strings.TrimRight(strings.TrimSpace(in.BaseURL), "/")
-	if in.BaseURL == "" {
-		return errors.New("base_url is required")
+	baseURL, err := normalizeBaseURL(in.BaseURL)
+	if err != nil {
+		return err
 	}
-	u, err := url.Parse(in.BaseURL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return errors.New("base_url must be an absolute http(s) URL")
-	}
+	in.BaseURL = baseURL
 	if requireKey && strings.TrimSpace(in.APIKey) == "" {
 		return errors.New("api_key is required")
 	}
@@ -80,6 +77,88 @@ func (in *channelInput) normalize(requireKey bool) error {
 		return errors.New("configure at least one model or model mapping")
 	}
 	return nil
+}
+
+func normalizeBaseURL(raw string) (string, error) {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if raw == "" {
+		return "", errors.New("base_url is required")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", errors.New("base_url must be an absolute http(s) URL")
+	}
+	return raw, nil
+}
+
+type upstreamModelsInput struct {
+	ChannelID int64  `json:"channel_id"`
+	Type      string `json:"type"`
+	BaseURL   string `json:"base_url"`
+	APIKey    string `json:"api_key"`
+}
+
+// handleFetchUpstreamModels asks the configured provider for its model list so
+// the console can offer a checkbox import. It never persists anything: a failed
+// fetch leaves the channel's stored models and aliases untouched.
+func (s *Server) handleFetchUpstreamModels(w http.ResponseWriter, r *http.Request) {
+	var in upstreamModelsInput
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	var stored *store.Channel
+	if in.ChannelID > 0 {
+		channel, err := s.store.GetChannel(in.ChannelID)
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "channel not found")
+			return
+		}
+		if err != nil {
+			s.logger.Error("load channel failed", "error", err)
+			writeErr(w, http.StatusInternalServerError, "failed to load channel")
+			return
+		}
+		stored = channel
+		if strings.TrimSpace(in.Type) == "" {
+			in.Type = stored.Type
+		}
+		if strings.TrimSpace(in.BaseURL) == "" {
+			in.BaseURL = stored.BaseURL
+		}
+	}
+	in.Type = strings.ToLower(strings.TrimSpace(in.Type))
+	if in.Type == "" {
+		in.Type = "openai"
+	}
+	if in.Type != "openai" && in.Type != "anthropic" {
+		writeErr(w, http.StatusBadRequest, "type must be openai or anthropic")
+		return
+	}
+	baseURL, err := normalizeBaseURL(in.BaseURL)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	apiKey := strings.TrimSpace(in.APIKey)
+	if apiKey == "" {
+		if stored == nil {
+			writeErr(w, http.StatusBadRequest, "api_key is required to fetch upstream models")
+			return
+		}
+		apiKey, err = s.secrets.Decrypt(stored.APIKeyEncrypted)
+		if err != nil {
+			s.logger.Error("decrypt channel key failed", "error", err)
+			writeErr(w, http.StatusInternalServerError, "failed to read the stored channel key")
+			return
+		}
+	}
+	models, err := s.gw.FetchModels(r.Context(), in.Type, baseURL, apiKey)
+	if err != nil {
+		s.logger.Warn("fetch upstream models failed", "channel_id", in.ChannelID, "type", in.Type, "error", err)
+		writeErr(w, http.StatusBadGateway, "failed to fetch models from the upstream provider: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"models": models})
 }
 
 func (s *Server) handleListChannels(w http.ResponseWriter, r *http.Request) {

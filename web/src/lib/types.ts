@@ -47,6 +47,13 @@ export interface TestResult {
   message: string
 }
 
+export interface UpstreamModelsInput {
+  channel_id?: number
+  type: ChannelType
+  base_url: string
+  api_key?: string
+}
+
 export type TokenStatus = 'active' | 'disabled'
 
 export interface Token {

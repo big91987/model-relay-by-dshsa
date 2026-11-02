@@ -12,11 +12,32 @@ CONTENT = {
     "claude-sonnet-4": "Claude replies through the Anthropic Messages adapter. The gateway translates OpenAI chat requests and streams the Anthropic events back as OpenAI chunks.",
 }
 
+OPENAI_MODELS = ["gpt-4.1", "gpt-4o", "gpt-4o-mini", "o1", "o3-mini"]
+ANTHROPIC_MODELS = ["claude-haiku-4", "claude-opus-4", "claude-sonnet-4"]
+DEEPSEEK_MODELS = ["deepseek-chat", "deepseek-reasoner"]
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+    def do_GET(self):
+        if self.path.endswith("/models"):
+            return self.models()
+        self.send_json(404, {"error": {"message": "not found"}})
+
+    def models(self):
+        auth = self.headers.get("Authorization", "")
+        if "reject" in auth or "reject" in self.headers.get("x-api-key", ""):
+            return self.send_json(401, {"error": {"message": "invalid api key"}})
+        if self.headers.get("x-api-key"):
+            ids = ANTHROPIC_MODELS
+        elif "deepseek" in auth:
+            ids = DEEPSEEK_MODELS
+        else:
+            ids = OPENAI_MODELS
+        self.send_json(200, {"object": "list", "data": [{"id": i, "object": "model", "owned_by": "mock"} for i in ids]})
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))

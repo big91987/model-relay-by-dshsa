@@ -10,7 +10,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -223,5 +225,113 @@ func TestRelayRejectsBadKey(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "invalid_api_key") {
 		t.Fatalf("unexpected error body: %s", body)
+	}
+}
+
+func TestFetchUpstreamModelsEndpoint(t *testing.T) {
+	ts, _ := newTestServer(t)
+	failing := atomic.Bool{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer upstream-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":{"message":"invalid api key"}}`)
+			return
+		}
+		if failing.Load() {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":{"message":"provider exploded"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":[{"id":"gpt-4o-mini"},{"id":"gpt-4o"}]}`)
+	}))
+	defer upstream.Close()
+
+	client := newClient(t)
+	resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/auth/login", map[string]any{"username": "admin", "password": "admin-pass"}, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status %d: %s", resp.StatusCode, body)
+	}
+
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/channels/upstream-models", map[string]any{
+		"type": "openai", "base_url": upstream.URL + "/v1", "api_key": "upstream-key",
+	}, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("fetch models status %d: %s", resp.StatusCode, body)
+	}
+	var fetched struct {
+		Models []string `json:"models"`
+	}
+	if err := json.Unmarshal(body, &fetched); err != nil {
+		t.Fatalf("decode models: %v (%s)", err, body)
+	}
+	if len(fetched.Models) != 2 || fetched.Models[0] != "gpt-4o" || fetched.Models[1] != "gpt-4o-mini" {
+		t.Fatalf("unexpected models: %v", fetched.Models)
+	}
+
+	// A new channel needs its key in the request.
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/channels/upstream-models", map[string]any{
+		"type": "openai", "base_url": upstream.URL + "/v1",
+	}, nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("missing key status %d: %s", resp.StatusCode, body)
+	}
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/channels/upstream-models", map[string]any{
+		"type": "openai", "base_url": "ftp://example.com", "api_key": "upstream-key",
+	}, nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid url status %d: %s", resp.StatusCode, body)
+	}
+
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/channels", map[string]any{
+		"name": "mock", "type": "openai", "base_url": upstream.URL + "/v1", "api_key": "upstream-key",
+		"models": []string{"public-model"}, "priority": 0, "weight": 1, "status": "enabled",
+		"input_price": 1, "output_price": 2,
+	}, nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create channel status %d: %s", resp.StatusCode, body)
+	}
+	var channel store.Channel
+	if err := json.Unmarshal(body, &channel); err != nil {
+		t.Fatalf("decode channel: %v", err)
+	}
+
+	// An existing channel can reuse its stored key and config.
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/channels/upstream-models", map[string]any{
+		"channel_id": channel.ID,
+	}, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("fetch stored channel models status %d: %s", resp.StatusCode, body)
+	}
+
+	// A failed fetch must not persist anything.
+	failing.Store(true)
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/channels/upstream-models", map[string]any{
+		"channel_id": channel.ID,
+	}, nil)
+	if resp.StatusCode != http.StatusBadGateway || !strings.Contains(string(body), "provider exploded") {
+		t.Fatalf("failed fetch status %d: %s", resp.StatusCode, body)
+	}
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+"/api/channels/"+strconv.FormatInt(channel.ID, 10), nil, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("get channel status %d: %s", resp.StatusCode, body)
+	}
+	var reloaded store.Channel
+	if err := json.Unmarshal(body, &reloaded); err != nil {
+		t.Fatalf("decode channel: %v", err)
+	}
+	if len(reloaded.Models) != 1 || reloaded.Models[0] != "public-model" {
+		t.Fatalf("failed fetch changed stored models: %v", reloaded.Models)
+	}
+
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/channels/upstream-models", map[string]any{
+		"channel_id": 9999,
+	}, nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown channel status %d: %s", resp.StatusCode, body)
 	}
 }

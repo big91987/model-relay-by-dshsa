@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Icon } from '../components/Icon'
 import { Modal } from '../components/Modal'
 import { EmptyState, ErrorBanner, FormField, PageHeader, Spinner, StatusBadge } from '../components/ui'
 import { api } from '../lib/api'
 import { useToast } from '../lib/toast'
-import type { Channel, ChannelInput, ChannelStatus, ChannelType } from '../lib/types'
+import type { Channel, ChannelInput, ChannelStatus, ChannelType, UpstreamModelsInput } from '../lib/types'
 
 interface ChannelFormState {
   name: string
@@ -102,6 +102,11 @@ export default function Channels() {
   const [testing, setTesting] = useState<number | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<Channel | null>(null)
   const [deleting, setDeleting] = useState(false)
+  const [fetchingModels, setFetchingModels] = useState(false)
+  const [upstreamModels, setUpstreamModels] = useState<string[] | null>(null)
+  const [selectedModels, setSelectedModels] = useState<string[]>([])
+  const [modelsError, setModelsError] = useState('')
+  const modelFetchRequest = useRef(0)
 
   const load = useCallback(async () => {
     try {
@@ -121,18 +126,97 @@ export default function Channels() {
 
   const setField = <K extends keyof ChannelFormState>(key: K, value: ChannelFormState[K]) => {
     setForm((previous) => ({ ...previous, [key]: value }))
+    if (key === 'type' || key === 'base_url' || key === 'api_key') {
+      // A pending or shown model list belongs to the previous provider config.
+      modelFetchRequest.current += 1
+      setFetchingModels(false)
+      setUpstreamModels(null)
+      setSelectedModels([])
+      setModelsError('')
+    }
+  }
+
+  const resetModelFetch = () => {
+    modelFetchRequest.current += 1
+    setFetchingModels(false)
+    setUpstreamModels(null)
+    setSelectedModels([])
+    setModelsError('')
   }
 
   const openCreate = () => {
     setEditing(null)
     setForm(emptyForm)
+    resetModelFetch()
     setModalOpen(true)
   }
 
   const openEdit = (channel: Channel) => {
     setEditing(channel)
     setForm(toForm(channel))
+    resetModelFetch()
     setModalOpen(true)
+  }
+
+  const currentModels = parseModels(form.models)
+  const importableModels = upstreamModels
+    ? upstreamModels.filter((model) => !currentModels.includes(model))
+    : []
+  const allImportableSelected =
+    importableModels.length > 0 && importableModels.every((model) => selectedModels.includes(model))
+  const canFetchModels = form.base_url.trim() !== '' && (editing !== null || form.api_key.trim() !== '')
+
+  const fetchUpstreamModels = async () => {
+    if (!canFetchModels) {
+      toast.error('Enter the base URL and API key before fetching models')
+      return
+    }
+    const requestID = modelFetchRequest.current + 1
+    modelFetchRequest.current = requestID
+    setFetchingModels(true)
+    setModelsError('')
+    const payload: UpstreamModelsInput = {
+      type: form.type,
+      base_url: form.base_url.trim(),
+    }
+    if (form.api_key.trim()) payload.api_key = form.api_key.trim()
+    if (editing) payload.channel_id = editing.id
+    try {
+      const response = await api.fetchUpstreamModels(payload)
+      if (modelFetchRequest.current !== requestID) return
+      setUpstreamModels(response.models)
+      setSelectedModels([])
+    } catch (err) {
+      if (modelFetchRequest.current !== requestID) return
+      setUpstreamModels(null)
+      setSelectedModels([])
+      setModelsError(err instanceof Error ? err.message : 'Failed to fetch models from the upstream provider')
+    } finally {
+      if (modelFetchRequest.current === requestID) setFetchingModels(false)
+    }
+  }
+
+  const toggleModel = (model: string) => {
+    setSelectedModels((previous) =>
+      previous.includes(model) ? previous.filter((item) => item !== model) : [...previous, model],
+    )
+  }
+
+  const toggleAllModels = () => {
+    setSelectedModels(allImportableSelected ? [] : [...importableModels])
+  }
+
+  const importSelectedModels = () => {
+    const additions = selectedModels.filter((model) => !currentModels.includes(model))
+    if (additions.length === 0) {
+      toast.error('The selected models are already in the list')
+      return
+    }
+    const trimmed = form.models.trim()
+    const separator = !trimmed ? '' : /[\n,]\s*$/.test(form.models) ? ' ' : ', '
+    setField('models', trimmed + separator + additions.join(', '))
+    setSelectedModels([])
+    toast.success(`Imported ${additions.length} model${additions.length === 1 ? '' : 's'}`)
   }
 
   const submit = async () => {
@@ -413,7 +497,23 @@ export default function Channels() {
           <FormField
             label="Models"
             htmlFor="channel-models"
-            hint="Upstream model names, separated by commas or new lines."
+            hint="Upstream model names, separated by commas or new lines. Importing keeps your manual entries."
+            action={
+              <button
+                type="button"
+                className="btn btn-ghost btn-xs"
+                onClick={() => void fetchUpstreamModels()}
+                disabled={fetchingModels || !canFetchModels}
+                title={
+                  canFetchModels
+                    ? 'Fetch the model list from the upstream provider'
+                    : 'Enter the base URL and API key first'
+                }
+              >
+                {fetchingModels ? <Spinner size={13} /> : <Icon name="refresh" size={13} />}
+                {fetchingModels ? 'Fetching…' : 'Fetch models'}
+              </button>
+            }
           >
             <textarea
               id="channel-models"
@@ -438,6 +538,73 @@ export default function Channels() {
               placeholder="claude-sonnet=claude-3-7-sonnet-latest"
             />
           </FormField>
+          {modelsError ? (
+            <div className="field wide">
+              <ErrorBanner message={modelsError} />
+              <span className="field-hint">
+                Your current models and aliases were not changed. Check the base URL and API key, then try again.
+              </span>
+            </div>
+          ) : upstreamModels !== null ? (
+            <div className="field wide">
+              <div className="model-picker">
+                <div className="model-picker-head">
+                  <div className="model-picker-heading">
+                    <span className="model-picker-title">Upstream models</span>
+                    <span className="model-picker-sub">
+                      {upstreamModels.length === 0
+                        ? 'No models returned'
+                        : `${upstreamModels.length} fetched · ${importableModels.length} not added`}
+                    </span>
+                  </div>
+                  {importableModels.length > 0 ? (
+                    <button type="button" className="btn btn-ghost btn-xs" onClick={toggleAllModels}>
+                      {allImportableSelected ? 'Clear selection' : 'Select all'}
+                    </button>
+                  ) : null}
+                </div>
+                {upstreamModels.length === 0 ? (
+                  <p className="model-picker-empty">
+                    The upstream provider returned an empty model list. You can still enter model names manually.
+                  </p>
+                ) : (
+                  <div className="model-picker-list">
+                    {upstreamModels.map((model) => {
+                      const alreadyAdded = currentModels.includes(model)
+                      return (
+                        <label
+                          key={model}
+                          className={`model-option${alreadyAdded ? ' is-added' : ''}`}
+                          title={model}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={alreadyAdded || selectedModels.includes(model)}
+                            disabled={alreadyAdded}
+                            onChange={() => toggleModel(model)}
+                          />
+                          <span className="model-option-name">{model}</span>
+                          {alreadyAdded ? <span className="model-option-tag">added</span> : null}
+                        </label>
+                      )
+                    })}
+                  </div>
+                )}
+                <div className="model-picker-foot">
+                  <span className="field-hint">Aliases in model mapping are left untouched.</span>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-xs"
+                    onClick={importSelectedModels}
+                    disabled={selectedModels.length === 0}
+                  >
+                    <Icon name="plus" size={13} />
+                    {selectedModels.length > 0 ? `Add ${selectedModels.length} selected` : 'Add selected'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : null}
           <FormField label="Priority" htmlFor="channel-priority" hint="Higher priority is tried first.">
             <input
               id="channel-priority"

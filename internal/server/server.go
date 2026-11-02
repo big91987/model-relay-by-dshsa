@@ -77,6 +77,7 @@ func (s *Server) routes() {
 
 	mux.Handle("GET /api/channels", s.withAdmin(http.HandlerFunc(s.handleListChannels)))
 	mux.Handle("POST /api/channels", s.withAdmin(http.HandlerFunc(s.handleCreateChannel)))
+	mux.Handle("POST /api/channels/upstream-models", s.withAdmin(http.HandlerFunc(s.handleFetchUpstreamModels)))
 	mux.Handle("GET /api/channels/{id}", s.withAdmin(http.HandlerFunc(s.handleGetChannel)))
 	mux.Handle("PUT /api/channels/{id}", s.withAdmin(http.HandlerFunc(s.handleUpdateChannel)))
 	mux.Handle("DELETE /api/channels/{id}", s.withAdmin(http.HandlerFunc(s.handleDeleteChannel)))
