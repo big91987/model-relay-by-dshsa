@@ -1,0 +1,20 @@
+# build output
+/bin/
+/internal/server/dist/
+
+# runtime data
+/data/
+*.db
+*.db-wal
+*.db-shm
+
+# frontend
+web/node_modules/
+web/dist/
+
+# editor / OS
+.DS_Store
+*.swp
+
+# test output
+coverage.out
