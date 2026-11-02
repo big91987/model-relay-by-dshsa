@@ -9,6 +9,7 @@ import type {
   TestResult,
   Token,
   TokenInput,
+  UpstreamModelsInput,
   User,
 } from './types'
 
@@ -97,6 +98,9 @@ export const api = {
   testChannel(id: number, model?: string) {
     const query = model ? `?model=${encodeURIComponent(model)}` : ''
     return request<TestResult>(`/api/channels/${id}/test${query}`, { method: 'POST' })
+  },
+  fetchUpstreamModels(input: UpstreamModelsInput) {
+    return request<{ models: string[] }>('/api/channels/upstream-models', { method: 'POST', ...jsonBody(input) })
   },
   tokens() {
     return request<{ data: Token[] }>('/api/tokens')
