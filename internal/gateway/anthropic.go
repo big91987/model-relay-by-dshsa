@@ -130,7 +130,10 @@ func buildAnthropicRequest(raw map[string]any, upstream string) ([]byte, error) 
 	}
 	out["messages"] = messages
 
-	if tools, ok := raw["tools"].([]any); ok && len(tools) > 0 {
+	// Anthropic has no tool_choice "none"; omitting the tool definitions is the
+	// closest equivalent and stops the model from attempting tool calls.
+	toolChoice, _ := raw["tool_choice"].(string)
+	if tools, ok := raw["tools"].([]any); ok && len(tools) > 0 && toolChoice != "none" {
 		translated := make([]any, 0, len(tools))
 		for _, item := range tools {
 			tool, ok := item.(map[string]any)

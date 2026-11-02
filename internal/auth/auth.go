@@ -23,9 +23,9 @@ const SessionCookie = "mr_session"
 const (
 	pbkdf2Iterations = 120_000
 	pbkdf2KeyLen     = 32
-	saltLen    = 16
-	apiKeyPrefix       = "sk-"
-	apiKeyBytes        = 24
+	saltLen          = 16
+	apiKeyPrefix     = "sk-"
+	apiKeyBytes      = 24
 )
 
 // HashPassword derives a PBKDF2-HMAC-SHA256 hash and returns a self-describing string.

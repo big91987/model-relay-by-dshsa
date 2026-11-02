@@ -414,6 +414,33 @@ func TestBuildAnthropicRequestWithTools(t *testing.T) {
 	}
 }
 
+func TestBuildAnthropicRequestToolChoiceNone(t *testing.T) {
+	raw := map[string]any{
+		"model": "public",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "hello"},
+		},
+		"tools": []any{
+			map[string]any{"type": "function", "function": map[string]any{
+				"name":       "lookup",
+				"parameters": map[string]any{"type": "object"},
+			}},
+		},
+		"tool_choice": "none",
+	}
+	encoded, err := buildAnthropicRequest(raw, "claude-upstream")
+	if err != nil {
+		t.Fatalf("buildAnthropicRequest: %v", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(encoded, &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, exists := out["tools"]; exists {
+		t.Fatalf("tools must be omitted when tool_choice is none: %+v", out)
+	}
+}
+
 func TestModelsListing(t *testing.T) {
 	env := newTestEnv(t)
 	env.addChannel(t, "one", "https://one.example/v1", "openai", 0, []string{"model-a"}, map[string]string{"model-b": "upstream-b"}, 0, 0)

@@ -35,8 +35,8 @@ func main() {
 		logger.Warn("SECRET_KEY is not set; using an insecure development key. Set SECRET_KEY before exposing this instance.")
 	}
 	if cfg.UsingDefaultPassword {
-		logger.Warn("ADMIN_PASSWORD is not set; the default development credentials are active.",
-			"username", cfg.AdminUsername, "password", "admin123")
+		logger.Warn("ADMIN_PASSWORD is not set; the default development password is active. Set ADMIN_PASSWORD before exposing this instance.",
+			"username", cfg.AdminUsername)
 	}
 
 	st, err := store.Open(cfg.DBPath)

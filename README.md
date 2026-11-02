@@ -103,6 +103,7 @@ The **Models** page shows the public catalog, serving channels and the lowest co
 - Cost is calculated as `prompt_tokens × input_price / 1M + completion_tokens × output_price / 1M`, using prices configured on the channel that served the request.
 - Upstream `usage` is used when present. For streams without usage and for providers that omit it, the gateway records a conservative estimate based on the request and returned text.
 - A key with quota `-1` is unlimited. A negative balance does not block in-flight work; the next request is rejected until the quota is raised. `rpm_limit: 0` means unlimited.
+- Quota is enforced from recorded usage, so concurrent in-flight requests can slightly overshoot a key's quota before the next request is blocked.
 
 ## HTTP API
 
