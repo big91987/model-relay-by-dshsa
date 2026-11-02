@@ -445,7 +445,26 @@ func (g *Gateway) streamAnthropic(w http.ResponseWriter, resp *http.Response, pr
 	nextTool := 0
 	stopReason := "end_turn"
 	done := false
+	usageSent := false
 	event := ""
+
+	writeUsage := func() error {
+		p, c := prompt, completion
+		source := "upstream"
+		if p == 0 {
+			p = promptFallback
+			source = "estimated"
+		}
+		if c == 0 {
+			c = estimateTokens(text.String() + toolArgs.String())
+			source = "estimated"
+		}
+		if err := writeUsageChunk(w, id, created, model, p, c, source); err != nil {
+			return err
+		}
+		usageSent = true
+		return nil
+	}
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -547,6 +566,11 @@ func (g *Gateway) streamAnthropic(w http.ResponseWriter, resp *http.Response, pr
 			if err := writeChunk(map[string]any{}, mapStopReason(stopReason)); err != nil {
 				return prompt, completion, err
 			}
+			if !usageSent {
+				if err := writeUsage(); err != nil {
+					return prompt, completion, err
+				}
+			}
 			if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
 				return prompt, completion, err
 			}
@@ -573,8 +597,16 @@ func (g *Gateway) streamAnthropic(w http.ResponseWriter, resp *http.Response, pr
 		event = ""
 	}
 	if !done {
-		_ = writeChunk(map[string]any{}, mapStopReason(stopReason))
-		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		if streamErr := scanner.Err(); streamErr != nil {
+			_ = writeStreamError(w, "upstream stream interrupted: "+streamErr.Error())
+			_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		} else {
+			_ = writeChunk(map[string]any{}, mapStopReason(stopReason))
+			if !usageSent {
+				_ = writeUsage()
+			}
+			_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		}
 		if flusher != nil {
 			flusher.Flush()
 		}

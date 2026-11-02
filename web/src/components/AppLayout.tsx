@@ -7,6 +7,7 @@ import { ThemeSwitcher } from './ThemeSwitcher'
 
 const navigation: { to: string; label: string; icon: IconName }[] = [
   { to: '/dashboard', label: 'Dashboard', icon: 'dashboard' },
+  { to: '/playground', label: 'Playground', icon: 'spark' },
   { to: '/channels', label: 'Channels', icon: 'channels' },
   { to: '/models', label: 'Models', icon: 'models' },
   { to: '/videos', label: 'Video', icon: 'video' },
@@ -16,6 +17,7 @@ const navigation: { to: string; label: string; icon: IconName }[] = [
 
 const titles: Record<string, string> = {
   '/dashboard': 'Dashboard',
+  '/playground': 'Playground',
   '/channels': 'Channels',
   '/models': 'Models',
   '/videos': 'Video generation',

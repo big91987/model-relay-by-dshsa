@@ -31,6 +31,10 @@ export type IconName =
   | 'monitor'
   | 'download'
   | 'upload'
+  | 'send'
+  | 'stop'
+  | 'eye'
+  | 'eyeOff'
 
 const icons: Record<IconName, ReactNode> = {
   dashboard: (
@@ -185,6 +189,27 @@ const icons: Record<IconName, ReactNode> = {
       <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
       <path d="m7 8 5-5 5 5" />
       <path d="M12 3v12" />
+    </>
+  ),
+  send: (
+    <>
+      <path d="m22 2-7 20-4-9-9-4Z" />
+      <path d="M22 2 11 13" />
+    </>
+  ),
+  stop: <rect x="6" y="6" width="12" height="12" rx="2" />,
+  eye: (
+    <>
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+      <circle cx="12" cy="12" r="3" />
+    </>
+  ),
+  eyeOff: (
+    <>
+      <path d="M10.6 5.2A10.7 10.7 0 0 1 12 5c6.5 0 10 7 10 7a17.8 17.8 0 0 1-3.4 4.4" />
+      <path d="M6.3 6.3A18.3 18.3 0 0 0 2 12s3.5 7 10 7a10.6 10.6 0 0 0 5.7-1.7" />
+      <path d="m2 2 20 20" />
+      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
     </>
   ),
 }

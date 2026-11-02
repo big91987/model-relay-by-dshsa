@@ -135,4 +135,7 @@ export const api = {
   createVideo(input: VideoInput) {
     return request<VideoTask>('/api/videos', { method: 'POST', ...jsonBody(input) })
   },
+  playgroundModels(tokenId: number) {
+    return request<{ data: { id: string }[] }>(`/api/playground/models?token_id=${tokenId}`)
+  },
 }

@@ -459,11 +459,12 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListLogs(w http.ResponseWriter, r *http.Request) {
 	filter := store.LogFilter{
-		Page:     queryInt(r, "page", 1),
-		PageSize: queryInt(r, "page_size", 50),
-		Model:    strings.TrimSpace(r.URL.Query().Get("model")),
-		Status:   strings.TrimSpace(r.URL.Query().Get("status")),
-		TokenID:  int64(queryInt(r, "token_id", 0)),
+		Page:      queryInt(r, "page", 1),
+		PageSize:  queryInt(r, "page_size", 50),
+		Model:     strings.TrimSpace(r.URL.Query().Get("model")),
+		Status:    strings.TrimSpace(r.URL.Query().Get("status")),
+		RequestID: strings.TrimSpace(r.URL.Query().Get("request_id")),
+		TokenID:   int64(queryInt(r, "token_id", 0)),
 	}
 	if v := r.URL.Query().Get("start"); v != "" {
 		if n, err := parseInt64(v); err == nil {
