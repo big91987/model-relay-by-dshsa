@@ -31,6 +31,10 @@ type Gateway struct {
 	client  *http.Client
 	limiter *rateLimiter
 	logger  *slog.Logger
+
+	// videoPollInterval controls how often asynchronous video tasks are polled.
+	// Tests shorten it; production uses MiniMax's recommended polling cadence.
+	videoPollInterval time.Duration
 }
 
 // New builds a Gateway with a tuned upstream HTTP client.
@@ -49,13 +53,18 @@ func New(cfg *config.Config, st *store.Store, secrets *secretbox.Cipher, logger 
 		ExpectContinueTimeout: time.Second,
 		ResponseHeaderTimeout: 120 * time.Second,
 	}
+	pollInterval := cfg.VideoPollInterval
+	if pollInterval <= 0 {
+		pollInterval = 8 * time.Second
+	}
 	return &Gateway{
-		cfg:     cfg,
-		store:   st,
-		secrets: secrets,
-		client:  &http.Client{Transport: transport},
-		limiter: newRateLimiter(),
-		logger:  logger,
+		cfg:               cfg,
+		store:             st,
+		secrets:           secrets,
+		client:            &http.Client{Transport: transport},
+		limiter:           newRateLimiter(),
+		logger:            logger,
+		videoPollInterval: pollInterval,
 	}
 }
 
@@ -121,7 +130,7 @@ func (g *Gateway) ChatCompletions(w http.ResponseWriter, r *http.Request, tok *s
 		g.serverError(w, tok, requestID, model, payload.Stream, started, err)
 		return
 	}
-	candidates := orderCandidates(channels, model)
+	candidates := chatCandidates(orderCandidates(channels, model))
 	if len(candidates) == 0 {
 		msg := fmt.Sprintf("model %q is not available on any enabled channel", model)
 		writeOpenAIError(w, http.StatusNotFound, msg, "invalid_request_error", "model_not_found")
@@ -315,7 +324,7 @@ func (g *Gateway) Models(w http.ResponseWriter, r *http.Request, tok *store.Toke
 		ids = append(ids, id)
 	}
 	for _, ch := range channels {
-		if ch.Status != "enabled" {
+		if ch.Status != "enabled" || !isChatChannel(ch.Type) {
 			continue
 		}
 		for _, m := range ch.Models {
@@ -370,14 +379,19 @@ func (g *Gateway) TestChannel(ctx context.Context, ch *store.Channel, model stri
 	defer cancel()
 	started := time.Now()
 	var req *http.Request
-	if ch.Type == "anthropic" {
+	switch ch.Type {
+	case "anthropic":
 		body, _ := json.Marshal(map[string]any{
 			"model":      upstream,
 			"max_tokens": 8,
 			"messages":   []any{map[string]any{"role": "user", "content": "ping"}},
 		})
 		req, err = g.upstreamRequest(ctx, ch, http.MethodPost, "/messages", body, apiKey, false, true)
-	} else {
+	case "minimax":
+		// A query for an unknown task verifies reachability and credentials
+		// without creating a billable video generation task.
+		req, err = g.upstreamRequest(ctx, ch, http.MethodGet, "/v2/query/video_generation/connectivity-probe", nil, apiKey, false, true)
+	default:
 		body, _ := json.Marshal(map[string]any{
 			"model":      upstream,
 			"max_tokens": 8,
@@ -399,7 +413,13 @@ func (g *Gateway) TestChannel(ctx context.Context, ch *store.Channel, model stri
 	if message == "" {
 		message = http.StatusText(resp.StatusCode)
 	}
-	return TestResult{OK: resp.StatusCode >= 200 && resp.StatusCode < 300, LatencyMS: latency, StatusCode: resp.StatusCode, Message: message}
+	ok = resp.StatusCode >= 200 && resp.StatusCode < 300
+	if ch.Type == "minimax" {
+		// The probe task does not exist, so a validation error still proves
+		// that the endpoint and key are valid; 401/403 do not.
+		ok = ok || resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusUnprocessableEntity
+	}
+	return TestResult{OK: ok, LatencyMS: latency, StatusCode: resp.StatusCode, Message: message}
 }
 
 func (g *Gateway) attemptOpenAI(w http.ResponseWriter, r *http.Request, ch *store.Channel, apiKey, upstream string, raw map[string]any, stream bool, promptTokens int64) outcome {

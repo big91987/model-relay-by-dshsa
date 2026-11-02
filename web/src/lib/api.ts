@@ -11,6 +11,9 @@ import type {
   TokenInput,
   UpstreamModelsInput,
   User,
+  VideoInput,
+  VideosResponse,
+  VideoTask,
 } from './types'
 
 export class ApiError extends Error {
@@ -125,5 +128,11 @@ export const api = {
   },
   models() {
     return request<{ data: ModelInfo[] }>('/api/models')
+  },
+  videos() {
+    return request<VideosResponse>('/api/videos?page_size=50')
+  },
+  createVideo(input: VideoInput) {
+    return request<VideoTask>('/api/videos', { method: 'POST', ...jsonBody(input) })
   },
 }

@@ -34,7 +34,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	if err != nil {
 		t.Fatalf("cipher: %v", err)
 	}
-	cfg := &config.Config{SecretKey: "test-secret"}
+	cfg := &config.Config{SecretKey: "test-secret", DataDir: t.TempDir()}
 	gw := New(cfg, st, cipher, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	_, prefix, hash, _ := auth.GenerateAPIKey()
 	token := &store.Token{

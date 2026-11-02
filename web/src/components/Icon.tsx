@@ -4,6 +4,7 @@ export type IconName =
   | 'dashboard'
   | 'channels'
   | 'models'
+  | 'video'
   | 'key'
   | 'logs'
   | 'plus'
@@ -28,6 +29,8 @@ export type IconName =
   | 'sun'
   | 'moon'
   | 'monitor'
+  | 'download'
+  | 'upload'
 
 const icons: Record<IconName, ReactNode> = {
   dashboard: (
@@ -50,6 +53,12 @@ const icons: Record<IconName, ReactNode> = {
       <path d="m12 2 9 5-9 5-9-5 9-5Z" />
       <path d="m3 12 9 5 9-5" />
       <path d="m3 17 9 5 9-5" />
+    </>
+  ),
+  video: (
+    <>
+      <rect x="2.5" y="5" width="19" height="14" rx="2.5" />
+      <path d="m10 9 5 3-5 3V9Z" />
     </>
   ),
   key: (
@@ -162,6 +171,20 @@ const icons: Record<IconName, ReactNode> = {
     <>
       <rect x="2" y="3" width="20" height="14" rx="2" />
       <path d="M8 21h8M12 17v4" />
+    </>
+  ),
+  download: (
+    <>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <path d="m7 10 5 5 5-5" />
+      <path d="M12 15V3" />
+    </>
+  ),
+  upload: (
+    <>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <path d="m7 8 5-5 5 5" />
+      <path d="M12 3v12" />
     </>
   ),
 }

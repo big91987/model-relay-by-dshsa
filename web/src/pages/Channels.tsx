@@ -3,6 +3,7 @@ import { Icon } from '../components/Icon'
 import { Modal } from '../components/Modal'
 import { EmptyState, ErrorBanner, FormField, PageHeader, Spinner, StatusBadge } from '../components/ui'
 import { api } from '../lib/api'
+import { channelTypeLabel } from '../lib/format'
 import { useToast } from '../lib/toast'
 import type { Channel, ChannelInput, ChannelStatus, ChannelType, UpstreamModelsInput } from '../lib/types'
 
@@ -321,7 +322,7 @@ export default function Channels() {
           <EmptyState
             icon="channels"
             title="No upstream channels"
-            description="Add an OpenAI-compatible or Anthropic provider to start serving models."
+            description="Add an OpenAI-compatible, Anthropic or MiniMax video provider to start serving models."
             action={
               <button className="btn btn-primary" onClick={openCreate}>
                 <Icon name="plus" size={16} /> Add your first channel
@@ -357,7 +358,7 @@ export default function Channels() {
                       </td>
                       <td>
                         <span className={`type-badge type-${channel.type}`}>
-                          {channel.type === 'anthropic' ? 'Anthropic' : 'OpenAI'}
+                          {channelTypeLabel(channel.type)}
                         </span>
                       </td>
                       <td>
@@ -376,10 +377,14 @@ export default function Channels() {
                         P{channel.priority} · W{channel.weight}
                       </td>
                       <td>
-                        <div className="price-cell">
-                          <span>${channel.input_price.toFixed(2)}</span>
-                          <span>${channel.output_price.toFixed(2)}</span>
-                        </div>
+                        {channel.type === 'minimax' ? (
+                          <span className="muted">Not metered</span>
+                        ) : (
+                          <div className="price-cell">
+                            <span>${channel.input_price.toFixed(2)}</span>
+                            <span>${channel.output_price.toFixed(2)}</span>
+                          </div>
+                        )}
                       </td>
                       <td>
                         <div className="status-toggle">
@@ -462,20 +467,25 @@ export default function Channels() {
             >
               <option value="openai">OpenAI-compatible</option>
               <option value="anthropic">Anthropic Messages</option>
+              <option value="minimax">MiniMax H3 (video)</option>
             </select>
           </FormField>
           <FormField
             label="Base URL"
             htmlFor="channel-url"
             wide
-            hint="Include the API version path, e.g. https://api.openai.com/v1"
+            hint={
+              form.type === 'minimax'
+                ? 'MiniMax API root, e.g. https://api.minimax.io'
+                : 'Include the API version path, e.g. https://api.openai.com/v1'
+            }
           >
             <input
               id="channel-url"
               className="input mono"
               value={form.base_url}
               onChange={(event) => setField('base_url', event.target.value)}
-              placeholder="https://api.openai.com/v1"
+              placeholder={form.type === 'minimax' ? 'https://api.minimax.io' : 'https://api.openai.com/v1'}
             />
           </FormField>
           <FormField
@@ -497,22 +507,28 @@ export default function Channels() {
           <FormField
             label="Models"
             htmlFor="channel-models"
-            hint="Upstream model names, separated by commas or new lines. Importing keeps your manual entries."
+            hint={
+              form.type === 'minimax'
+                ? 'MiniMax video models, e.g. MiniMax-H3.'
+                : 'Upstream model names, separated by commas or new lines. Importing keeps your manual entries.'
+            }
             action={
-              <button
-                type="button"
-                className="btn btn-ghost btn-xs"
-                onClick={() => void fetchUpstreamModels()}
-                disabled={fetchingModels || !canFetchModels}
-                title={
-                  canFetchModels
-                    ? 'Fetch the model list from the upstream provider'
-                    : 'Enter the base URL and API key first'
-                }
-              >
-                {fetchingModels ? <Spinner size={13} /> : <Icon name="refresh" size={13} />}
-                {fetchingModels ? 'Fetching…' : 'Fetch models'}
-              </button>
+              form.type === 'minimax' ? undefined : (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-xs"
+                  onClick={() => void fetchUpstreamModels()}
+                  disabled={fetchingModels || !canFetchModels}
+                  title={
+                    canFetchModels
+                      ? 'Fetch the model list from the upstream provider'
+                      : 'Enter the base URL and API key first'
+                  }
+                >
+                  {fetchingModels ? <Spinner size={13} /> : <Icon name="refresh" size={13} />}
+                  {fetchingModels ? 'Fetching…' : 'Fetch models'}
+                </button>
+              )
             }
           >
             <textarea
@@ -521,7 +537,7 @@ export default function Channels() {
               rows={2}
               value={form.models}
               onChange={(event) => setField('models', event.target.value)}
-              placeholder="gpt-4o, gpt-4o-mini"
+              placeholder={form.type === 'minimax' ? 'MiniMax-H3' : 'gpt-4o, gpt-4o-mini'}
             />
           </FormField>
           <FormField
@@ -625,28 +641,32 @@ export default function Channels() {
               onChange={(event) => setField('weight', event.target.value)}
             />
           </FormField>
-          <FormField label="Input price" htmlFor="channel-input-price" hint="USD per 1M prompt tokens.">
-            <input
-              id="channel-input-price"
-              className="input"
-              type="number"
-              min={0}
-              step="0.01"
-              value={form.input_price}
-              onChange={(event) => setField('input_price', event.target.value)}
-            />
-          </FormField>
-          <FormField label="Output price" htmlFor="channel-output-price" hint="USD per 1M completion tokens.">
-            <input
-              id="channel-output-price"
-              className="input"
-              type="number"
-              min={0}
-              step="0.01"
-              value={form.output_price}
-              onChange={(event) => setField('output_price', event.target.value)}
-            />
-          </FormField>
+          {form.type !== 'minimax' ? (
+            <>
+              <FormField label="Input price" htmlFor="channel-input-price" hint="USD per 1M prompt tokens.">
+                <input
+                  id="channel-input-price"
+                  className="input"
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={form.input_price}
+                  onChange={(event) => setField('input_price', event.target.value)}
+                />
+              </FormField>
+              <FormField label="Output price" htmlFor="channel-output-price" hint="USD per 1M completion tokens.">
+                <input
+                  id="channel-output-price"
+                  className="input"
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={form.output_price}
+                  onChange={(event) => setField('output_price', event.target.value)}
+                />
+              </FormField>
+            </>
+          ) : null}
           <FormField label="Status">
             <select
               className="input"
