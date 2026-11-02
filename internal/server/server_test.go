@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -33,9 +34,11 @@ func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 		t.Fatalf("seed admin: %v", err)
 	}
 	cfg := &config.Config{
-		SecretKey:  "test-secret",
-		SessionTTL: time.Hour,
-		Version:    "test",
+		SecretKey:         "test-secret",
+		SessionTTL:        time.Hour,
+		Version:           "test",
+		DataDir:           t.TempDir(),
+		VideoPollInterval: 10 * time.Millisecond,
 	}
 	cipher, err := secretbox.New(cfg.SecretKey)
 	if err != nil {
@@ -273,6 +276,17 @@ func TestFetchUpstreamModelsEndpoint(t *testing.T) {
 		t.Fatalf("unexpected models: %v", fetched.Models)
 	}
 
+	// MiniMax video channels use the provider's OpenAI-compatible model list.
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/channels/upstream-models", map[string]any{
+		"type": "minimax", "base_url": upstream.URL, "api_key": "upstream-key",
+	}, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("fetch minimax models status %d: %s", resp.StatusCode, body)
+	}
+	if err := json.Unmarshal(body, &fetched); err != nil || len(fetched.Models) == 0 {
+		t.Fatalf("decode minimax models: %v (%s)", err, body)
+	}
+
 	// A new channel needs its key in the request.
 	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/channels/upstream-models", map[string]any{
 		"type": "openai", "base_url": upstream.URL + "/v1",
@@ -333,5 +347,125 @@ func TestFetchUpstreamModelsEndpoint(t *testing.T) {
 	}, nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown channel status %d: %s", resp.StatusCode, body)
+	}
+}
+
+func TestMinimaxVideoFlow(t *testing.T) {
+	ts, _ := newTestServer(t)
+	videoBytes := []byte("\x00\x00\x00\x18ftypmp42server-test-video")
+	firstFrame := "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lv0nAAAAAElFTkSuQmCC"
+	var upstream *httptest.Server
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v2/video_generation":
+			if r.Header.Get("Authorization") != "Bearer upstream-key" {
+				t.Errorf("unexpected upstream auth: %q", r.Header.Get("Authorization"))
+			}
+			var body struct {
+				Model   string `json:"model"`
+				Content []struct {
+					Type string `json:"type"`
+					Role string `json:"role"`
+				} `json:"content"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.Model != "MiniMax-H3" || len(body.Content) != 2 || body.Content[1].Role != "first_frame" {
+				t.Errorf("unexpected upstream body: %+v", body)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"task_id":"task-server-1"}`)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v2/query/video_generation/"):
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"task": map[string]any{
+				"id": "task-server-1", "model": "MiniMax-H3", "status": "succeeded",
+				"content":    map[string]any{"url": upstream.URL + "/media.mp4"},
+				"resolution": "768P", "duration": 5, "ratio": "adaptive",
+			}})
+		case r.Method == http.MethodGet && r.URL.Path == "/media.mp4":
+			w.Header().Set("Content-Type", "video/mp4")
+			_, _ = w.Write(videoBytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	client := newClient(t)
+	if resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/auth/login", map[string]any{"username": "admin", "password": "admin-pass"}, nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status %d: %s", resp.StatusCode, body)
+	}
+	resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/channels", map[string]any{
+		"name": "minimax", "type": "minimax", "base_url": upstream.URL, "api_key": "upstream-key",
+		"models": []string{"MiniMax-H3"}, "priority": 0, "weight": 1, "status": "enabled",
+	}, nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create channel status %d: %s", resp.StatusCode, body)
+	}
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+"/api/models", nil, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"minimax"`) || !strings.Contains(string(body), `"MiniMax-H3"`) {
+		t.Fatalf("models response %d: %s", resp.StatusCode, body)
+	}
+
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/videos", map[string]any{
+		"model": "MiniMax-H3", "prompt": "A tiny server-generated clip", "first_frame": firstFrame,
+		"resolution": "768P", "duration": 5, "ratio": "16:9",
+	}, nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create video status %d: %s", resp.StatusCode, body)
+	}
+	var created struct {
+		ID         int64  `json:"id"`
+		Status     string `json:"status"`
+		Mode       string `json:"mode"`
+		VideoReady bool   `json:"video_ready"`
+	}
+	if err := json.Unmarshal(body, &created); err != nil {
+		t.Fatalf("decode created video: %v", err)
+	}
+	if created.ID == 0 || created.Status != "queued" || created.Mode != "first_frame" || created.VideoReady {
+		t.Fatalf("unexpected created task: %s", body)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	ready := false
+	for time.Now().Before(deadline) {
+		resp, body = doJSON(t, client, http.MethodGet, ts.URL+fmt.Sprintf("/api/videos/%d", created.ID), nil, nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("get video status %d: %s", resp.StatusCode, body)
+		}
+		var task struct {
+			Status     string `json:"status"`
+			VideoReady bool   `json:"video_ready"`
+			ContentURL string `json:"content_url"`
+		}
+		_ = json.Unmarshal(body, &task)
+		if task.Status == "succeeded" && task.VideoReady {
+			ready = true
+			if task.ContentURL != fmt.Sprintf("/api/videos/%d/content", created.ID) {
+				t.Fatalf("unexpected content URL: %s", body)
+			}
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatal("video task did not become ready")
+	}
+
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+fmt.Sprintf("/api/videos/%d/content", created.ID), nil, nil)
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(body, videoBytes) {
+		t.Fatalf("content status %d body %q", resp.StatusCode, body)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "video/mp4" {
+		t.Fatalf("content type = %q", got)
+	}
+	resp, _ = doJSON(t, client, http.MethodGet, ts.URL+fmt.Sprintf("/api/videos/%d/content?download=1", created.ID), nil, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Disposition"), "attachment") {
+		t.Fatalf("download response status %d disposition %q", resp.StatusCode, resp.Header.Get("Content-Disposition"))
+	}
+
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+"/api/videos", nil, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"MiniMax-H3"`) {
+		t.Fatalf("list videos status %d: %s", resp.StatusCode, body)
 	}
 }

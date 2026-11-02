@@ -1,7 +1,10 @@
-import json, sys, time
+import json, os, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 19090
+MEDIA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media", "demo.mp4")
+VIDEO_TASKS = {}
+VIDEO_LOCK = threading.Lock()
 
 CONTENT = {
     "gpt-4o": "Model Relay routes your request through the highest-priority healthy channel and records token usage for every call. You can inspect traffic, spend and latency in the console.",
@@ -23,6 +26,10 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
     def do_GET(self):
+        if self.path.startswith("/v2/query/video_generation/"):
+            return self.query_video(self.path.rsplit("/", 1)[-1])
+        if self.path.startswith("/media/") and self.path.endswith(".mp4"):
+            return self.media()
         if self.path.endswith("/models"):
             return self.models()
         self.send_json(404, {"error": {"message": "not found"}})
@@ -52,7 +59,76 @@ class Handler(BaseHTTPRequestHandler):
             return self.embeddings(body)
         if self.path.endswith("/messages"):
             return self.messages(body)
+        if self.path.endswith("/v2/video_generation"):
+            return self.create_video(body)
         self.send_json(404, {"error": {"message": "not found"}})
+
+    def create_video(self, body):
+        if self.headers.get("Authorization") != "Bearer upstream-key":
+            return self.send_json(401, {"type": "error", "error": {
+                "type": "authorized_error", "message": "login fail (1004)", "http_code": "401"}})
+        with VIDEO_LOCK:
+            task_id = "task-%d" % (len(VIDEO_TASKS) + 1)
+            VIDEO_TASKS[task_id] = {
+                "body": body,
+                "queries": 0,
+                "created_at": int(time.time()),
+            }
+        sys.stderr.write("mock minimax task %s: %s\n" % (task_id, body.get("model")))
+        self.send_json(200, {"task_id": task_id})
+
+    def query_video(self, task_id):
+        with VIDEO_LOCK:
+            task = VIDEO_TASKS.get(task_id)
+            if task is None:
+                return self.send_json(400, {"type": "error", "error": {
+                    "type": "bad_request_error", "message": "invalid task_id (2013)", "http_code": "400"}})
+            task["queries"] += 1
+            queries = task["queries"]
+            body = task["body"]
+            created_at = task["created_at"]
+        status = "running" if queries < 2 else "succeeded"
+        prompt = next((item.get("text", "") for item in body.get("content", []) if item.get("type") == "text"), "")
+        if status == "succeeded" and "fail" in prompt.lower():
+            status = "failed"
+        payload = {
+            "id": task_id,
+            "model": body.get("model", "MiniMax-H3"),
+            "status": status,
+            "created_at": created_at,
+            "updated_at": int(time.time()),
+            "resolution": body.get("resolution", "768P"),
+            "duration": body.get("duration", 5),
+            "ratio": body.get("ratio", "16:9"),
+            "task_type": "generation",
+            "modality": "video",
+        }
+        if status == "succeeded":
+            payload["content"] = {"url": "http://127.0.0.1:%d/media/%s.mp4" % (PORT, task_id)}
+            payload["usage"] = {
+                "total_seconds": body.get("duration", 5),
+                "input_seconds": 0,
+                "output_seconds": body.get("duration", 5),
+                "input_image_count": sum(1 for item in body.get("content", []) if item.get("type") == "image_url"),
+                "total_tokens": 25000,
+                "prompt_tokens": 1500,
+                "completion_tokens": 23500,
+            }
+        elif status == "failed":
+            payload["error"] = {"code": "1026", "message": "video description contains sensitive content"}
+        self.send_json(200, {"task": payload})
+
+    def media(self):
+        try:
+            with open(MEDIA_PATH, "rb") as handle:
+                data = handle.read()
+        except OSError:
+            return self.send_json(404, {"error": {"message": "demo video is missing"}})
+        self.send_response(200)
+        self.send_header("Content-Type", "video/mp4")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def chat(self, body):
         model = body.get("model", "unknown")

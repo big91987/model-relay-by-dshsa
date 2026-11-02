@@ -20,6 +20,12 @@ export function formatPrice(value: number): string {
   return `$${value.toFixed(2)}`
 }
 
+export function channelTypeLabel(type: string): string {
+  if (type === 'anthropic') return 'Anthropic'
+  if (type === 'minimax') return 'MiniMax H3'
+  return 'OpenAI'
+}
+
 export function formatTime(epoch: number): string {
   return new Date(epoch * 1000).toLocaleString('en-US', {
     month: 'short',

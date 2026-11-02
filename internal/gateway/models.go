@@ -19,6 +19,16 @@ const (
 	maxModelsBody      = 4 << 20
 )
 
+// MiniMax's OpenAI-compatible model list only returns language models, but the
+// V2 video endpoint also accepts the H3 family. Add those so the imported
+// catalog is complete for the video console.
+var minimaxVideoModels = []string{
+	"MiniMax-H3",
+	"MiniMax-H3-Highspeed",
+	"MiniMax-H3-Lite",
+	"MiniMax-H3-Max",
+}
+
 // FetchModels asks an upstream provider for the models it serves.
 //
 // OpenAI-compatible providers expose GET {base}/models with a bearer token.
@@ -38,6 +48,14 @@ func (g *Gateway) FetchModels(ctx context.Context, channelType, baseURL, apiKey 
 	afterID := ""
 	for page := 0; page < maxModelsPages; page++ {
 		endpoint := base + "/models"
+		if channelType == "minimax" {
+			// MiniMax exposes its OpenAI-compatible model list below /v1 while
+			// its video tasks live at the API root.
+			endpoint = base + "/v1/models"
+			if strings.HasSuffix(base, "/v1") {
+				endpoint = base + "/models"
+			}
+		}
 		if afterID != "" {
 			endpoint += "?after_id=" + url.QueryEscape(afterID)
 		}
@@ -81,6 +99,15 @@ func (g *Gateway) FetchModels(ctx context.Context, channelType, baseURL, apiKey 
 			break
 		}
 		afterID = lastID
+	}
+	if channelType == "minimax" {
+		for _, id := range minimaxVideoModels {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			models = append(models, id)
+		}
 	}
 	sort.Strings(models)
 	return models, nil

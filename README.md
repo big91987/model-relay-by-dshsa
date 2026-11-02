@@ -7,7 +7,8 @@ A self-hosted model gateway written in Go, with a React admin console. It expose
 ## Features
 
 - **OpenAI-compatible relay** — `POST /v1/chat/completions` (streaming and non-streaming), `POST /v1/embeddings`, `GET /v1/models`.
-- **Two upstream protocols** — OpenAI-compatible channels (OpenAI, DeepSeek, Moonshot, Qwen, vLLM, Ollama, …) and Anthropic Messages channels, translated to and from the OpenAI format.
+- **Two chat upstream protocols** — OpenAI-compatible channels (OpenAI, DeepSeek, Moonshot, Qwen, vLLM, Ollama, …) and Anthropic Messages channels, translated to and from the OpenAI format.
+- **MiniMax-H3 video generation** — text-to-video and first-frame image-to-video from the console, with asynchronous tasks, live status, video preview and MP4 download.
 - **Channel routing** — priority first, weighted load balancing inside a priority, public-to-upstream model aliases, and automatic failover on connection errors, `401`, `403`, `404`, `429` and `5xx`.
 - **Upstream model discovery** — fetch the provider's model list in the channel form, tick the models to import, and keep manual entries and public aliases.
 - **Gateway keys** — per-key USD quota, model allowlists, requests-per-minute limit, expiry, enable/disable, and a one-time plaintext reveal at creation.
@@ -57,6 +58,18 @@ claude-sonnet-4=claude-sonnet-4-20250514
 
 Clients keep using the OpenAI chat format; the gateway translates requests and Anthropic SSE events in both directions. Public model names in mappings are also listed by `/v1/models`.
 
+### MiniMax-H3 video generation
+
+Add a channel with protocol **MiniMax H3 (video)**, base URL `https://api.minimax.io` (or `https://api.minimaxi.com` for the China platform) and model `MiniMax-H3` (or one of the H3 variants). The API key is sent as `Authorization: Bearer …` to the MiniMax V2 video endpoints. Video channels are separate from chat routing, so video models are not exposed by `/v1/chat/completions` or `/v1/models`. The provider's OpenAI-compatible model list omits video models, so **Fetch models** adds the H3 family (`MiniMax-H3`, `MiniMax-H3-Highspeed`, `MiniMax-H3-Lite`, `MiniMax-H3-Max`) alongside the language models it returns; the **Video** page lists only the H3 family.
+
+Open **Video** in the console to:
+
+1. pick a MiniMax-H3 model and enter a prompt;
+2. optionally attach a first-frame image (PNG, JPEG, WEBP, HEIC or HEIF, up to 30 MB) for image-to-video;
+3. choose resolution (768P/2K for `MiniMax-H3`), duration (4–15 s) and, for text-to-video, an aspect ratio.
+
+The gateway submits the asynchronous task, polls it in the background, and stores the finished MP4 under `DATA_DIR/videos/`. Finished videos can be previewed in the browser and downloaded with the **Download MP4** action. Tasks left in flight are resumed after a restart. Video generation is console-only for now: it is not metered per gateway key and does not appear in request logs.
+
 ### Docker
 
 ```bash
@@ -75,12 +88,13 @@ For Compose, create a `.env` file containing `SECRET_KEY` and `ADMIN_PASSWORD` (
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PORT` | `8080` | HTTP listen port. |
-| `DATA_DIR` | `./data` | Directory for `gateway.db` (created automatically). |
+| `DATA_DIR` | `./data` | Directory for `gateway.db` and downloaded videos (created automatically). |
 | `SECRET_KEY` | `dev-secret-change-me` | Signs admin sessions and encrypts upstream API keys with AES-256-GCM. Use a stable secret. |
 | `ADMIN_USERNAME` | `admin` | Admin username created on first boot. |
 | `ADMIN_PASSWORD` | `admin123` | Admin password created on first boot (minimum 6 characters). |
 | `SESSION_TTL_HOURS` | `24` | Admin session lifetime. |
 | `REQUEST_TIMEOUT_SECONDS` | `300` | Timeout for non-streaming upstream requests. Streaming is bounded by the client connection. |
+| `VIDEO_POLL_SECONDS` | `8` | How often asynchronous MiniMax video tasks are polled. |
 
 Changing `SECRET_KEY` invalidates admin sessions and makes existing channel keys undecryptable — re-enter the upstream keys after rotating it.
 
@@ -94,7 +108,11 @@ Changing `SECRET_KEY` invalidates admin sessions and makes existing channel keys
 | --- | --- |
 | ![API keys](docs/screenshots/tokens.png) | ![Request logs](docs/screenshots/logs.png) |
 
-The **Models** page shows the public catalog, serving channels and the lowest configured price per model. The screenshots above use the local mock upstream in `scripts/mock-upstream.py` (`python3 scripts/mock-upstream.py 19090`), so `127.0.0.1` URLs are demo data rather than real providers.
+| Video generation | MiniMax model import |
+| --- | --- |
+| ![Video generation](docs/screenshots/video-generation.png) | ![MiniMax H3 channel](docs/screenshots/video-channel.png) |
+
+The **Models** page shows the public catalog, serving channels and the lowest configured price per model. The screenshots above use the local mock upstream in `scripts/mock-upstream.py` (`python3 scripts/mock-upstream.py 19090`), so `127.0.0.1` URLs are demo data rather than real providers. The mock also answers MiniMax video create/query calls and serves `scripts/media/demo.mp4` for local previews; the video screenshot additionally includes one real MiniMax-H3 generation.
 
 Use the theme control in the top bar, or on the sign-in screen, to switch between light, dark and follow-system themes. The console remembers the selection in the browser.
 
@@ -130,6 +148,9 @@ Admin endpoints use the `mr_session` HttpOnly cookie created by `POST /api/auth/
 | `PUT/DELETE /api/tokens/{id}` | session | Update/delete a key. |
 | `GET /api/logs` | session | Paginated logs; filters: `model`, `status`, `token_id`, `start`, `end`, `page`, `page_size`. |
 | `GET /api/models` | session | Model catalog with channels, protocols and prices. |
+| `GET/POST /api/videos` | session | List video tasks / submit a MiniMax-H3 generation task. |
+| `GET /api/videos/{id}` | session | One video task with status and metadata. |
+| `GET /api/videos/{id}/content` | session | Preview the stored MP4; add `?download=1` for an attachment. |
 | `GET /v1/models` | gateway key | OpenAI model list, filtered by the key. |
 | `POST /v1/chat/completions` | gateway key | OpenAI-compatible chat completions, streaming supported. |
 | `POST /v1/embeddings` | gateway key | Embeddings passthrough for OpenAI-compatible channels. |
@@ -154,7 +175,7 @@ Project layout:
 cmd/server/            entrypoint
 internal/auth/         password hashing, API keys, session JWTs
 internal/config/       environment configuration
-internal/gateway/      relay, routing, OpenAI/Anthropic adapters, accounting
+internal/gateway/      relay, routing, OpenAI/Anthropic adapters, MiniMax video tasks, accounting
 internal/secretbox/    AES-GCM encryption for upstream keys
 internal/server/       HTTP API, middleware, static console
 internal/store/        SQLite schema and queries
@@ -170,6 +191,7 @@ docs/screenshots/      console screenshots used in this README
 - The default `SECRET_KEY` and `ADMIN_PASSWORD` are development values. Use a long random secret and a strong password, terminate TLS in front of the gateway, and treat `SECRET_KEY` as a credential.
 - Upstream channel URLs are configured by an authenticated admin. The gateway will fetch whatever URL is configured, so restrict admin access accordingly.
 - The Anthropic adapter translates text, image data URLs, tool calls and tool results. Remote image URLs are not converted. OpenAI's Responses API, audio, rerank and native Anthropic endpoints are out of scope.
+- MiniMax-H3 video tasks are managed from the admin console; there is no gateway-key video API and video generation is not charged against key quotas. Task history and downloaded MP4 files stay in `DATA_DIR` until removed manually.
 - Cost accounting trusts the configured prices and upstream token counts; it is an operational estimate, not an invoice.
 - Channel failover is retried for listed transient statuses. A `400`/`422` from an upstream is returned to the client because it usually reflects the request rather than channel health.
 

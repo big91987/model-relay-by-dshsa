@@ -33,6 +33,29 @@ func TestFetchModelsOpenAI(t *testing.T) {
 	}
 }
 
+func TestFetchModelsMinimax(t *testing.T) {
+	env := newTestEnv(t)
+	var gotPath, gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotAuth = r.URL.Path, r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"MiniMax-M3"},{"id":"MiniMax-H3"},{"id":"MiniMax-H3-Max"}]}`)
+	}))
+	defer upstream.Close()
+
+	models, err := env.gw.FetchModels(context.Background(), "minimax", upstream.URL, "sk-mini")
+	if err != nil {
+		t.Fatalf("fetch models: %v", err)
+	}
+	if gotPath != "/v1/models" || gotAuth != "Bearer sk-mini" {
+		t.Fatalf("upstream request path=%q auth=%q", gotPath, gotAuth)
+	}
+	want := []string{"MiniMax-H3", "MiniMax-H3-Highspeed", "MiniMax-H3-Lite", "MiniMax-H3-Max", "MiniMax-M3"}
+	if !reflect.DeepEqual(models, want) {
+		t.Fatalf("models = %v, want %v", models, want)
+	}
+}
+
 func TestFetchModelsAnthropicPagination(t *testing.T) {
 	env := newTestEnv(t)
 	var afterIDs []string

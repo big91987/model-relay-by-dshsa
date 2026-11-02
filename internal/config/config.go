@@ -11,15 +11,16 @@ import (
 
 // Config holds every runtime setting of the gateway.
 type Config struct {
-	Port           int
-	DataDir        string
-	DBPath         string
-	SecretKey      string
-	AdminUsername  string
-	AdminPassword  string
-	SessionTTL     time.Duration
-	RequestTimeout time.Duration
-	Version        string
+	Port              int
+	DataDir           string
+	DBPath            string
+	SecretKey         string
+	AdminUsername     string
+	AdminPassword     string
+	SessionTTL        time.Duration
+	RequestTimeout    time.Duration
+	VideoPollInterval time.Duration
+	Version           string
 
 	// UsingDefaults reports settings still on insecure development defaults.
 	UsingDefaultSecret   bool
@@ -29,14 +30,15 @@ type Config struct {
 // Load reads configuration from environment variables, applying safe defaults.
 func Load(version string) (*Config, error) {
 	cfg := &Config{
-		Port:           envInt("PORT", 8080),
-		DataDir:        env("DATA_DIR", "./data"),
-		SecretKey:      env("SECRET_KEY", ""),
-		AdminUsername:  env("ADMIN_USERNAME", "admin"),
-		AdminPassword:  env("ADMIN_PASSWORD", ""),
-		SessionTTL:     time.Duration(envInt("SESSION_TTL_HOURS", 24)) * time.Hour,
-		RequestTimeout: time.Duration(envInt("REQUEST_TIMEOUT_SECONDS", 300)) * time.Second,
-		Version:        version,
+		Port:              envInt("PORT", 8080),
+		DataDir:           env("DATA_DIR", "./data"),
+		SecretKey:         env("SECRET_KEY", ""),
+		AdminUsername:     env("ADMIN_USERNAME", "admin"),
+		AdminPassword:     env("ADMIN_PASSWORD", ""),
+		SessionTTL:        time.Duration(envInt("SESSION_TTL_HOURS", 24)) * time.Hour,
+		RequestTimeout:    time.Duration(envInt("REQUEST_TIMEOUT_SECONDS", 300)) * time.Second,
+		VideoPollInterval: time.Duration(envInt("VIDEO_POLL_SECONDS", 8)) * time.Second,
+		Version:           version,
 	}
 	if cfg.Port <= 0 || cfg.Port > 65535 {
 		return nil, fmt.Errorf("invalid PORT %d", cfg.Port)

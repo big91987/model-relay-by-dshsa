@@ -113,6 +113,27 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_logs_created_at ON logs(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_token_id ON logs(token_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_model ON logs(model)`,
+		`CREATE TABLE IF NOT EXISTS video_tasks (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			upstream_task_id TEXT NOT NULL DEFAULT '',
+			channel_id INTEGER NOT NULL DEFAULT 0,
+			channel_name TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			upstream_model TEXT NOT NULL DEFAULT '',
+			prompt TEXT NOT NULL DEFAULT '',
+			mode TEXT NOT NULL DEFAULT 'text',
+			resolution TEXT NOT NULL DEFAULT '',
+			duration INTEGER NOT NULL DEFAULT 0,
+			ratio TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'queued',
+			error TEXT NOT NULL DEFAULT '',
+			video_path TEXT NOT NULL DEFAULT '',
+			remote_url TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_video_tasks_created_at ON video_tasks(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_video_tasks_status ON video_tasks(status)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -506,6 +527,123 @@ func scanLog(row interface{ Scan(dest ...any) error }) (*Log, error) {
 		return nil, err
 	}
 	return &l, nil
+}
+
+// VideoTask is one asynchronous MiniMax-H3 generation task.
+type VideoTask struct {
+	ID             int64  `json:"id"`
+	UpstreamTaskID string `json:"upstream_task_id"`
+	ChannelID      int64  `json:"channel_id"`
+	ChannelName    string `json:"channel_name"`
+	Model          string `json:"model"`
+	UpstreamModel  string `json:"upstream_model"`
+	Prompt         string `json:"prompt"`
+	Mode           string `json:"mode"`
+	Resolution     string `json:"resolution"`
+	Duration       int    `json:"duration"`
+	Ratio          string `json:"ratio"`
+	Status         string `json:"status"`
+	Error          string `json:"error"`
+	VideoPath      string `json:"-"`
+	RemoteURL      string `json:"-"`
+	CreatedAt      int64  `json:"created_at"`
+	UpdatedAt      int64  `json:"updated_at"`
+}
+
+const videoTaskColumns = `id, upstream_task_id, channel_id, channel_name, model, upstream_model, prompt, mode, resolution, duration, ratio, status, error, video_path, remote_url, created_at, updated_at`
+
+// CreateVideoTask inserts a video task and sets its id.
+func (s *Store) CreateVideoTask(v *VideoTask) error {
+	now := now()
+	v.CreatedAt, v.UpdatedAt = now, now
+	res, err := s.db.Exec(`INSERT INTO video_tasks (upstream_task_id, channel_id, channel_name, model, upstream_model, prompt, mode,
+		resolution, duration, ratio, status, error, video_path, remote_url, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		v.UpstreamTaskID, v.ChannelID, v.ChannelName, v.Model, v.UpstreamModel, v.Prompt, v.Mode,
+		v.Resolution, v.Duration, v.Ratio, v.Status, v.Error, v.VideoPath, v.RemoteURL, v.CreatedAt, v.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	v.ID, err = res.LastInsertId()
+	return err
+}
+
+// UpdateVideoTask persists the mutable state of a video task.
+func (s *Store) UpdateVideoTask(v *VideoTask) error {
+	v.UpdatedAt = now()
+	_, err := s.db.Exec(`UPDATE video_tasks SET status=?, error=?, video_path=?, remote_url=?, resolution=?, duration=?, ratio=?, updated_at=? WHERE id=?`,
+		v.Status, v.Error, v.VideoPath, v.RemoteURL, v.Resolution, v.Duration, v.Ratio, v.UpdatedAt, v.ID)
+	return err
+}
+
+// GetVideoTask returns a video task by id.
+func (s *Store) GetVideoTask(id int64) (*VideoTask, error) {
+	row := s.db.QueryRow(`SELECT `+videoTaskColumns+` FROM video_tasks WHERE id = ?`, id)
+	v, err := scanVideoTask(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return v, err
+}
+
+// ListVideoTasks returns one page of video tasks, newest first, with the total count.
+func (s *Store) ListVideoTasks(page, pageSize int) ([]VideoTask, int64, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	var total int64
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM video_tasks`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.Query(`SELECT `+videoTaskColumns+` FROM video_tasks ORDER BY id DESC LIMIT ? OFFSET ?`,
+		pageSize, (page-1)*pageSize)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := make([]VideoTask, 0)
+	for rows.Next() {
+		v, err := scanVideoTask(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, *v)
+	}
+	return out, total, rows.Err()
+}
+
+// ListResumableVideoTasks returns tasks whose upstream work should still be polled
+// or whose generated video still has to be downloaded.
+func (s *Store) ListResumableVideoTasks() ([]VideoTask, error) {
+	rows, err := s.db.Query(`SELECT ` + videoTaskColumns + ` FROM video_tasks
+		WHERE status IN ('queued', 'running') OR (status = 'succeeded' AND video_path = '')
+		ORDER BY id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]VideoTask, 0)
+	for rows.Next() {
+		v, err := scanVideoTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *v)
+	}
+	return out, rows.Err()
+}
+
+func scanVideoTask(row interface{ Scan(dest ...any) error }) (*VideoTask, error) {
+	var v VideoTask
+	err := row.Scan(&v.ID, &v.UpstreamTaskID, &v.ChannelID, &v.ChannelName, &v.Model, &v.UpstreamModel, &v.Prompt, &v.Mode,
+		&v.Resolution, &v.Duration, &v.Ratio, &v.Status, &v.Error, &v.VideoPath, &v.RemoteURL, &v.CreatedAt, &v.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
 }
 
 // Totals aggregates request counts, token usage and spend.

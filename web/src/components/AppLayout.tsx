@@ -9,6 +9,7 @@ const navigation: { to: string; label: string; icon: IconName }[] = [
   { to: '/dashboard', label: 'Dashboard', icon: 'dashboard' },
   { to: '/channels', label: 'Channels', icon: 'channels' },
   { to: '/models', label: 'Models', icon: 'models' },
+  { to: '/videos', label: 'Video', icon: 'video' },
   { to: '/tokens', label: 'API keys', icon: 'key' },
   { to: '/logs', label: 'Logs', icon: 'logs' },
 ]
@@ -17,6 +18,7 @@ const titles: Record<string, string> = {
   '/dashboard': 'Dashboard',
   '/channels': 'Channels',
   '/models': 'Models',
+  '/videos': 'Video generation',
   '/tokens': 'API keys',
   '/logs': 'Logs',
 }

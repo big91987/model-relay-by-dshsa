@@ -65,6 +65,21 @@ func orderCandidates(channels []store.Channel, model string) []candidate {
 	return out
 }
 
+// isChatChannel reports whether a channel type serves chat completions.
+func isChatChannel(typ string) bool { return typ == "openai" || typ == "anthropic" }
+
+// chatCandidates keeps only channels that speak a chat-capable protocol.
+// MiniMax video channels are served by the separate video task flow.
+func chatCandidates(candidates []candidate) []candidate {
+	out := make([]candidate, 0, len(candidates))
+	for _, cand := range candidates {
+		if isChatChannel(cand.channel.Type) {
+			out = append(out, cand)
+		}
+	}
+	return out
+}
+
 type rateLimiter struct {
 	mu   sync.Mutex
 	hits map[int64][]time.Time

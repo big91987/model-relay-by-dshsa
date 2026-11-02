@@ -6,7 +6,7 @@ export interface User {
   created_at: number
 }
 
-export type ChannelType = 'openai' | 'anthropic'
+export type ChannelType = 'openai' | 'anthropic' | 'minimax'
 export type ChannelStatus = 'enabled' | 'disabled'
 
 export interface Channel {
@@ -170,4 +170,43 @@ export interface ApiStatus {
   name: string
   version: string
   uptime_seconds: number
+}
+
+export type VideoTaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+export type VideoMode = 'text' | 'first_frame'
+
+export interface VideoTask {
+  id: number
+  upstream_task_id: string
+  channel_id: number
+  channel_name: string
+  model: string
+  upstream_model: string
+  prompt: string
+  mode: VideoMode
+  resolution: string
+  duration: number
+  ratio: string
+  status: VideoTaskStatus
+  error: string
+  video_ready: boolean
+  content_url?: string
+  created_at: number
+  updated_at: number
+}
+
+export interface VideoInput {
+  model: string
+  prompt: string
+  first_frame?: string
+  resolution: string
+  duration: number
+  ratio: string
+}
+
+export interface VideosResponse {
+  items: VideoTask[]
+  total: number
+  page: number
+  page_size: number
 }
