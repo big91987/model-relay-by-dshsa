@@ -22,8 +22,11 @@ const (
 	maxVideoPrompt   = 7000
 	maxVideoResponse = 1 << 20
 	maxVideoDownload = 512 << 20
-	videoPollTimeout = 45 * time.Minute
-	maxPollFailures  = 5
+	maxFirstFrame    = 30 << 20
+	// maxFirstFrameData is the base64 length ceiling for a 30 MiB image.
+	maxFirstFrameData = (maxFirstFrame + 2) / 3 * 4
+	videoPollTimeout  = 45 * time.Minute
+	maxPollFailures   = 5
 )
 
 // firstFrameDataURL matches the image data URIs MiniMax-H3 accepts as a first frame.
@@ -201,6 +204,9 @@ func normalizeVideoRequest(req *VideoRequest) error {
 	if req.FirstFrame != "" {
 		if !firstFrameDataURL.MatchString(req.FirstFrame) {
 			return errors.New("first_frame must be a base64 image data URL (PNG, JPEG, WEBP, HEIC or HEIF)")
+		}
+		if marker := strings.Index(req.FirstFrame, ";base64,"); marker < 0 || len(req.FirstFrame)-marker-len(";base64,") > maxFirstFrameData {
+			return errors.New("first_frame must be 30 MiB or smaller")
 		}
 		// Image-to-video derives its aspect ratio from the first frame.
 		req.Ratio = "adaptive"

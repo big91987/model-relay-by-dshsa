@@ -61,7 +61,7 @@ function VideoCard({ task }: { task: VideoTask }) {
           {task.status === 'failed' || task.status === 'cancelled' ? (
             <Icon name="alert" size={22} />
           ) : task.status === 'succeeded' ? (
-            <Icon name="download" size={22} />
+            task.error ? <Icon name="alert" size={22} /> : <Icon name="download" size={22} />
           ) : (
             <Spinner size={22} />
           )}
@@ -69,7 +69,9 @@ function VideoCard({ task }: { task: VideoTask }) {
             {task.status === 'failed' || task.status === 'cancelled'
               ? 'Generation failed'
               : task.status === 'succeeded'
-                ? 'Video is being downloaded'
+                ? task.error
+                  ? 'Generated, but not stored locally'
+                  : 'Video is being downloaded'
                 : 'Generating video…'}
           </span>
         </div>
