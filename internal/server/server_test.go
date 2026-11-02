@@ -276,6 +276,17 @@ func TestFetchUpstreamModelsEndpoint(t *testing.T) {
 		t.Fatalf("unexpected models: %v", fetched.Models)
 	}
 
+	// MiniMax video channels use the provider's OpenAI-compatible model list.
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/channels/upstream-models", map[string]any{
+		"type": "minimax", "base_url": upstream.URL, "api_key": "upstream-key",
+	}, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("fetch minimax models status %d: %s", resp.StatusCode, body)
+	}
+	if err := json.Unmarshal(body, &fetched); err != nil || len(fetched.Models) == 0 {
+		t.Fatalf("decode minimax models: %v (%s)", err, body)
+	}
+
 	// A new channel needs its key in the request.
 	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/channels/upstream-models", map[string]any{
 		"type": "openai", "base_url": upstream.URL + "/v1",

@@ -476,7 +476,7 @@ export default function Channels() {
             wide
             hint={
               form.type === 'minimax'
-                ? 'MiniMax API root, e.g. https://api.minimax.io'
+                ? 'MiniMax API root, e.g. https://api.minimax.io or https://api.minimaxi.com'
                 : 'Include the API version path, e.g. https://api.openai.com/v1'
             }
           >
@@ -509,26 +509,24 @@ export default function Channels() {
             htmlFor="channel-models"
             hint={
               form.type === 'minimax'
-                ? 'MiniMax video models, e.g. MiniMax-H3.'
+                ? 'MiniMax models, e.g. MiniMax-H3. Fetch the live list and keep your manual entries.'
                 : 'Upstream model names, separated by commas or new lines. Importing keeps your manual entries.'
             }
             action={
-              form.type === 'minimax' ? undefined : (
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-xs"
-                  onClick={() => void fetchUpstreamModels()}
-                  disabled={fetchingModels || !canFetchModels}
-                  title={
-                    canFetchModels
-                      ? 'Fetch the model list from the upstream provider'
-                      : 'Enter the base URL and API key first'
-                  }
-                >
-                  {fetchingModels ? <Spinner size={13} /> : <Icon name="refresh" size={13} />}
-                  {fetchingModels ? 'Fetching…' : 'Fetch models'}
-                </button>
-              )
+              <button
+                type="button"
+                className="btn btn-ghost btn-xs"
+                onClick={() => void fetchUpstreamModels()}
+                disabled={fetchingModels || !canFetchModels}
+                title={
+                  canFetchModels
+                    ? 'Fetch the model list from the upstream provider'
+                    : 'Enter the base URL and API key first'
+                }
+              >
+                {fetchingModels ? <Spinner size={13} /> : <Icon name="refresh" size={13} />}
+                {fetchingModels ? 'Fetching…' : 'Fetch models'}
+              </button>
             }
           >
             <textarea
@@ -551,7 +549,7 @@ export default function Channels() {
               rows={2}
               value={form.mapping}
               onChange={(event) => setField('mapping', event.target.value)}
-              placeholder="claude-sonnet=claude-3-7-sonnet-latest"
+              placeholder={form.type === 'minimax' ? 'my-video=MiniMax-H3' : 'claude-sonnet=claude-3-7-sonnet-latest'}
             />
           </FormField>
           {modelsError ? (

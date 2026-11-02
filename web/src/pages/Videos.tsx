@@ -18,6 +18,10 @@ function resolutionOptionsFor(model: string): string[] {
   return ['768P', '2K']
 }
 
+function isVideoModel(model: ModelInfo): boolean {
+  return model.types.includes('minimax') && /^MiniMax-H3(?:$|[-_.])/i.test(model.id)
+}
+
 function statusLabel(status: VideoTaskStatus): string {
   switch (status) {
     case 'queued':
@@ -121,7 +125,7 @@ export default function Videos() {
   const [firstFrame, setFirstFrame] = useState('')
   const [frameName, setFrameName] = useState('')
 
-  const videoModels = useMemo(() => models.filter((item) => item.types.includes('minimax')), [models])
+  const videoModels = useMemo(() => models.filter(isVideoModel), [models])
   const resolutionOptions = resolutionOptionsFor(model)
   const pending = tasks.some(
     (task) =>
@@ -276,8 +280,8 @@ export default function Videos() {
             {videoModels.length === 0 ? (
               <EmptyState
                 icon="video"
-                title="No MiniMax video channel"
-                description="Add a channel with the MiniMax H3 protocol and a MiniMax-H3 model, then come back here to generate videos."
+                title="No MiniMax-H3 model"
+                description="Add or import a MiniMax-H3 model on a MiniMax channel, then come back here to generate videos. Other MiniMax model families are not part of this video workflow yet."
                 action={
                   <Link className="btn btn-primary" to="/channels">
                     <Icon name="plus" size={16} /> Add a channel

@@ -60,7 +60,7 @@ Clients keep using the OpenAI chat format; the gateway translates requests and A
 
 ### MiniMax-H3 video generation
 
-Add a channel with protocol **MiniMax H3 (video)**, base URL `https://api.minimax.io` and model `MiniMax-H3` (or one of the H3 variants). The API key is sent as `Authorization: Bearer …` to the MiniMax V2 video endpoints. Video channels are separate from chat routing, so video models are not exposed by `/v1/chat/completions` or `/v1/models`.
+Add a channel with protocol **MiniMax H3 (video)**, base URL `https://api.minimax.io` (or `https://api.minimaxi.com` for the China platform) and model `MiniMax-H3` (or one of the H3 variants). The API key is sent as `Authorization: Bearer …` to the MiniMax V2 video endpoints. Video channels are separate from chat routing, so video models are not exposed by `/v1/chat/completions` or `/v1/models`. The provider's OpenAI-compatible model list omits video models, so **Fetch models** adds the H3 family (`MiniMax-H3`, `MiniMax-H3-Highspeed`, `MiniMax-H3-Lite`, `MiniMax-H3-Max`) alongside the language models it returns; the **Video** page lists only the H3 family.
 
 Open **Video** in the console to:
 
@@ -108,7 +108,7 @@ Changing `SECRET_KEY` invalidates admin sessions and makes existing channel keys
 | --- | --- |
 | ![API keys](docs/screenshots/tokens.png) | ![Request logs](docs/screenshots/logs.png) |
 
-| Video generation | MiniMax H3 channel |
+| Video generation | MiniMax model import |
 | --- | --- |
 | ![Video generation](docs/screenshots/video-generation.png) | ![MiniMax H3 channel](docs/screenshots/video-channel.png) |
 
