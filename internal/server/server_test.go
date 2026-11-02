@@ -34,9 +34,11 @@ func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 		t.Fatalf("seed admin: %v", err)
 	}
 	cfg := &config.Config{
-		SecretKey:  "test-secret",
-		SessionTTL: time.Hour,
-		Version:    "test",
+		SecretKey:         "test-secret",
+		SessionTTL:        time.Hour,
+		Version:           "test",
+		DataDir:           t.TempDir(),
+		VideoPollInterval: 10 * time.Millisecond,
 	}
 	cipher, err := secretbox.New(cfg.SecretKey)
 	if err != nil {
