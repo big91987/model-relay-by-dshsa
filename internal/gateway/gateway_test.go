@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/big91987/model-relay-by-dshsa/internal/auth"
 	"github.com/big91987/model-relay-by-dshsa/internal/config"
@@ -580,5 +581,161 @@ func TestModelsListing(t *testing.T) {
 	env.gw.Models(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil), env.token)
 	if strings.Contains(rec.Body.String(), `"model-b"`) {
 		t.Fatalf("restricted model leaked: %s", rec.Body.String())
+	}
+}
+
+func TestChatCompletionsTPMLimit(t *testing.T) {
+	env := newTestEnv(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"x","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`)
+	}))
+	defer upstream.Close()
+	env.addChannel(t, "primary", upstream.URL+"/v1", "openai", 0, []string{"public-model"}, nil, 0, 0)
+
+	env.token.TPMLimit = 20
+	if err := env.st.UpdateToken(env.token); err != nil {
+		t.Fatalf("update token: %v", err)
+	}
+	if rec := env.chat(t, `{"model":"public-model","messages":[{"role":"user","content":"hi"}]}`); rec.Code != http.StatusOK {
+		t.Fatalf("first request should pass, got %d: %s", rec.Code, rec.Body.String())
+	}
+	rec := env.chat(t, `{"model":"public-model","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected TPM rejection, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "tokens per minute") || !strings.Contains(rec.Body.String(), `"code":"rate_limit_exceeded"`) {
+		t.Fatalf("unexpected TPM error: %s", rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") == "" || rec.Header().Get("X-RateLimit-Limit-Tokens") != "20" {
+		t.Fatalf("missing rate-limit headers: %v", rec.Header())
+	}
+}
+
+func TestChatCompletionsTPMReservesDeclaredOutput(t *testing.T) {
+	env := newTestEnv(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"x","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`)
+	}))
+	defer upstream.Close()
+	env.addChannel(t, "primary", upstream.URL+"/v1", "openai", 0, []string{"public-model"}, nil, 0, 0)
+
+	env.token.TPMLimit = 100
+	if err := env.st.UpdateToken(env.token); err != nil {
+		t.Fatalf("update token: %v", err)
+	}
+	rec := env.chat(t, `{"model":"public-model","max_tokens":150,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("declared output should exhaust TPM up front, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "tokens per minute") {
+		t.Fatalf("unexpected body: %s", rec.Body.String())
+	}
+}
+
+func TestChatCompletionsConcurrencyLimit(t *testing.T) {
+	env := newTestEnv(t)
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+		_, _ = io.WriteString(w, `{"id":"x","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer upstream.Close()
+	env.addChannel(t, "primary", upstream.URL+"/v1", "openai", 0, []string{"public-model"}, nil, 0, 0)
+
+	env.token.MaxConcurrency = 1
+	if err := env.st.UpdateToken(env.token); err != nil {
+		t.Fatalf("update token: %v", err)
+	}
+	body := `{"model":"public-model","messages":[{"role":"user","content":"hi"}]}`
+	firstDone := make(chan int, 1)
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		env.gw.ChatCompletions(rec, req, env.token)
+		firstDone <- rec.Code
+	}()
+	<-entered
+	rec := env.chat(t, body)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected concurrency rejection, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("X-RateLimit-Limit-Concurrency") != "1" {
+		t.Fatalf("missing concurrency headers: %v", rec.Header())
+	}
+	close(release)
+	if code := <-firstDone; code != http.StatusOK {
+		t.Fatalf("first request status %d", code)
+	}
+	// The slot is free again once the first request completed.
+	if rec := env.chat(t, body); rec.Code != http.StatusOK {
+		t.Fatalf("released slot should admit a new request, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestChatCompletionsDailyQuota(t *testing.T) {
+	env := newTestEnv(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"x","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer upstream.Close()
+	env.addChannel(t, "primary", upstream.URL+"/v1", "openai", 0, []string{"public-model"}, nil, 0, 0)
+
+	env.token.DailyQuota = 0.01
+	if err := env.st.UpdateToken(env.token); err != nil {
+		t.Fatalf("update token: %v", err)
+	}
+	// Spend from a previous day does not count against today's budget.
+	if err := env.st.InsertLog(&store.Log{RequestID: "old", TokenID: env.token.ID, Cost: 1, Status: "success", CreatedAt: time.Now().Add(-48 * time.Hour).Unix()}); err != nil {
+		t.Fatalf("insert log: %v", err)
+	}
+	if rec := env.chat(t, `{"model":"public-model","messages":[{"role":"user","content":"hi"}]}`); rec.Code != http.StatusOK {
+		t.Fatalf("yesterday's spend should not block, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Today's spend pushes the key over its daily budget.
+	if err := env.st.InsertLog(&store.Log{RequestID: "today", TokenID: env.token.ID, Cost: 0.02, Status: "success", CreatedAt: time.Now().Unix()}); err != nil {
+		t.Fatalf("insert log: %v", err)
+	}
+	rec := env.chat(t, `{"model":"public-model","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected daily quota rejection, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "daily spending limit") || !strings.Contains(rec.Body.String(), `"code":"daily_quota_exceeded"`) {
+		t.Fatalf("unexpected daily quota error: %s", rec.Body.String())
+	}
+}
+
+func TestChatCompletionsRateLimitHeaders(t *testing.T) {
+	env := newTestEnv(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"x","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer upstream.Close()
+	env.addChannel(t, "primary", upstream.URL+"/v1", "openai", 0, []string{"public-model"}, nil, 0, 0)
+
+	env.token.RPMLimit = 10
+	env.token.TPMLimit = 1000
+	env.token.MaxConcurrency = 4
+	if err := env.st.UpdateToken(env.token); err != nil {
+		t.Fatalf("update token: %v", err)
+	}
+	rec := env.chat(t, `{"model":"public-model","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	for name, want := range map[string]string{
+		"X-RateLimit-Limit-Requests":        "10",
+		"X-RateLimit-Remaining-Requests":    "9",
+		"X-RateLimit-Limit-Tokens":          "1000",
+		"X-RateLimit-Limit-Concurrency":     "4",
+		"X-RateLimit-Remaining-Concurrency": "3",
+	} {
+		if got := rec.Header().Get(name); got != want {
+			t.Fatalf("%s = %q, want %q", name, got, want)
+		}
 	}
 }

@@ -141,16 +141,47 @@ func TestAdminAndRelayFlow(t *testing.T) {
 	}
 
 	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/tokens", map[string]any{
-		"name": "ci", "quota": -1, "allowed_models": []string{}, "rpm_limit": 0, "expires_at": nil, "status": "active",
+		"name": "ci", "quota": -1, "daily_quota": 2.5, "allowed_models": []string{}, "rpm_limit": 60,
+		"tpm_limit": 1000, "max_concurrency": 3, "expires_at": nil, "status": "active",
 	}, nil)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create token status %d: %s", resp.StatusCode, body)
 	}
-	var tokenResponse struct {
-		Key string `json:"key"`
+	var created struct {
+		Key   string      `json:"key"`
+		Token store.Token `json:"token"`
 	}
-	if err := json.Unmarshal(body, &tokenResponse); err != nil || !strings.HasPrefix(tokenResponse.Key, "sk-") {
+	if err := json.Unmarshal(body, &created); err != nil || !strings.HasPrefix(created.Key, "sk-") {
 		t.Fatalf("token response %s: %v", body, err)
+	}
+	if created.Token.RPMLimit != 60 || created.Token.TPMLimit != 1000 || created.Token.MaxConcurrency != 3 || created.Token.DailyQuota != 2.5 {
+		t.Fatalf("token limits were not persisted: %+v", created.Token)
+	}
+	tokenResponse := struct{ Key string }{Key: created.Key}
+
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+"/api/tokens", nil, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("list tokens status %d: %s", resp.StatusCode, body)
+	}
+	var listed struct {
+		Data []store.Token `json:"data"`
+	}
+	if err := json.Unmarshal(body, &listed); err != nil {
+		t.Fatalf("decode tokens: %v (%s)", err, body)
+	}
+	if len(listed.Data) != 1 || listed.Data[0].TPMLimit != 1000 || listed.Data[0].MaxConcurrency != 3 {
+		t.Fatalf("listed token limits are wrong: %+v", listed.Data)
+	}
+	for _, payload := range []map[string]any{
+		{"name": "bad-rpm", "rpm_limit": -1},
+		{"name": "bad-tpm", "tpm_limit": -1},
+		{"name": "bad-concurrency", "max_concurrency": -1},
+		{"name": "bad-daily", "daily_quota": -0.5},
+	} {
+		resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/tokens", payload, nil)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected %v to be rejected, got %d: %s", payload, resp.StatusCode, body)
+		}
 	}
 
 	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/tokens", map[string]any{

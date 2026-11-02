@@ -64,8 +64,12 @@ export interface Token {
   status: TokenStatus
   quota: number
   used_quota: number
+  daily_quota: number
+  daily_used_quota: number
   allowed_models: string[]
   rpm_limit: number
+  tpm_limit: number
+  max_concurrency: number
   expires_at: number | null
   last_used_at: number | null
   created_at: number
@@ -74,8 +78,11 @@ export interface Token {
 export interface TokenInput {
   name: string
   quota: number
+  daily_quota: number
   allowed_models: string[]
   rpm_limit: number
+  tpm_limit: number
+  max_concurrency: number
   expires_at: number | null
   status: TokenStatus
 }

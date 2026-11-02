@@ -124,6 +124,7 @@ func (s *Server) withCommon(next http.Handler) http.Handler {
 			rec.Header().Set("Access-Control-Allow-Origin", "*")
 			rec.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, x-api-key, anthropic-version")
 			rec.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			rec.Header().Set("Access-Control-Expose-Headers", "X-Request-Id, Retry-After, X-RateLimit-Limit-Requests, X-RateLimit-Remaining-Requests, X-RateLimit-Reset-Requests, X-RateLimit-Limit-Tokens, X-RateLimit-Remaining-Tokens, X-RateLimit-Reset-Tokens, X-RateLimit-Limit-Concurrency, X-RateLimit-Remaining-Concurrency")
 			if r.Method == http.MethodOptions {
 				rec.WriteHeader(http.StatusNoContent)
 				return

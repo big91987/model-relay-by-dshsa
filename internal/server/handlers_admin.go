@@ -315,12 +315,32 @@ func (s *Server) handleTestChannel(w http.ResponseWriter, r *http.Request) {
 }
 
 type tokenInput struct {
-	Name          string   `json:"name"`
-	Quota         *float64 `json:"quota"`
-	AllowedModels []string `json:"allowed_models"`
-	RPMLimit      int      `json:"rpm_limit"`
-	ExpiresAt     *int64   `json:"expires_at"`
-	Status        string   `json:"status"`
+	Name           string   `json:"name"`
+	Quota          *float64 `json:"quota"`
+	DailyQuota     *float64 `json:"daily_quota"`
+	AllowedModels  []string `json:"allowed_models"`
+	RPMLimit       int      `json:"rpm_limit"`
+	TPMLimit       int      `json:"tpm_limit"`
+	MaxConcurrency int      `json:"max_concurrency"`
+	ExpiresAt      *int64   `json:"expires_at"`
+	Status         string   `json:"status"`
+}
+
+// validateTokenLimits reports the first invalid per-key limit.
+func validateTokenLimits(in tokenInput) string {
+	switch {
+	case in.RPMLimit < 0:
+		return "rpm_limit must be zero or greater"
+	case in.TPMLimit < 0:
+		return "tpm_limit must be zero or greater"
+	case in.MaxConcurrency < 0:
+		return "max_concurrency must be zero or greater"
+	case in.Quota != nil && *in.Quota < -1:
+		return "quota must be -1 (unlimited) or greater"
+	case in.DailyQuota != nil && *in.DailyQuota < 0:
+		return "daily_quota must be zero or greater"
+	}
+	return ""
 }
 
 func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
@@ -351,17 +371,17 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		}
 		status = in.Status
 	}
-	if in.RPMLimit < 0 {
-		writeErr(w, http.StatusBadRequest, "rpm_limit must be zero or greater")
+	if msg := validateTokenLimits(in); msg != "" {
+		writeErr(w, http.StatusBadRequest, msg)
 		return
 	}
 	quota := -1.0
 	if in.Quota != nil {
 		quota = *in.Quota
 	}
-	if quota < -1 {
-		writeErr(w, http.StatusBadRequest, "quota must be -1 (unlimited) or greater")
-		return
+	dailyQuota := 0.0
+	if in.DailyQuota != nil {
+		dailyQuota = *in.DailyQuota
 	}
 	plain, prefix, hash, err := auth.GenerateAPIKey()
 	if err != nil {
@@ -370,15 +390,18 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := &store.Token{
-		UserID:        userFrom(r).ID,
-		Name:          name,
-		KeyHash:       hash,
-		KeyPrefix:     prefix,
-		Status:        status,
-		Quota:         quota,
-		AllowedModels: cleanList(in.AllowedModels),
-		RPMLimit:      in.RPMLimit,
-		ExpiresAt:     in.ExpiresAt,
+		UserID:         userFrom(r).ID,
+		Name:           name,
+		KeyHash:        hash,
+		KeyPrefix:      prefix,
+		Status:         status,
+		Quota:          quota,
+		DailyQuota:     dailyQuota,
+		AllowedModels:  cleanList(in.AllowedModels),
+		RPMLimit:       in.RPMLimit,
+		TPMLimit:       in.TPMLimit,
+		MaxConcurrency: in.MaxConcurrency,
+		ExpiresAt:      in.ExpiresAt,
 	}
 	if err := s.store.CreateToken(token); err != nil {
 		s.logger.Error("create token failed", "error", err)
@@ -410,18 +433,19 @@ func (s *Server) handleUpdateToken(w http.ResponseWriter, r *http.Request) {
 	if name := strings.TrimSpace(in.Name); name != "" {
 		token.Name = name
 	}
-	if in.Quota != nil {
-		if *in.Quota < -1 {
-			writeErr(w, http.StatusBadRequest, "quota must be -1 (unlimited) or greater")
-			return
-		}
-		token.Quota = *in.Quota
-	}
-	if in.RPMLimit < 0 {
-		writeErr(w, http.StatusBadRequest, "rpm_limit must be zero or greater")
+	if msg := validateTokenLimits(in); msg != "" {
+		writeErr(w, http.StatusBadRequest, msg)
 		return
 	}
+	if in.Quota != nil {
+		token.Quota = *in.Quota
+	}
+	if in.DailyQuota != nil {
+		token.DailyQuota = *in.DailyQuota
+	}
 	token.RPMLimit = in.RPMLimit
+	token.TPMLimit = in.TPMLimit
+	token.MaxConcurrency = in.MaxConcurrency
 	token.AllowedModels = cleanList(in.AllowedModels)
 	token.ExpiresAt = in.ExpiresAt
 	if in.Status != "" {
