@@ -1,6 +1,6 @@
-// Client helpers for calling the relay's OpenAI-compatible gateway from the
-// browser. The gateway key is passed in memory on every call and is never
-// persisted by this module.
+// Client helpers for the Playground's admin-authenticated relay endpoint. The
+// browser sends only the selected gateway-key id; the key secret stays on the
+// server and is never persisted by this module.
 
 export interface GatewayError {
   message: string
@@ -62,6 +62,9 @@ export async function readGatewayError(response: Response): Promise<GatewayError
 
 export function describeGatewayError(status: number, error: GatewayError): string {
   const message = error.message?.trim() || `Request failed with HTTP ${status}`
+  if (status === 401 && !error.code && /authentication|session/i.test(message)) {
+    return 'Your admin session expired. Sign in again.'
+  }
   if (status === 401) return `Invalid or disabled gateway key: ${message}`
   if (status === 403) return `This key is not allowed to use the selected model: ${message}`
   if (error.type === 'insufficient_quota' || /insufficient quota/i.test(message)) {
@@ -82,27 +85,27 @@ export function describeGatewayError(status: number, error: GatewayError): strin
   return message
 }
 
-// streamChatCompletion calls POST /v1/chat/completions with stream=true and
-// incrementally reports the assistant text. It returns partial content even
-// when the user aborts or the connection breaks, so the page can keep showing
-// what was actually received.
+// streamChatCompletion calls the admin Playground chat endpoint with
+// stream=true and incrementally reports the assistant text. The selected key id
+// authorizes the relay request; its secret never reaches the browser. It
+// returns partial content even when the user aborts or the connection breaks,
+// so the page can keep showing what was actually received.
 export async function streamChatCompletion(options: {
-  apiKey: string
+  tokenId: number
   body: Record<string, unknown>
   signal: AbortSignal
   onDelta: (content: string) => void
 }): Promise<ChatStreamResult> {
-  const { apiKey, body, signal, onDelta } = options
+  const { tokenId, body, signal, onDelta } = options
   const result: ChatStreamResult = { content: '', aborted: false }
 
   let response: Response
   try {
-    response = await fetch('/v1/chat/completions', {
+    response = await fetch(`/api/playground/chat?token_id=${encodeURIComponent(String(tokenId))}`, {
       method: 'POST',
       credentials: 'same-origin',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify(body),
       signal,
@@ -117,7 +120,11 @@ export async function streamChatCompletion(options: {
 
   result.requestId = response.headers.get('X-Request-Id') ?? undefined
   if (!response.ok) {
-    throw new GatewayRequestError(await readGatewayError(response), response.status, result.requestId)
+    const error = await readGatewayError(response)
+    if (response.status === 401 && !error.code && /authentication|session/i.test(error.message)) {
+      window.dispatchEvent(new Event('mr:unauthorized'))
+    }
+    throw new GatewayRequestError(error, response.status, result.requestId)
   }
   if (!response.body) {
     throw new Error('The browser cannot read a streaming response.')

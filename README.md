@@ -14,7 +14,7 @@ A self-hosted model gateway written in Go, with a React admin console. It expose
 - **Gateway keys** — per-key USD quota, model allowlists, requests-per-minute limit, expiry, enable/disable, and a one-time plaintext reveal at creation.
 - **Usage accounting** — prompt/completion tokens and cost from per-channel input/output prices, request logs with status, upstream model, latency and error detail.
 - **Admin console** — dashboard with 7-day traffic, top models and recent requests; channel, model, API key and log pages.
-- **Playground** — try any model available to a gateway key from the console: multi-turn chat, editable system prompt, temperature and max output, streaming, stop, and request IDs that link to the request log.
+- **Playground** — select an existing gateway key and try any model it can access: multi-turn chat, editable system prompt, temperature and max output, streaming, stop, and request IDs that link to the request log.
 - **Simple to operate** — one Go binary with the console embedded, SQLite storage, no Redis or Postgres, graceful shutdown.
 - **Ship-ready basics** — Dockerfile, docker-compose example, Makefile and GitHub Actions CI.
 
@@ -127,17 +127,17 @@ The channel form can fetch the provider's model list and import selected models 
 
 ## Playground
 
-Open **Playground** in the console after signing in. It is an admin page, but every chat request uses a gateway key exactly like an external client, so the key's model allowlist, quota, RPM limit, channel routing and request logging all apply. The page never calls an upstream directly.
+Open **Playground** in the console after signing in and choose one of the gateway keys created on **API keys**. The relay applies that key's model allowlist, quota, RPM limit, channel routing and request logging; the browser never receives the key secret, and the page never calls an upstream directly.
 
-1. Create a gateway key on **API keys** if you do not have one, then paste it into **Gateway connection** and choose **Validate key & load models**. The model list comes from `GET /v1/models` and is filtered by that key.
-2. Pick a model. The protocol chips and configured prices come from the model catalog; the temperature range follows the serving protocol (Anthropic channels cap it at 1).
+1. Select an existing gateway key from **Gateway key**. Create one on **API keys** first if the list is empty. The relay uses the key server-side; its secret is never sent to the browser.
+2. Pick a model. The available models come from `GET /api/playground/models` and are filtered by the selected key's allowlist and enabled channels; protocol chips and prices come from the model catalog. The temperature range follows the serving protocol (Anthropic channels cap it at 1).
 3. Optionally edit the system prompt, temperature and maximum output tokens, then send a message. Multi-turn history, including earlier assistant replies, is sent as context on the next request.
 4. Responses stream into the conversation. **Stop generating** aborts the browser read and cancels the upstream request through the relay's request context; content already generated may still be billed. **Regenerate** asks for confirmation first because it creates a new request. **Clear conversation** removes the page's messages but not existing request logs or charges.
 5. Each completed reply shows the relay request ID, round-trip latency and token usage. Usage reported by the upstream is labeled as reported; if the upstream omits it, the gateway's final SSE usage chunk is marked `x_usage_source: "estimated"` and the page labels the value as an estimate instead of presenting it as exact. **View log** opens **Logs** filtered by that request ID.
 
 The page uses the console theme tokens and works in light, dark and follow-system themes, including the request log and confirmation dialogs.
 
-The gateway key is held only in this page's memory. It is sent to the same origin as an `Authorization: Bearer` header and is never written to the URL, `localStorage`, `sessionStorage` or application logs; refreshing or leaving the page clears it. The conversation is not stored server-side — only normal relay request logs remain. Parameter ranges are protocol-level constraints; model-specific limits (for example, reasoning models that reject temperature) are enforced by the upstream, and a rejection is shown in the conversation.
+The browser sends only the selected key's id. Playground calls the admin-authenticated `POST /api/playground/chat`, which invokes the same relay handler as `/v1/chat/completions`, so the key's model permissions, quota, RPM limit and request log all apply; the key secret stays on the server and is never written to the URL, browser storage or the console's request logs. The conversation is not stored server-side — only normal relay request logs remain. Parameter ranges are protocol-level constraints; model-specific limits (for example, reasoning models that reject temperature) are enforced by the upstream, and a rejection is shown in the conversation.
 
 See [docs/playground.md](docs/playground.md) for the full usage guide, parameter rules and the real-call verification record with request IDs.
 
@@ -169,6 +169,8 @@ Admin endpoints use the `mr_session` HttpOnly cookie created by `POST /api/auth/
 | `PUT/DELETE /api/tokens/{id}` | session | Update/delete a key. |
 | `GET /api/logs` | session | Paginated logs; filters: `model`, `status`, `request_id`, `token_id`, `start`, `end`, `page`, `page_size`. |
 | `GET /api/models` | session | Model catalog with channels, protocols and prices. |
+| `GET /api/playground/models?token_id=…` | session | Models available to a selected gateway key for Playground. |
+| `POST /api/playground/chat?token_id=…` | session | Relay a Playground chat as the selected gateway key; the browser never receives the key secret. |
 | `GET/POST /api/videos` | session | List video tasks / submit a MiniMax-H3 generation task. |
 | `GET /api/videos/{id}` | session | One video task with status and metadata. |
 | `GET /api/videos/{id}/content` | session | Preview the stored MP4; add `?download=1` for an attachment. |
@@ -214,7 +216,7 @@ docs/screenshots/      console screenshots used in this README
 - The Anthropic adapter translates text, image data URLs, tool calls and tool results. Remote image URLs are not converted. OpenAI's Responses API, audio, rerank and native Anthropic endpoints are out of scope.
 - MiniMax-H3 video tasks are managed from the admin console; there is no gateway-key video API and video generation is not charged against key quotas. Task history and downloaded MP4 files stay in `DATA_DIR` until removed manually.
 - Cost accounting trusts the configured prices and upstream token counts; it is an operational estimate, not an invoice.
-- The Playground gateway key is a credential held in browser memory. It is not persisted by the console, but it is visible in browser developer tools on outgoing requests; use a dedicated key with a model allowlist and quota for testing.
+- Playground uses the selected gateway key through an admin-authenticated server endpoint; the browser never receives the key secret. An admin session can therefore spend any key's quota, so restrict admin access accordingly.
 - Playground parameter ranges are protocol-level. Model-specific limits are enforced by the upstream and surfaced as errors; the page does not maintain a per-model capability database.
 - Channel failover is retried for listed transient statuses. A `400`/`422` from an upstream is returned to the client because it usually reflects the request rather than channel health.
 

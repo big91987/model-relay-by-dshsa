@@ -1,11 +1,11 @@
 # Playground: usage guide and verification record
 
-The Playground is the **Playground** page in the admin console. It sends chat requests through the relay's OpenAI-compatible `POST /v1/chat/completions` endpoint with a gateway key, so it uses the same model allowlist, quota, RPM limit, channel routing and request log as any other API client. The page never calls an upstream directly.
+The Playground is the **Playground** page in the admin console. After the admin selects an existing gateway key, chat requests go through the admin-authenticated `POST /api/playground/chat` endpoint, which invokes the relay's normal chat handler with that key. The browser sends only the key id; the key secret stays on the server. Model allowlist, quota, RPM limit, channel routing and request logs apply exactly as they do for an external API client. The page never calls an upstream directly.
 
 ## How to use it
 
 1. Sign in to the console and open **Playground**.
-2. Create a gateway key on **API keys** if needed, paste it into **Gateway connection** and choose **Validate key & load models**. The key is sent to the same origin as an `Authorization: Bearer` header and is used only while this page is open.
+2. Select an existing gateway key from **Gateway key**. If the list is empty, create a key on **API keys** first. The browser sends only the key id; the relay uses the key server-side and never exposes its secret to the page.
 3. Pick a model, optionally edit the **System prompt**, **Temperature** and **Max output tokens**, then send a message. Later turns include the earlier conversation as context.
 4. While a reply is streaming, **Stop generating** aborts the browser read and cancels the relay request context, which cancels the upstream request where the provider honors it. Content received before stopping may still be billed.
 5. **Regenerate** asks for confirmation before replacing the last assistant reply. It creates a new request using the parameters currently shown in the page. The page never retries automatically.
@@ -14,10 +14,11 @@ The Playground is the **Playground** page in the admin console. It sends chat re
 
 ## Key and privacy behavior
 
-- The gateway key is held in React component state only. It is cleared when the page unmounts or is refreshed.
-- It is not written to the URL, `localStorage`, `sessionStorage` or application logs. The console makes no `console.*` calls with it.
-- Upstream channel keys remain encrypted on the server and are never returned by the admin API.
-- Talk to the gateway over TLS in production; the browser necessarily sends the gateway key in the request header.
+- The browser never receives the gateway key secret. It sends only the selected key's numeric id to the admin-authenticated Playground endpoints.
+- Gateway keys remain hashed in the database; upstream channel keys remain encrypted. Neither secret is returned by the admin API.
+- The selected key's id and metadata (name, prefix, status, quota, allowlist) are visible in the page; the secret is not. The id is not written to browser storage. The normal relay request log records the key id/name as usual.
+- The Playground endpoint requires the existing admin session. An admin can therefore spend the quota of any key in the console; restrict admin access accordingly.
+- Talk to the gateway over TLS in production; the admin session cookie should be protected like any other admin credential.
 
 ## Parameter behavior
 
@@ -44,10 +45,10 @@ The page sent a system prompt and two user turns to `openai-fast`. The transcrip
 
 | Turn | Request ID | Assistant text | Usage (prompt / completion / total) | Latency |
 | --- | --- | --- | --- | --- |
-| 1 | `c53b8048b95547960d25ec49` | `Nice to meet you, Ada.` | `94 / 86 / 180`, upstream-reported | `1.9 s` |
-| 2 | `435ec46c1ca0f188948dceeb` | `Ada` | `122 / 32 / 154`, upstream-reported | `1.2 s` |
+| 1 | `8c7eeb3455922e12b610fab2` | `Nice to meet you, Ada.` | `94 / 86 / 180`, upstream-reported | `1.1 s` |
+| 2 | `2c0cf2569ad55d5fbf0e5971` | `Ada` | `122 / 32 / 154`, upstream-reported | `0.96 s` |
 
-Turn 2 includes the first turn: `GET /api/logs?request_id=435ec46c1ca0f188948dceeb` returned one row with `prompt_tokens: 122`, `completion_tokens: 32`, `total_tokens: 154`, `stream: true`, status `success`, channel `Pollinations (GPT-OSS 20B)` and latency `1.2 s` as shown in the log row. The higher prompt count on turn 2 (122 vs 94) confirms history was sent. The browser received incremental SSE chunks rather than one buffered body.
+Turn 2 includes the first turn: `GET /api/logs?request_id=2c0cf2569ad55d5fbf0e5971` returned one row with `prompt_tokens: 122`, `completion_tokens: 32`, `total_tokens: 154`, `stream: true`, status `success`, channel `Pollinations (GPT-OSS 20B)` and latency `0.96 s` as shown in the log row. The higher prompt count on turn 2 (122 vs 94) confirms history was sent. The browser received incremental SSE chunks rather than one buffered body.
 
 The same flow was also verified against a local Ollama `qwen:14b` model before the external check:
 
@@ -62,7 +63,7 @@ Both requests were logged as `success` with `stream: true`; the second prompt co
 
 Screenshot: [Stopped generation state](screenshots/playground-stopped.png)
 
-A controlled upstream streamed word by word. After the assistant had produced `This is a deliberately slow`, **Stop generating** was clicked. The page showed `Generation stopped. Content already received may still be billed.`, kept the partial text, disabled the stop button and re-enabled **Send**. The upstream request and relay request were canceled: the request log has `request_id: f2ae33127af50f1b857e9e37`, `status: error`, `status_code: 200`, `error: "stream interrupted: context canceled"`, `latency_ms: 1453`. No second request was sent automatically. Sending another message after the stop succeeded and received a fresh complete response.
+A controlled upstream streamed word by word. After the assistant had produced `This is a deliberately slow`, **Stop generating** was clicked. The page showed `Generation stopped. Content already received may still be billed.`, kept the partial text, disabled the stop button and re-enabled **Send**. The upstream request and relay request were canceled: the request log has `request_id: f7717f3961b1caf2a8bfeed3`, `status: error`, `status_code: 200`, `error: "stream interrupted: context canceled"`, `latency_ms: 1455`. No second request was sent automatically. Sending another message after the stop succeeded and received a fresh complete response.
 
 ### 3. Parameters and regeneration
 
@@ -93,7 +94,7 @@ All messages below were observed in the page, not only in server code:
 | --- | --- | --- |
 | Invalid gateway key | `Invalid or disabled gateway key: invalid API key` in the connection panel; chat disabled | `GET /v1/models` → 401 |
 | Key without available models | Badge `No models`; `This key has no available models: its model allowlist may not match any enabled channel, or the channels are disabled.` | `GET /v1/models` → empty `data` |
-| Quota exhausted | `Insufficient quota: insufficient quota for this gateway key` | `f410b2a5480ca7d7a2db69ef`, log HTTP 429 |
+| Quota exhausted | `Insufficient quota: insufficient quota for this gateway key` | `1060b141cb59ec6870d6ed19`, log HTTP 429 |
 | RPM limit | First request succeeded; second showed `Rate limited: rate limit exceeded (1 requests per minute)` | `4b76289f873c7b6bf6eeb442` success, `7e95a92cdcc8a0ffe576f291` log HTTP 429 |
 | Upstream failure | `Upstream unavailable: no upstream channel succeeded. Check the serving channel and open the request log for details.` | `767d95eedbd8c5a6dc95f347`, log HTTP 502, channel connection refused |
 | Connection interrupted mid-stream | `Connection interrupted: the upstream stream ended before the response finished. Partial content is shown above. (upstream stream interrupted: unexpected EOF)` | Request ID shown; log status `error`, `stream interrupted: unexpected EOF` |
@@ -103,19 +104,19 @@ All messages below were observed in the page, not only in server code:
 
 Screenshot: [Logs filtered by the request ID from Playground](screenshots/playground-logs.png)
 
-The **View log** link from the second real turn opened `/logs?request_id=435ec46c1ca0f188948dceeb`, pre-filled the new request-ID filter and showed exactly one row for that request (model `openai-fast`, channel `Pollinations (GPT-OSS 20B)`, 154 tokens, 1.2 s, success). The request-detail dialog also shows the full request ID with a **Copy** action. The API supports the same lookup:
+The **View log** link from the second real turn opened `/logs?request_id=2c0cf2569ad55d5fbf0e5971`, pre-filled the new request-ID filter and showed exactly one row for that request (model `openai-fast`, channel `Pollinations (GPT-OSS 20B)`, 154 tokens, 0.96 s, success). The request-detail dialog also shows the full request ID with a **Copy** action. The API supports the same lookup:
 
 ```bash
-curl -b cookies.txt 'http://127.0.0.1:8080/api/logs?request_id=435ec46c1ca0f188948dceeb'
+curl -b cookies.txt 'http://127.0.0.1:8080/api/logs?request_id=2c0cf2569ad55d5fbf0e5971'
 ```
 
-### 7. Key persistence check
+### 7. Key exposure check
 
-After validating a key, a browser evaluation reported `localStorage: {}`, `sessionStorage: {}` and URL `http://127.0.0.1:8080/playground`. Reloading the page left the gateway-key input empty, reset the model selector and left both storage objects empty. The page source and rendered HTML do not contain the key. The only copy of the key in the browser is the component's in-memory state.
+The page has no secret-key input; it selects a key by id. A browser evaluation after selecting a key reported `localStorage` containing only `mr-theme` (the theme preference), empty `sessionStorage`, and URL `http://127.0.0.1:8080/playground`. Network inspection of both Playground chat requests shows `POST /api/playground/chat?token_id=1`; the request headers contain no `Authorization` header and the request body contains no key material. The gateway key is used server-side, and the rendered HTML does not contain it.
 
 ## Before/after UI evidence
 
-- **Before** (`78c6dfb`, main): the sidebar had no Playground entry; `/playground` redirected to Dashboard. [Baseline screenshot](screenshots/playground-before.png)
+- **Before** (`88d42a6`, main): the sidebar had no Playground entry; `/playground` redirected to Dashboard. [Baseline screenshot](screenshots/playground-before.png)
 - **After** (this branch): the sidebar exposes **Playground**; the page provides the flow documented above. [Same Dashboard viewport with the new navigation](screenshots/playground-after-nav.png) and [Playground](screenshots/playground.png).
 
 Both pairs use a 1440×1000 browser viewport, the dark console theme, the same clean demo data and the same admin account. The Playground was also captured in light theme after switching the top-bar control; see [Playground in light theme](screenshots/playground-light.png) and [the matching light request log](screenshots/playground-logs-light.png).

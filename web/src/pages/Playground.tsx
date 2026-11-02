@@ -5,23 +5,18 @@ import { Icon } from '../components/Icon'
 import { Modal } from '../components/Modal'
 import { EmptyState, PageHeader, Spinner } from '../components/ui'
 import { api } from '../lib/api'
-import {
-  describeGatewayError,
-  GatewayRequestError,
-  readGatewayError,
-  streamChatCompletion,
-} from '../lib/gatewayChat'
+import { GatewayRequestError, streamChatCompletion } from '../lib/gatewayChat'
 import type { ChatUsage } from '../lib/gatewayChat'
-import { formatDuration, formatNumber, formatPrice } from '../lib/format'
+import { formatCost, formatDuration, formatNumber, formatPrice, formatTime } from '../lib/format'
 import { useToast } from '../lib/toast'
-import type { ModelInfo } from '../lib/types'
+import type { ModelInfo, Token } from '../lib/types'
 
 type MessageRole = 'user' | 'assistant'
 type MessageStatus = 'streaming' | 'complete' | 'stopped' | 'error'
-type KeyStatus = 'idle' | 'checking' | 'ready' | 'empty' | 'error'
 
 interface RequestSnapshot {
   model: string
+  keyName: string
   temperature: number
   maxTokens: number | null
 }
@@ -37,11 +32,6 @@ interface ChatMessage {
   error?: string
   request?: RequestSnapshot
   createdAt: number
-}
-
-interface KeyState {
-  status: KeyStatus
-  message?: string
 }
 
 type ConfirmState = { kind: 'retry'; messageId: string } | { kind: 'clear' } | null
@@ -75,10 +65,14 @@ export default function Playground() {
   const toast = useToast()
   const [catalog, setCatalog] = useState<ModelInfo[]>([])
   const [catalogError, setCatalogError] = useState('')
-  const [gatewayKey, setGatewayKey] = useState('')
-  const [showKey, setShowKey] = useState(false)
-  const [keyState, setKeyState] = useState<KeyState>({ status: 'idle' })
+  const [keys, setKeys] = useState<Token[]>([])
+  const [keysLoading, setKeysLoading] = useState(true)
+  const [keysError, setKeysError] = useState('')
+  const [selectedKeyId, setSelectedKeyId] = useState<number | null>(null)
   const [models, setModels] = useState<string[]>([])
+  const [modelsLoading, setModelsLoading] = useState(false)
+  const [modelsError, setModelsError] = useState('')
+  const [modelsRefresh, setModelsRefresh] = useState(0)
   const [selectedModel, setSelectedModel] = useState('')
   const [systemPrompt, setSystemPrompt] = useState('')
   const [temperature, setTemperature] = useState(defaultTemperature)
@@ -88,8 +82,36 @@ export default function Playground() {
   const [sending, setSending] = useState(false)
   const [confirm, setConfirm] = useState<ConfirmState>(null)
   const abortRef = useRef<AbortController | null>(null)
-  const keyInputRef = useRef<HTMLInputElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+
+  const loadKeys = async () => {
+    setKeysLoading(true)
+    try {
+      const response = await api.tokens()
+      setKeys(response.data)
+      setKeysError('')
+      setModelsRefresh((value) => value + 1)
+      setSelectedKeyId((current) => {
+        if (current !== null && response.data.some((key) => key.id === current)) return current
+        const now = Math.floor(Date.now() / 1000)
+        const usable = response.data.find(
+          (key) =>
+            key.status === 'active' &&
+            (key.quota < 0 || key.used_quota < key.quota) &&
+            (key.expires_at === null || key.expires_at > now),
+        )
+        return usable?.id ?? response.data.find((key) => key.status === 'active')?.id ?? response.data[0]?.id ?? null
+      })
+    } catch (error) {
+      setKeysError(error instanceof Error ? error.message : 'Failed to load gateway keys')
+    } finally {
+      setKeysLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void loadKeys()
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -113,6 +135,50 @@ export default function Playground() {
     if (element) element.scrollTop = element.scrollHeight
   }, [messages])
 
+  useEffect(() => {
+    let active = true
+    if (selectedKeyId === null) {
+      setModels([])
+      setSelectedModel('')
+      setModelsError('')
+      return
+    }
+    setModelsLoading(true)
+    setModelsError('')
+    api
+      .playgroundModels(selectedKeyId)
+      .then((response) => {
+        if (!active) return
+        const available = response.data
+          .map((model) => model.id)
+          .filter((id): id is string => typeof id === 'string' && id !== '')
+        setModels(available)
+        setSelectedModel((current) => (available.includes(current) ? current : (available[0] ?? '')))
+      })
+      .catch((error: unknown) => {
+        if (!active) return
+        setModels([])
+        setSelectedModel('')
+        setModelsError(error instanceof Error ? error.message : 'Failed to load models for this key')
+      })
+      .finally(() => {
+        if (active) setModelsLoading(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [selectedKeyId, modelsRefresh])
+
+  const selectedKey = useMemo(
+    () => keys.find((key) => key.id === selectedKeyId) ?? null,
+    [keys, selectedKeyId],
+  )
+  const keyExpired =
+    selectedKey?.expires_at !== null &&
+    selectedKey?.expires_at !== undefined &&
+    selectedKey.expires_at <= Math.floor(Date.now() / 1000)
+  const keyUsable = selectedKey?.status === 'active' && !keyExpired
+
   const selectedInfo = useMemo(
     () => catalog.find((model) => model.id === selectedModel),
     [catalog, selectedModel],
@@ -133,7 +199,7 @@ export default function Playground() {
   }, [maxTokens])
   const maxTokensInvalid = maxTokens.trim() !== '' && maxTokensValue === null
 
-  const modelReady = keyState.status === 'ready' && models.length > 0 && selectedModel !== ''
+  const modelReady = keyUsable && models.length > 0 && selectedModel !== '' && !modelsLoading
   const canType = modelReady && !sending
   const canSend = canType && input.trim() !== '' && !maxTokensInvalid
   const canRetry = modelReady && !maxTokensInvalid && !sending
@@ -149,6 +215,14 @@ export default function Playground() {
   }, [anthropicServed, selectedInfo])
 
   const emptyModelMessage = useMemo(() => {
+    if (modelsError) return modelsError
+    if (keysError) return keysError
+    if (!keysLoading && keys.length === 0) {
+      return 'No gateway keys yet. Create one on the API keys page; the key secret stays on the server.'
+    }
+    if (!keyUsable) {
+      return keyExpired ? 'This gateway key has expired. Select another key.' : 'Select an active gateway key to load models.'
+    }
     if (catalogError) {
       return 'The relay reported no available models for this key. Check the key allowlist and enabled channels.'
     }
@@ -156,63 +230,22 @@ export default function Playground() {
       return 'The gateway has no available models. Add and enable a channel in Channels first.'
     }
     return 'This key has no available models: its model allowlist may not match any enabled channel, or the channels are disabled.'
-  }, [catalog.length, catalogError])
-
-  const validateKey = async () => {
-    const key = gatewayKey.trim()
-    if (!key) {
-      setKeyState({ status: 'error', message: 'Enter a gateway key first.' })
-      return
-    }
-    setKeyState({ status: 'checking' })
-    try {
-      const response = await fetch('/v1/models', {
-        method: 'GET',
-        credentials: 'same-origin',
-        headers: { Authorization: `Bearer ${key}` },
-      })
-      if (!response.ok) {
-        const error = await readGatewayError(response)
-        setKeyState({ status: 'error', message: describeGatewayError(response.status, error) })
-        setModels([])
-        setSelectedModel('')
-        return
-      }
-      const data = (await response.json()) as { data?: { id?: string }[] }
-      const available = (data.data ?? [])
-        .map((model) => model.id)
-        .filter((id): id is string => typeof id === 'string' && id !== '')
-      setModels(available)
-      if (available.length === 0) {
-        setKeyState({ status: 'empty', message: emptyModelMessage })
-        setSelectedModel('')
-        return
-      }
-      setSelectedModel((current) => (available.includes(current) ? current : available[0]))
-      setKeyState({ status: 'ready' })
-      toast.success(`Gateway key is valid. ${available.length} model${available.length === 1 ? '' : 's'} available.`)
-    } catch (error) {
-      setKeyState({
-        status: 'error',
-        message: `Cannot reach the relay: ${error instanceof Error ? error.message : String(error)}`,
-      })
-    }
-  }
+  }, [modelsError, keysError, keysLoading, keys.length, keyUsable, keyExpired, catalog.length, catalogError])
 
   const patchAssistant = (id: string, patch: Partial<ChatMessage>) => {
     setMessages((current) => current.map((message) => (message.id === id ? { ...message, ...patch } : message)))
   }
 
   const runCompletion = async (history: ChatMessage[]) => {
-    const key = gatewayKey.trim()
-    if (!key) {
-      setKeyState({ status: 'error', message: 'Enter a gateway key first.' })
+    if (selectedKeyId === null || selectedKey === null) {
+      setKeysError('Select a gateway key first.')
       return
     }
     if (!selectedModel) return
 
     const request: RequestSnapshot = {
       model: selectedModel,
+      keyName: selectedKey.name,
       temperature,
       maxTokens: maxTokensValue,
     }
@@ -247,7 +280,7 @@ export default function Playground() {
       if (request.maxTokens !== null) body.max_tokens = request.maxTokens
 
       const result = await streamChatCompletion({
-        apiKey: key,
+        tokenId: selectedKeyId,
         body,
         signal: controller.signal,
         onDelta: (content) => {
@@ -384,26 +417,23 @@ export default function Playground() {
     toast.success('Conversation cleared')
   }
 
-  const keyBadge = (() => {
-    switch (keyState.status) {
-      case 'ready':
-        return <span className="badge badge-success"><span className="badge-dot badge-dot-success" />Connected</span>
-      case 'checking':
-        return <span className="badge badge-muted"><span className="badge-dot badge-dot-muted" />Checking</span>
-      case 'empty':
-        return <span className="badge badge-danger"><span className="badge-dot badge-dot-danger" />No models</span>
-      case 'error':
-        return <span className="badge badge-danger"><span className="badge-dot badge-dot-danger" />Failed</span>
-      default:
-        return <span className="badge badge-muted"><span className="badge-dot badge-dot-muted" />Not connected</span>
-    }
-  })()
+  const keyBadge = keysLoading ? (
+    <span className="badge badge-muted"><span className="badge-dot badge-dot-muted" />Loading</span>
+  ) : !selectedKey ? (
+    <span className="badge badge-muted"><span className="badge-dot badge-dot-muted" />No key</span>
+  ) : keyExpired ? (
+    <span className="badge badge-danger"><span className="badge-dot badge-dot-danger" />Expired</span>
+  ) : selectedKey.status === 'active' ? (
+    <span className="badge badge-success"><span className="badge-dot badge-dot-success" />Active</span>
+  ) : (
+    <span className="badge badge-danger"><span className="badge-dot badge-dot-danger" />Disabled</span>
+  )
 
   return (
     <div className="page playground-page">
       <PageHeader
         title="Playground"
-        subtitle="Try chat models with an admin session and a gateway key. Requests go through the real relay and inherit the key's model access, quota, rate limit and request logs."
+        subtitle="Pick an existing gateway key, choose a model and chat. The relay applies that key's model access, quota, rate limit and logs; the key secret never reaches the browser."
         actions={
           <button
             className="btn btn-ghost"
@@ -437,18 +467,50 @@ export default function Playground() {
           <div className="chat-scroll" ref={scrollRef}>
             {!modelReady || messages.length === 0 ? (
               <div className="chat-empty-wrap">
-                {!modelReady ? (
+                {keysLoading ? (
+                  <div className="page-loading">
+                    <Spinner size={18} /> Loading gateway keys…
+                  </div>
+                ) : keysError ? (
+                  <EmptyState
+                    icon="alert"
+                    title="Could not load gateway keys"
+                    description={keysError}
+                    action={
+                      <button className="btn btn-ghost" onClick={() => void loadKeys()}>
+                        <Icon name="refresh" size={15} /> Retry
+                      </button>
+                    }
+                  />
+                ) : !selectedKey ? (
                   <EmptyState
                     icon="key"
-                    title={keyState.status === 'empty' ? 'This key has no available models' : 'Connect a gateway key first'}
-                    description={
-                      keyState.status === 'empty'
-                        ? emptyModelMessage
-                        : 'Enter and validate a key to choose a model. The key stays in this page memory only.'
-                    }
+                    title="Create a gateway key first"
+                    description="Playground uses an existing key from API keys. The relay uses it server-side; the key secret is never sent to the browser."
                     action={
-                      <button className="btn btn-primary" onClick={() => keyInputRef.current?.focus()}>
-                        <Icon name="key" size={15} /> Enter a gateway key
+                      <Link className="btn btn-primary" to="/tokens">
+                        <Icon name="key" size={15} /> Go to API keys
+                      </Link>
+                    }
+                  />
+                ) : !keyUsable ? (
+                  <EmptyState
+                    icon="alert"
+                    title={keyExpired ? 'This key has expired' : 'This key is disabled'}
+                    description="Select an active gateway key in the panel on the right, or update this key on the API keys page."
+                  />
+                ) : modelsLoading ? (
+                  <div className="page-loading">
+                    <Spinner size={18} /> Loading models for this key…
+                  </div>
+                ) : !modelReady ? (
+                  <EmptyState
+                    icon={modelsError ? 'alert' : 'models'}
+                    title={modelsError ? 'Could not load models' : 'No models available for this key'}
+                    description={emptyModelMessage}
+                    action={
+                      <button className="btn btn-ghost" onClick={() => setModelsRefresh((value) => value + 1)}>
+                        <Icon name="refresh" size={15} /> Retry
                       </button>
                     }
                   />
@@ -497,7 +559,8 @@ export default function Playground() {
                         <div className="chat-meta">
                           {message.request ? (
                             <span>
-                              {message.request.model} · temp {message.request.temperature.toFixed(1)} · max output{' '}
+                              key {message.request.keyName} · {message.request.model} · temp{' '}
+                              {message.request.temperature.toFixed(1)} · max output{' '}
                               {message.request.maxTokens ?? 'default'}
                             </span>
                           ) : null}
@@ -573,7 +636,7 @@ export default function Playground() {
               placeholder={
                 modelReady
                   ? 'Type a message. Enter to send, Shift+Enter for a new line.'
-                  : 'Validate a gateway key and choose a model above.'
+                  : 'Select a gateway key and model above.'
               }
               disabled={!canType}
               aria-label="Message"
@@ -595,7 +658,8 @@ export default function Playground() {
               )}
             </div>
             <p className="composer-note">
-              Every send or regeneration creates a new gateway request and may incur charges. This page never retries
+              Every send or regeneration creates a new gateway request and may incur charges. Provider billing
+              applies; the relay's cost display depends on configured channel prices. This page never retries
               automatically.
             </p>
           </div>
@@ -604,95 +668,104 @@ export default function Playground() {
         <aside className="playground-side">
           <section className="panel side-panel">
             <div className="side-panel-head">
-              <h2>Gateway connection</h2>
-              {keyBadge}
-            </div>
-            <label className="field">
-              <span className="field-label">Gateway key</span>
-              <div className="input-row">
-                <input
-                  ref={keyInputRef}
-                  className="input"
-                  type={showKey ? 'text' : 'password'}
-                  value={gatewayKey}
-                  onChange={(event) => {
-                    setGatewayKey(event.target.value)
-                    if (keyState.status !== 'idle') {
-                      setKeyState({ status: 'idle' })
-                      setModels([])
-                      setSelectedModel('')
-                    }
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter') {
-                      event.preventDefault()
-                      void validateKey()
-                    }
-                  }}
-                  placeholder="sk-…"
-                  autoComplete="off"
-                  spellCheck={false}
-                  disabled={sending}
-                  aria-label="Gateway key"
-                />
+              <h2>Gateway key</h2>
+              <div className="key-head-actions">
+                {keyBadge}
                 <button
                   className="icon-button"
                   type="button"
-                  onClick={() => setShowKey((current) => !current)}
-                  title={showKey ? 'Hide key' : 'Show key'}
-                  aria-label={showKey ? 'Hide gateway key' : 'Show gateway key'}
-                  disabled={sending}
+                  onClick={() => void loadKeys()}
+                  disabled={keysLoading || sending}
+                  title="Refresh API keys"
+                  aria-label="Refresh gateway keys"
                 >
-                  <Icon name={showKey ? 'eyeOff' : 'eye'} size={17} />
+                  <Icon name="refresh" size={16} />
                 </button>
               </div>
+            </div>
+            <label className="field">
+              <span className="field-label">Use an existing key</span>
+              <select
+                className="input"
+                value={selectedKeyId ?? ''}
+                onChange={(event) => setSelectedKeyId(event.target.value ? Number(event.target.value) : null)}
+                disabled={keysLoading || sending || keys.length === 0}
+                aria-label="Gateway key"
+              >
+                {keys.length === 0 ? (
+                  <option value="">{keysLoading ? 'Loading keys…' : 'No gateway keys'}</option>
+                ) : (
+                  keys.map((key) => (
+                    <option value={key.id} key={key.id}>
+                      {key.name} · {key.key_prefix} · {key.status}
+                    </option>
+                  ))
+                )}
+              </select>
               <span className="field-hint">
-                The key is held in this page memory only. Refreshing or leaving the page clears it; it is not written to
-                the URL, browser storage or application logs.
+                The relay uses this key server-side; the browser never sees its secret. Model access, quota, RPM limit
+                and request logs apply.
               </span>
             </label>
-            <button
-              className="btn btn-ghost btn-block side-action"
-              onClick={() => void validateKey()}
-              disabled={keyState.status === 'checking' || !gatewayKey.trim() || sending}
-            >
-              {keyState.status === 'checking' ? <Spinner size={14} /> : <Icon name="test" size={15} />}
-              Validate key &amp; load models
-            </button>
-            {keyState.status === 'error' && keyState.message ? (
-              <div className="side-error" role="alert">
-                <Icon name="alert" size={14} />
-                <span>{keyState.message}</span>
+            {selectedKey ? (
+              <div className="key-meta">
+                <div>
+                  <span>Quota</span>
+                  <strong>
+                    {selectedKey.quota < 0
+                      ? 'Unlimited'
+                      : `${formatCost(selectedKey.used_quota)} / ${formatCost(selectedKey.quota)}`}
+                  </strong>
+                </div>
+                <div>
+                  <span>Rate limit</span>
+                  <strong>{selectedKey.rpm_limit > 0 ? `${selectedKey.rpm_limit} / min` : 'Unlimited'}</strong>
+                </div>
+                <div>
+                  <span>Model access</span>
+                  <strong>
+                    {selectedKey.allowed_models.length > 0
+                      ? `${selectedKey.allowed_models.length} allowed`
+                      : 'All models'}
+                  </strong>
+                </div>
+                <div>
+                  <span>Expires</span>
+                  <strong>{selectedKey.expires_at ? formatTime(selectedKey.expires_at) : 'Never'}</strong>
+                </div>
               </div>
             ) : null}
-            {keyState.status === 'empty' && keyState.message ? (
+            {keysError ? (
               <div className="side-error" role="alert">
                 <Icon name="alert" size={14} />
-                <span>
-                  {keyState.message}{' '}
-                  {catalog.length === 0 ? <Link to="/channels">Add a channel</Link> : <Link to="/tokens">Check key access</Link>}
-                </span>
+                <span>{keysError}</span>
               </div>
             ) : null}
             <p className="side-note">
-              Need a gateway key? <Link to="/tokens">Create one in API keys</Link>
+              Manage keys in <Link to="/tokens">API keys</Link>.
             </p>
           </section>
 
           <section className="panel side-panel">
             <div className="side-panel-head">
               <h2>Model</h2>
-              {keyState.status === 'ready' ? <span className="badge badge-muted">{models.length} available</span> : null}
+              {modelsLoading ? (
+                <Spinner size={13} />
+              ) : modelReady ? (
+                <span className="badge badge-muted">{models.length} available</span>
+              ) : null}
             </div>
             <select
               className="input"
               value={selectedModel}
               onChange={(event) => setSelectedModel(event.target.value)}
-              disabled={keyState.status !== 'ready' || sending}
+              disabled={!keyUsable || modelsLoading || sending}
               aria-label="Model"
             >
-              {models.length === 0 ? (
-                <option value="">{keyState.status === 'ready' ? 'No models available' : 'Validate a key first'}</option>
+              {modelsLoading ? (
+                <option value="">Loading models…</option>
+              ) : models.length === 0 ? (
+                <option value="">{keyUsable ? 'No models available' : 'Select an active gateway key'}</option>
               ) : (
                 models.map((model) => (
                   <option value={model} key={model}>
@@ -701,6 +774,12 @@ export default function Playground() {
                 ))
               )}
             </select>
+            {modelsError ? (
+              <div className="side-error" role="alert">
+                <Icon name="alert" size={14} />
+                <span>{modelsError}</span>
+              </div>
+            ) : null}
             {selectedInfo ? (
               <div className="model-detail">
                 <div className="chip-row">
@@ -716,8 +795,15 @@ export default function Playground() {
                   ))}
                 </div>
                 <div className="model-price">
-                  Input {formatPrice(selectedInfo.input_price)} / 1M · Output {formatPrice(selectedInfo.output_price)} / 1M{' '}
-                  <span className="muted">(configured prices used for cost estimates)</span>
+                  {selectedInfo.input_price === 0 && selectedInfo.output_price === 0 ? (
+                    <>Cost price is not configured for this channel. Provider billing still applies.</>
+                  ) : (
+                    <>
+                      Input {formatPrice(selectedInfo.input_price)} / 1M · Output{' '}
+                      {formatPrice(selectedInfo.output_price)} / 1M{' '}
+                      <span className="muted">(configured prices used for cost estimates)</span>
+                    </>
+                  )}
                 </div>
               </div>
             ) : null}

@@ -135,7 +135,6 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_video_tasks_created_at ON video_tasks(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_video_tasks_status ON video_tasks(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_request_id ON logs(request_id)`,
-
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {

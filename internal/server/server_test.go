@@ -486,3 +486,74 @@ func TestMinimaxVideoFlow(t *testing.T) {
 		t.Fatalf("list videos status %d: %s", resp.StatusCode, body)
 	}
 }
+
+func TestPlaygroundAdminProxy(t *testing.T) {
+	ts, st := newTestServer(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-playground","choices":[{"index":0,"message":{"role":"assistant","content":"played back"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`)
+	}))
+	defer upstream.Close()
+
+	client := newClient(t)
+	resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/auth/login", map[string]any{
+		"username": "admin", "password": "admin-pass",
+	}, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status %d: %s", resp.StatusCode, body)
+	}
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/channels", map[string]any{
+		"name": "playground-upstream", "type": "openai", "base_url": upstream.URL + "/v1", "api_key": "upstream-key",
+		"models": []string{"public-model"}, "priority": 0, "weight": 1, "status": "enabled",
+		"input_price": 1, "output_price": 2,
+	}, nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create channel status %d: %s", resp.StatusCode, body)
+	}
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/tokens", map[string]any{
+		"name": "playground-key", "quota": -1, "allowed_models": []string{}, "rpm_limit": 0, "expires_at": nil, "status": "active",
+	}, nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create token status %d: %s", resp.StatusCode, body)
+	}
+	var tokenResponse struct {
+		Token store.Token `json:"token"`
+	}
+	if err := json.Unmarshal(body, &tokenResponse); err != nil {
+		t.Fatalf("decode token: %v", err)
+	}
+	tokenID := strconv.FormatInt(tokenResponse.Token.ID, 10)
+
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+"/api/playground/models?token_id="+tokenID, nil, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"public-model"`) {
+		t.Fatalf("playground models status %d: %s", resp.StatusCode, body)
+	}
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/playground/chat?token_id="+tokenID, map[string]any{
+		"model":    "public-model",
+		"messages": []map[string]string{{"role": "user", "content": "hello"}},
+	}, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "played back") {
+		t.Fatalf("playground chat status %d: %s", resp.StatusCode, body)
+	}
+	if resp.Header.Get("X-Request-Id") == "" {
+		t.Fatal("playground chat must preserve the request id header")
+	}
+	logs, _, err := st.ListLogs(store.LogFilter{Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatalf("list logs: %v", err)
+	}
+	if len(logs) != 1 || logs[0].TokenName != "playground-key" || logs[0].Status != "success" {
+		t.Fatalf("unexpected playground logs: %+v", logs)
+	}
+
+	// The admin session is required; the browser does not send a gateway key.
+	anonymous := newClient(t)
+	resp, _ = doJSON(t, anonymous, http.MethodGet, ts.URL+"/api/playground/models?token_id="+tokenID, nil, nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous playground access status %d", resp.StatusCode)
+	}
+	resp, _ = doJSON(t, client, http.MethodGet, ts.URL+"/api/playground/models?token_id=9999", nil, nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown playground key status %d", resp.StatusCode)
+	}
+}
