@@ -186,11 +186,11 @@ func usageFromJSON(data []byte) upstreamUsage {
 	if parsed.Usage == nil {
 		return upstreamUsage{}
 	}
-	u := upstreamUsage{prompt: parsed.Usage.PromptTokens, completion: parsed.Usage.CompletionTokens, reported: true}
-	if u.prompt == 0 && u.completion == 0 && parsed.Usage.TotalTokens == 0 {
-		return u
+	return upstreamUsage{
+		prompt:     parsed.Usage.PromptTokens,
+		completion: parsed.Usage.CompletionTokens,
+		reported:   parsed.Usage.PromptTokens > 0 || parsed.Usage.CompletionTokens > 0 || parsed.Usage.TotalTokens > 0,
 	}
-	return u
 }
 
 func roundUp6(v float64) float64 {
