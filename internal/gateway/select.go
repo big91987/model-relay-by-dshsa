@@ -4,8 +4,6 @@ import (
 	"math"
 	"math/rand/v2"
 	"sort"
-	"sync"
-	"time"
 
 	"github.com/big91987/model-relay-by-dshsa/internal/store"
 )
@@ -78,38 +76,6 @@ func chatCandidates(candidates []candidate) []candidate {
 		}
 	}
 	return out
-}
-
-type rateLimiter struct {
-	mu   sync.Mutex
-	hits map[int64][]time.Time
-}
-
-func newRateLimiter() *rateLimiter {
-	return &rateLimiter{hits: map[int64][]time.Time{}}
-}
-
-// Allow records a request and reports whether it fits within the key's RPM budget.
-func (rl *rateLimiter) Allow(id int64, limit int) bool {
-	if limit <= 0 {
-		return true
-	}
-	now := time.Now()
-	cutoff := now.Add(-time.Minute)
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	kept := rl.hits[id][:0]
-	for _, t := range rl.hits[id] {
-		if t.After(cutoff) {
-			kept = append(kept, t)
-		}
-	}
-	if len(kept) >= limit {
-		rl.hits[id] = kept
-		return false
-	}
-	rl.hits[id] = append(kept, now)
-	return true
 }
 
 func sortStrings(v []string) { sort.Strings(v) }
