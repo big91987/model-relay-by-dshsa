@@ -35,6 +35,10 @@ const emptyForm: ChannelFormState = {
   output_price: '0',
 }
 
+function isVideoProtocol(type: ChannelType): boolean {
+  return type === 'minimax' || type === 'seedance'
+}
+
 function toForm(channel: Channel): ChannelFormState {
   return {
     name: channel.name,
@@ -322,7 +326,7 @@ export default function Channels() {
           <EmptyState
             icon="channels"
             title="No upstream channels"
-            description="Add an OpenAI-compatible, Anthropic or MiniMax video provider to start serving models."
+            description="Add an OpenAI-compatible, Anthropic, MiniMax or Seedance video provider to start serving models."
             action={
               <button className="btn btn-primary" onClick={openCreate}>
                 <Icon name="plus" size={16} /> Add your first channel
@@ -377,7 +381,7 @@ export default function Channels() {
                         P{channel.priority} · W{channel.weight}
                       </td>
                       <td>
-                        {channel.type === 'minimax' ? (
+                        {isVideoProtocol(channel.type) ? (
                           <span className="muted">Not metered</span>
                         ) : (
                           <div className="price-cell">
@@ -468,6 +472,7 @@ export default function Channels() {
               <option value="openai">OpenAI-compatible</option>
               <option value="anthropic">Anthropic Messages</option>
               <option value="minimax">MiniMax H3 (video)</option>
+              <option value="seedance">Seedance (Volcano Ark, video)</option>
             </select>
           </FormField>
           <FormField
@@ -477,7 +482,9 @@ export default function Channels() {
             hint={
               form.type === 'minimax'
                 ? 'MiniMax API root, e.g. https://api.minimax.io or https://api.minimaxi.com'
-                : 'Include the API version path, e.g. https://api.openai.com/v1'
+                : form.type === 'seedance'
+                  ? 'Volcano Ark API root including the version path, e.g. https://ark.cn-beijing.volces.com/api/v3'
+                  : 'Include the API version path, e.g. https://api.openai.com/v1'
             }
           >
             <input
@@ -485,7 +492,13 @@ export default function Channels() {
               className="input mono"
               value={form.base_url}
               onChange={(event) => setField('base_url', event.target.value)}
-              placeholder={form.type === 'minimax' ? 'https://api.minimax.io' : 'https://api.openai.com/v1'}
+              placeholder={
+                form.type === 'minimax'
+                  ? 'https://api.minimax.io'
+                  : form.type === 'seedance'
+                    ? 'https://ark.cn-beijing.volces.com/api/v3'
+                    : 'https://api.openai.com/v1'
+              }
             />
           </FormField>
           <FormField
@@ -510,7 +523,9 @@ export default function Channels() {
             hint={
               form.type === 'minimax'
                 ? 'MiniMax models, e.g. MiniMax-H3. Fetch the live list and keep your manual entries.'
-                : 'Upstream model names, separated by commas or new lines. Importing keeps your manual entries.'
+                : form.type === 'seedance'
+                  ? 'Seedance model IDs, e.g. doubao-seedance-1-0-pro-250528. Fetch the live list and keep your manual entries.'
+                  : 'Upstream model names, separated by commas or new lines. Importing keeps your manual entries.'
             }
             action={
               <button
@@ -535,7 +550,13 @@ export default function Channels() {
               rows={2}
               value={form.models}
               onChange={(event) => setField('models', event.target.value)}
-              placeholder={form.type === 'minimax' ? 'MiniMax-H3' : 'gpt-4o, gpt-4o-mini'}
+              placeholder={
+                form.type === 'minimax'
+                  ? 'MiniMax-H3'
+                  : form.type === 'seedance'
+                    ? 'doubao-seedance-1-0-pro-250528'
+                    : 'gpt-4o, gpt-4o-mini'
+              }
             />
           </FormField>
           <FormField
@@ -549,7 +570,13 @@ export default function Channels() {
               rows={2}
               value={form.mapping}
               onChange={(event) => setField('mapping', event.target.value)}
-              placeholder={form.type === 'minimax' ? 'my-video=MiniMax-H3' : 'claude-sonnet=claude-3-7-sonnet-latest'}
+              placeholder={
+                form.type === 'minimax'
+                  ? 'my-video=MiniMax-H3'
+                  : form.type === 'seedance'
+                    ? 'my-video=doubao-seedance-1-0-pro-250528'
+                    : 'claude-sonnet=claude-3-7-sonnet-latest'
+              }
             />
           </FormField>
           {modelsError ? (
@@ -639,7 +666,7 @@ export default function Channels() {
               onChange={(event) => setField('weight', event.target.value)}
             />
           </FormField>
-          {form.type !== 'minimax' ? (
+          {!isVideoProtocol(form.type) ? (
             <>
               <FormField label="Input price" htmlFor="channel-input-price" hint="USD per 1M prompt tokens.">
                 <input

@@ -56,6 +56,42 @@ func TestFetchModelsMinimax(t *testing.T) {
 	}
 }
 
+func TestFetchModelsSeedance(t *testing.T) {
+	env := newTestEnv(t)
+	var gotPath, gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotAuth = r.URL.Path, r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"doubao-seedance-1-0-pro-250528"},{"id":"doubao-seedance-1-0-lite-i2v-250428"},{"id":"doubao-seed-1-6"}]}`)
+	}))
+	defer upstream.Close()
+
+	models, err := env.gw.FetchModels(context.Background(), "seedance", upstream.URL+"/api/v3", "ark-key")
+	if err != nil {
+		t.Fatalf("fetch models: %v", err)
+	}
+	if gotPath != "/api/v3/models" || gotAuth != "Bearer ark-key" {
+		t.Fatalf("upstream request path=%q auth=%q", gotPath, gotAuth)
+	}
+	joined := strings.Join(models, ",")
+	for _, want := range []string{
+		"doubao-seedance-1-0-pro-250528",
+		"doubao-seedance-1-0-lite-i2v-250428",
+		"doubao-seedance-2-0-260128",
+		"doubao-seedance-2-5-260628",
+		"doubao-seed-1-6",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("models = %v, missing %q", models, want)
+		}
+	}
+	for i := 1; i < len(models); i++ {
+		if models[i-1] > models[i] {
+			t.Fatalf("models are not sorted: %v", models)
+		}
+	}
+}
+
 func TestFetchModelsAnthropicPagination(t *testing.T) {
 	env := newTestEnv(t)
 	var afterIDs []string

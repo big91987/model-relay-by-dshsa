@@ -29,7 +29,8 @@ const (
 	maxPollFailures   = 5
 )
 
-// firstFrameDataURL matches the image data URIs MiniMax-H3 accepts as a first frame.
+// firstFrameDataURL matches the image data URIs MiniMax-H3 and Seedance accept
+// as a first frame.
 var firstFrameDataURL = regexp.MustCompile(`^data:image/(png|jpeg|jpg|webp|heic|heif);base64,[A-Za-z0-9+/=]+$`)
 
 // VideoError is a client-visible failure while creating a video task.
@@ -40,7 +41,8 @@ type VideoError struct {
 
 func (e *VideoError) Error() string { return e.Message }
 
-// VideoRequest describes one MiniMax-H3 text-to-video or image-to-video task.
+// VideoRequest describes one text-to-video or image-to-video task. Its fields
+// are normalized per provider before they reach the upstream API.
 type VideoRequest struct {
 	Model      string
 	Prompt     string
@@ -50,7 +52,9 @@ type VideoRequest struct {
 	Ratio      string
 }
 
-// remoteVideoTask is the subset of the MiniMax task payload the relay needs.
+// remoteVideoTask is the subset of a MiniMax or Seedance task payload the
+// relay needs. MiniMax reports the result URL in content.url and Seedance in
+// content.video_url, so both are decoded.
 type remoteVideoTask struct {
 	ID         string `json:"id"`
 	Model      string `json:"model"`
@@ -63,12 +67,14 @@ type remoteVideoTask struct {
 		Message string `json:"message"`
 	} `json:"error"`
 	Content struct {
-		URL string `json:"url"`
+		URL      string `json:"url"`
+		VideoURL string `json:"video_url"`
 	} `json:"content"`
 }
 
-// CreateVideo validates a request, submits it to an enabled MiniMax channel and
-// starts polling the asynchronous task. The stored task is returned immediately.
+// CreateVideo validates a request, submits it to an enabled video channel
+// (MiniMax-H3 or Seedance) and starts polling the asynchronous task. The stored
+// task is returned immediately.
 func (g *Gateway) CreateVideo(ctx context.Context, req VideoRequest) (*store.VideoTask, error) {
 	if err := normalizeVideoRequest(&req); err != nil {
 		return nil, &VideoError{Status: http.StatusBadRequest, Message: err.Error()}
@@ -79,47 +85,56 @@ func (g *Gateway) CreateVideo(ctx context.Context, req VideoRequest) (*store.Vid
 	}
 	candidates := make([]candidate, 0)
 	for _, cand := range orderCandidates(channels, req.Model) {
-		if cand.channel.Type == "minimax" {
+		if isVideoChannel(cand.channel.Type) {
 			candidates = append(candidates, cand)
 		}
 	}
 	if len(candidates) == 0 {
 		return nil, &VideoError{
 			Status:  http.StatusNotFound,
-			Message: fmt.Sprintf("model %q is not available on any enabled MiniMax channel", req.Model),
+			Message: fmt.Sprintf("model %q is not available on any enabled MiniMax or Seedance channel", req.Model),
 		}
 	}
 
-	content := []map[string]any{{"type": "text", "text": req.Prompt}}
-	mode := "text"
-	if req.FirstFrame != "" {
-		mode = "first_frame"
-		content = append(content, map[string]any{
-			"type":      "image_url",
-			"image_url": map[string]any{"url": req.FirstFrame},
-			"role":      "first_frame",
-		})
-	}
-
 	var lastErr string
+	var validationErr error
+	attempted := false
 	for _, cand := range candidates {
 		ch := cand.channel
+		// MiniMax and Seedance accept different resolutions and duration
+		// ranges; normalize for the channel that will actually serve the task.
+		attempt := req
+		if err := normalizeVideoRequestForProvider(&attempt, ch.Type, cand.upstream); err != nil {
+			validationErr = err
+			continue
+		}
+		attempted = true
 		apiKey, err := g.secrets.Decrypt(ch.APIKeyEncrypted)
 		if err != nil {
 			lastErr = fmt.Sprintf("channel %q: %v", ch.Name, err)
 			continue
 		}
+		content := []map[string]any{{"type": "text", "text": attempt.Prompt}}
+		mode := "text"
+		if attempt.FirstFrame != "" {
+			mode = "first_frame"
+			content = append(content, map[string]any{
+				"type":      "image_url",
+				"image_url": map[string]any{"url": attempt.FirstFrame},
+				"role":      "first_frame",
+			})
+		}
 		body, err := json.Marshal(map[string]any{
 			"model":      cand.upstream,
 			"content":    content,
-			"resolution": req.Resolution,
-			"duration":   req.Duration,
-			"ratio":      req.Ratio,
+			"resolution": attempt.Resolution,
+			"duration":   attempt.Duration,
+			"ratio":      attempt.Ratio,
 		})
 		if err != nil {
 			return nil, err
 		}
-		upreq, err := g.upstreamRequest(ctx, &ch, http.MethodPost, "/v2/video_generation", body, apiKey, false, true)
+		upreq, err := g.upstreamRequest(ctx, &ch, http.MethodPost, videoCreatePath(ch.Type), body, apiKey, false, true)
 		if err != nil {
 			lastErr = err.Error()
 			continue
@@ -136,7 +151,7 @@ func (g *Gateway) CreateVideo(ctx context.Context, req VideoRequest) (*store.Vid
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			message := minimaxErrorMessage(data, resp.StatusCode)
+			message := videoErrorMessage(data, resp.StatusCode)
 			if shouldFailover(resp.StatusCode) {
 				lastErr = fmt.Sprintf("channel %q returned %d: %s", ch.Name, resp.StatusCode, message)
 				continue
@@ -145,23 +160,32 @@ func (g *Gateway) CreateVideo(ctx context.Context, req VideoRequest) (*store.Vid
 		}
 		var created struct {
 			TaskID string `json:"task_id"`
+			ID     string `json:"id"`
 		}
-		if err := json.Unmarshal(data, &created); err != nil || strings.TrimSpace(created.TaskID) == "" {
-			lastErr = fmt.Sprintf("channel %q returned no task_id", ch.Name)
+		taskID := ""
+		if json.Unmarshal(data, &created) == nil {
+			taskID = strings.TrimSpace(created.TaskID)
+			if taskID == "" {
+				// Seedance names the created task "id"; MiniMax uses "task_id".
+				taskID = strings.TrimSpace(created.ID)
+			}
+		}
+		if taskID == "" {
+			lastErr = fmt.Sprintf("channel %q returned no task id", ch.Name)
 			continue
 		}
 
 		task := &store.VideoTask{
-			UpstreamTaskID: created.TaskID,
+			UpstreamTaskID: taskID,
 			ChannelID:      ch.ID,
 			ChannelName:    ch.Name,
-			Model:          req.Model,
+			Model:          attempt.Model,
 			UpstreamModel:  cand.upstream,
-			Prompt:         req.Prompt,
+			Prompt:         attempt.Prompt,
 			Mode:           mode,
-			Resolution:     req.Resolution,
-			Duration:       req.Duration,
-			Ratio:          req.Ratio,
+			Resolution:     attempt.Resolution,
+			Duration:       attempt.Duration,
+			Ratio:          attempt.Ratio,
 			Status:         "queued",
 		}
 		if err := g.store.CreateVideoTask(task); err != nil {
@@ -171,18 +195,22 @@ func (g *Gateway) CreateVideo(ctx context.Context, req VideoRequest) (*store.Vid
 		return task, nil
 	}
 
-	message := "no enabled MiniMax channel accepted the video task"
+	if !attempted && validationErr != nil {
+		return nil, &VideoError{Status: http.StatusBadRequest, Message: validationErr.Error()}
+	}
+	message := "no enabled video channel accepted the video task"
 	if lastErr != "" {
 		message += ": " + lastErr
 	}
 	return nil, &VideoError{Status: http.StatusBadGateway, Message: message}
 }
 
+// normalizeVideoRequest validates the provider-independent parts of a request.
 func normalizeVideoRequest(req *VideoRequest) error {
 	req.Model = strings.TrimSpace(req.Model)
 	req.Prompt = strings.TrimSpace(req.Prompt)
 	req.FirstFrame = strings.TrimSpace(req.FirstFrame)
-	req.Resolution = strings.ToUpper(strings.TrimSpace(req.Resolution))
+	req.Resolution = strings.TrimSpace(req.Resolution)
 	req.Ratio = strings.TrimSpace(req.Ratio)
 	if req.Model == "" {
 		return errors.New("model is required")
@@ -193,14 +221,6 @@ func normalizeVideoRequest(req *VideoRequest) error {
 	if utf8.RuneCountInString(req.Prompt) > maxVideoPrompt {
 		return fmt.Errorf("prompt must be at most %d characters", maxVideoPrompt)
 	}
-	switch req.Resolution {
-	case "480P", "768P", "2K":
-	default:
-		return errors.New("resolution must be 480P, 768P or 2K")
-	}
-	if req.Duration < 4 || req.Duration > 15 {
-		return errors.New("duration must be between 4 and 15 seconds")
-	}
 	if req.FirstFrame != "" {
 		if !firstFrameDataURL.MatchString(req.FirstFrame) {
 			return errors.New("first_frame must be a base64 image data URL (PNG, JPEG, WEBP, HEIC or HEIF)")
@@ -208,8 +228,105 @@ func normalizeVideoRequest(req *VideoRequest) error {
 		if marker := strings.Index(req.FirstFrame, ";base64,"); marker < 0 || len(req.FirstFrame)-marker-len(";base64,") > maxFirstFrameData {
 			return errors.New("first_frame must be 30 MiB or smaller")
 		}
-		// Image-to-video derives its aspect ratio from the first frame.
+	}
+	return nil
+}
+
+// normalizeVideoRequestForProvider applies the parameter rules of one video
+// protocol and canonicalizes the values sent upstream.
+func normalizeVideoRequestForProvider(req *VideoRequest, channelType, upstreamModel string) error {
+	if req.FirstFrame != "" {
+		// Both providers derive image-to-video aspect ratio from the first frame.
 		req.Ratio = "adaptive"
+	}
+	switch channelType {
+	case "minimax":
+		req.Resolution = strings.ToUpper(req.Resolution)
+		switch req.Resolution {
+		case "480P", "768P", "2K":
+		default:
+			return errors.New("resolution must be 480P, 768P or 2K")
+		}
+		if req.Duration < 4 || req.Duration > 15 {
+			return errors.New("duration must be between 4 and 15 seconds")
+		}
+		if req.FirstFrame != "" {
+			return nil
+		}
+		switch req.Ratio {
+		case "21:9", "16:9", "4:3", "1:1", "3:4", "9:16":
+			return nil
+		case "":
+			return errors.New("ratio is required for text-to-video")
+		case "adaptive":
+			return errors.New("ratio cannot be adaptive for text-to-video")
+		default:
+			return errors.New("ratio must be one of 21:9, 16:9, 4:3, 1:1, 3:4, 9:16")
+		}
+	case "seedance":
+		return normalizeSeedanceRequest(req, upstreamModel)
+	}
+	return fmt.Errorf("unsupported video channel type %q", channelType)
+}
+
+// seedanceModelLimits describes the parameter ranges the Ark API documents for
+// one Seedance model family. Unknown model IDs (for example an Ark endpoint ID)
+// fall back to the union of the documented ranges.
+type seedanceModelLimits struct {
+	resolutions       []string
+	minDuration       int
+	maxDuration       int
+	adaptiveTextRatio bool
+}
+
+func seedanceModelLimitsFor(model string) seedanceModelLimits {
+	name := strings.ToLower(model)
+	switch {
+	case strings.Contains(name, "seedance-2-5"):
+		return seedanceModelLimits{
+			resolutions:       []string{"480p", "720p", "1080p"},
+			minDuration:       4,
+			maxDuration:       30,
+			adaptiveTextRatio: true,
+		}
+	case strings.Contains(name, "seedance-2-0"):
+		resolutions := []string{"480p", "720p", "1080p"}
+		if !strings.Contains(name, "fast") && !strings.Contains(name, "mini") {
+			resolutions = append(resolutions, "4k")
+		}
+		return seedanceModelLimits{
+			resolutions:       resolutions,
+			minDuration:       4,
+			maxDuration:       15,
+			adaptiveTextRatio: true,
+		}
+	case strings.Contains(name, "seedance-1-0"):
+		return seedanceModelLimits{
+			resolutions:       []string{"480p", "720p", "1080p"},
+			minDuration:       2,
+			maxDuration:       12,
+			adaptiveTextRatio: false,
+		}
+	default:
+		return seedanceModelLimits{
+			resolutions:       []string{"480p", "720p", "1080p", "4k"},
+			minDuration:       2,
+			maxDuration:       30,
+			adaptiveTextRatio: true,
+		}
+	}
+}
+
+func normalizeSeedanceRequest(req *VideoRequest, upstreamModel string) error {
+	limits := seedanceModelLimitsFor(upstreamModel)
+	req.Resolution = strings.ToLower(req.Resolution)
+	if !containsString(limits.resolutions, req.Resolution) {
+		return fmt.Errorf("resolution must be one of %s for model %s", strings.Join(limits.resolutions, ", "), upstreamModel)
+	}
+	if req.Duration < limits.minDuration || req.Duration > limits.maxDuration {
+		return fmt.Errorf("duration must be between %d and %d seconds for model %s", limits.minDuration, limits.maxDuration, upstreamModel)
+	}
+	if req.FirstFrame != "" {
 		return nil
 	}
 	switch req.Ratio {
@@ -218,10 +335,38 @@ func normalizeVideoRequest(req *VideoRequest) error {
 	case "":
 		return errors.New("ratio is required for text-to-video")
 	case "adaptive":
-		return errors.New("ratio cannot be adaptive for text-to-video")
+		if limits.adaptiveTextRatio {
+			return nil
+		}
+		return fmt.Errorf("ratio cannot be adaptive for text-to-video on model %s", upstreamModel)
 	default:
-		return errors.New("ratio must be one of 21:9, 16:9, 4:3, 1:1, 3:4, 9:16")
+		return errors.New("ratio must be one of 21:9, 16:9, 4:3, 1:1, 3:4, 9:16 or adaptive")
 	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+// videoCreatePath returns the asynchronous create-task endpoint of a provider.
+func videoCreatePath(channelType string) string {
+	if channelType == "seedance" {
+		return "/contents/generations/tasks"
+	}
+	return "/v2/video_generation"
+}
+
+// videoTaskPath returns the task-status endpoint of a provider.
+func videoTaskPath(channelType, upstreamTaskID string) string {
+	if channelType == "seedance" {
+		return "/contents/generations/tasks/" + url.PathEscape(upstreamTaskID)
+	}
+	return "/v2/query/video_generation/" + url.PathEscape(upstreamTaskID)
 }
 
 // watchVideoTask polls the upstream task until it reaches a terminal state,
@@ -245,7 +390,7 @@ func (g *Gateway) watchVideoTask(taskID int64, ch store.Channel) {
 				g.finishVideoDownload(ctx, task, task.RemoteURL)
 				return
 			}
-		case "failed", "cancelled":
+		case "failed", "cancelled", "expired":
 			return
 		}
 
@@ -265,12 +410,16 @@ func (g *Gateway) watchVideoTask(taskID int64, ch store.Channel) {
 					g.saveVideoTask(task)
 				}
 			case "succeeded":
-				if strings.TrimSpace(remote.Content.URL) == "" {
+				videoURL := strings.TrimSpace(remote.Content.VideoURL)
+				if videoURL == "" {
+					videoURL = strings.TrimSpace(remote.Content.URL)
+				}
+				if videoURL == "" {
 					g.markVideoFailed(task, "the upstream task succeeded without a video URL")
 					return
 				}
 				task.Status = "succeeded"
-				task.RemoteURL = remote.Content.URL
+				task.RemoteURL = videoURL
 				if remote.Resolution != "" {
 					task.Resolution = remote.Resolution
 				}
@@ -281,9 +430,9 @@ func (g *Gateway) watchVideoTask(taskID int64, ch store.Channel) {
 					task.Ratio = remote.Ratio
 				}
 				g.saveVideoTask(task)
-				g.finishVideoDownload(ctx, task, remote.Content.URL)
+				g.finishVideoDownload(ctx, task, videoURL)
 				return
-			case "failed", "cancelled":
+			case "failed", "cancelled", "expired":
 				task.Status = remote.Status
 				task.Error = remoteErrorMessage(remote)
 				g.saveVideoTask(task)
@@ -379,8 +528,7 @@ func (g *Gateway) queryVideoTask(ctx context.Context, ch *store.Channel, upstrea
 	if err != nil {
 		return nil, err
 	}
-	path := "/v2/query/video_generation/" + url.PathEscape(upstreamTaskID)
-	req, err := g.upstreamRequest(ctx, ch, http.MethodGet, path, nil, apiKey, false, true)
+	req, err := g.upstreamRequest(ctx, ch, http.MethodGet, videoTaskPath(ch.Type, upstreamTaskID), nil, apiKey, false, true)
 	if err != nil {
 		return nil, err
 	}
@@ -394,7 +542,15 @@ func (g *Gateway) queryVideoTask(ctx context.Context, ch *store.Channel, upstrea
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, errors.New(minimaxErrorMessage(data, resp.StatusCode))
+		return nil, errors.New(videoErrorMessage(data, resp.StatusCode))
+	}
+	if ch.Type == "seedance" {
+		// Seedance returns the task object directly; MiniMax wraps it in "task".
+		var task remoteVideoTask
+		if err := json.Unmarshal(data, &task); err != nil {
+			return nil, fmt.Errorf("decode upstream task: %w", err)
+		}
+		return &task, nil
 	}
 	var wrapper struct {
 		Task remoteVideoTask `json:"task"`
@@ -446,10 +602,15 @@ func remoteErrorMessage(task *remoteVideoTask) string {
 	if task.Status == "cancelled" {
 		return "video generation was cancelled"
 	}
+	if task.Status == "expired" {
+		return "video generation task expired"
+	}
 	return "video generation failed"
 }
 
-func minimaxErrorMessage(data []byte, status int) string {
+// videoErrorMessage extracts the human-readable message from a MiniMax or
+// Seedance error response. Both wrap the message in error.message.
+func videoErrorMessage(data []byte, status int) string {
 	var parsed struct {
 		Error struct {
 			Message string `json:"message"`

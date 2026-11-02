@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/big91987/model-relay-by-dshsa/internal/gateway"
 	"github.com/big91987/model-relay-by-dshsa/internal/store"
@@ -135,7 +136,7 @@ func (s *Server) handleVideoContent(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "video/mp4")
 			w.Header().Set("Cache-Control", "private, max-age=3600")
 			if r.URL.Query().Get("download") != "" {
-				w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fmt.Sprintf("minimax-h3-%d.mp4", task.ID)))
+				w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fmt.Sprintf("%s-%d.mp4", videoFileStem(task.Model), task.ID)))
 			}
 			http.ServeFile(w, r, path)
 			return
@@ -148,4 +149,17 @@ func (s *Server) handleVideoContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeErr(w, http.StatusNotFound, "the video is not ready yet")
+}
+
+// videoFileStem derives a friendly download filename from the public model.
+func videoFileStem(model string) string {
+	name := strings.ToLower(model)
+	switch {
+	case strings.HasPrefix(name, "doubao-seedance"):
+		return "seedance"
+	case strings.HasPrefix(name, "minimax"):
+		return "minimax-h3"
+	default:
+		return "video"
+	}
 }

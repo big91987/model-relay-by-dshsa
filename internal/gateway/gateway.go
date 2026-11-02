@@ -391,6 +391,10 @@ func (g *Gateway) TestChannel(ctx context.Context, ch *store.Channel, model stri
 		// A query for an unknown task verifies reachability and credentials
 		// without creating a billable video generation task.
 		req, err = g.upstreamRequest(ctx, ch, http.MethodGet, "/v2/query/video_generation/connectivity-probe", nil, apiKey, false, true)
+	case "seedance":
+		// As with MiniMax, querying a task that does not exist checks the
+		// endpoint and credentials without creating a billable task.
+		req, err = g.upstreamRequest(ctx, ch, http.MethodGet, "/contents/generations/tasks/connectivity-probe", nil, apiKey, false, true)
 	default:
 		body, _ := json.Marshal(map[string]any{
 			"model":      upstream,
@@ -414,7 +418,7 @@ func (g *Gateway) TestChannel(ctx context.Context, ch *store.Channel, model stri
 		message = http.StatusText(resp.StatusCode)
 	}
 	ok = resp.StatusCode >= 200 && resp.StatusCode < 300
-	if ch.Type == "minimax" {
+	if isVideoChannel(ch.Type) {
 		// The probe task does not exist, so a validation error still proves
 		// that the endpoint and key are valid; 401/403 do not.
 		ok = ok || resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusUnprocessableEntity

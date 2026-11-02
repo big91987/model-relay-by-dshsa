@@ -487,6 +487,130 @@ func TestMinimaxVideoFlow(t *testing.T) {
 	}
 }
 
+func TestSeedanceVideoFlow(t *testing.T) {
+	ts, _ := newTestServer(t)
+	videoBytes := []byte("\x00\x00\x00\x18ftypmp42seedance-test-video")
+	var upstream *httptest.Server
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v3/contents/generations/tasks":
+			if r.Header.Get("Authorization") != "Bearer ark-key" {
+				t.Errorf("unexpected upstream auth: %q", r.Header.Get("Authorization"))
+			}
+			var body struct {
+				Model      string  `json:"model"`
+				Resolution string  `json:"resolution"`
+				Duration   float64 `json:"duration"`
+				Content    []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.Model != "doubao-seedance-1-0-pro-250528" || body.Resolution != "720p" ||
+				body.Duration != 5 || len(body.Content) != 1 || body.Content[0].Text == "" {
+				t.Errorf("unexpected upstream body: %+v", body)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":"cgt-server-1"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/contents/generations/tasks/cgt-server-1":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "cgt-server-1", "model": "doubao-seedance-1-0-pro-250528", "status": "succeeded",
+				"content":    map[string]any{"video_url": upstream.URL + "/media.mp4"},
+				"resolution": "720p", "duration": 5, "ratio": "16:9",
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"doubao-seedance-1-0-pro-250528"}]}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/media.mp4":
+			w.Header().Set("Content-Type", "video/mp4")
+			_, _ = w.Write(videoBytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	client := newClient(t)
+	if resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/auth/login", map[string]any{"username": "admin", "password": "admin-pass"}, nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status %d: %s", resp.StatusCode, body)
+	}
+	resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/channels", map[string]any{
+		"name": "seedance", "type": "seedance", "base_url": upstream.URL + "/api/v3", "api_key": "ark-key",
+		"models": []string{"doubao-seedance-1-0-pro-250528"}, "priority": 0, "weight": 1, "status": "enabled",
+	}, nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create channel status %d: %s", resp.StatusCode, body)
+	}
+	var seedanceChannel struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(body, &seedanceChannel); err != nil || seedanceChannel.ID == 0 {
+		t.Fatalf("decode channel: %v (%s)", err, body)
+	}
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/channels/upstream-models", map[string]any{
+		"channel_id": seedanceChannel.ID,
+	}, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "doubao-seedance-2-5-260628") {
+		t.Fatalf("fetch seedance models status %d: %s", resp.StatusCode, body)
+	}
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+"/api/models", nil, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"seedance"`) || !strings.Contains(string(body), `"doubao-seedance-1-0-pro-250528"`) {
+		t.Fatalf("models response %d: %s", resp.StatusCode, body)
+	}
+
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/videos", map[string]any{
+		"model": "doubao-seedance-1-0-pro-250528", "prompt": "A tiny Seedance clip",
+		"resolution": "720P", "duration": 5, "ratio": "16:9",
+	}, nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create video status %d: %s", resp.StatusCode, body)
+	}
+	var created struct {
+		ID         int64  `json:"id"`
+		Status     string `json:"status"`
+		Mode       string `json:"mode"`
+		VideoReady bool   `json:"video_ready"`
+	}
+	if err := json.Unmarshal(body, &created); err != nil {
+		t.Fatalf("decode created video: %v", err)
+	}
+	if created.ID == 0 || created.Status != "queued" || created.Mode != "text" || created.VideoReady {
+		t.Fatalf("unexpected created task: %s", body)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	ready := false
+	for time.Now().Before(deadline) {
+		resp, body = doJSON(t, client, http.MethodGet, ts.URL+fmt.Sprintf("/api/videos/%d", created.ID), nil, nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("get video status %d: %s", resp.StatusCode, body)
+		}
+		var task struct {
+			Status     string `json:"status"`
+			VideoReady bool   `json:"video_ready"`
+		}
+		_ = json.Unmarshal(body, &task)
+		if task.Status == "succeeded" && task.VideoReady {
+			ready = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatal("Seedance video task did not become ready")
+	}
+
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+fmt.Sprintf("/api/videos/%d/content?download=1", created.ID), nil, nil)
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(body, videoBytes) {
+		t.Fatalf("content status %d body %q", resp.StatusCode, body)
+	}
+	if disposition := resp.Header.Get("Content-Disposition"); !strings.Contains(disposition, "seedance") {
+		t.Fatalf("download disposition = %q", disposition)
+	}
+}
+
 func TestPlaygroundAdminProxy(t *testing.T) {
 	ts, st := newTestServer(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

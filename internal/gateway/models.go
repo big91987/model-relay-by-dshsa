@@ -29,6 +29,16 @@ var minimaxVideoModels = []string{
 	"MiniMax-H3-Max",
 }
 
+// Ark's /api/v3/models endpoint lists the models an account can call. Seedance
+// is newer than most listings, so keep a small fallback catalog to make the
+// video page usable right after a fetch.
+var seedanceVideoModels = []string{
+	"doubao-seedance-2-5-260628",
+	"doubao-seedance-2-0-260128",
+	"doubao-seedance-1-0-pro-250528",
+	"doubao-seedance-1-0-pro-fast-251015",
+}
+
 // FetchModels asks an upstream provider for the models it serves.
 //
 // OpenAI-compatible providers expose GET {base}/models with a bearer token.
@@ -102,6 +112,15 @@ func (g *Gateway) FetchModels(ctx context.Context, channelType, baseURL, apiKey 
 	}
 	if channelType == "minimax" {
 		for _, id := range minimaxVideoModels {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			models = append(models, id)
+		}
+	}
+	if channelType == "seedance" {
+		for _, id := range seedanceVideoModels {
 			if seen[id] {
 				continue
 			}

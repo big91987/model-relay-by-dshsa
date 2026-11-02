@@ -18,6 +18,9 @@ CONTENT = {
 OPENAI_MODELS = ["gpt-4.1", "gpt-4o", "gpt-4o-mini", "o1", "o3-mini"]
 ANTHROPIC_MODELS = ["claude-haiku-4", "claude-opus-4", "claude-sonnet-4"]
 DEEPSEEK_MODELS = ["deepseek-chat", "deepseek-reasoner"]
+SEEDANCE_MODELS = ["doubao-seedance-2-5-260628", "doubao-seedance-2-0-260128",
+                   "doubao-seedance-1-0-pro-250528", "doubao-seedance-1-0-pro-fast-251015",
+                   "doubao-seedance-1-0-lite-i2v-250428"]
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -28,6 +31,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/v2/query/video_generation/"):
             return self.query_video(self.path.rsplit("/", 1)[-1])
+        if self.path.startswith("/api/v3/contents/generations/tasks/"):
+            return self.query_seedance(self.path.rsplit("/", 1)[-1])
         if self.path.startswith("/media/") and self.path.endswith(".mp4"):
             return self.media()
         if self.path.endswith("/models"):
@@ -38,7 +43,9 @@ class Handler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization", "")
         if "reject" in auth or "reject" in self.headers.get("x-api-key", ""):
             return self.send_json(401, {"error": {"message": "invalid api key"}})
-        if self.headers.get("x-api-key"):
+        if self.path.startswith("/api/v3/"):
+            ids = SEEDANCE_MODELS
+        elif self.headers.get("x-api-key"):
             ids = ANTHROPIC_MODELS
         elif "deepseek" in auth:
             ids = DEEPSEEK_MODELS
@@ -61,6 +68,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.messages(body)
         if self.path.endswith("/v2/video_generation"):
             return self.create_video(body)
+        if self.path.endswith("/contents/generations/tasks"):
+            return self.create_seedance(body)
         self.send_json(404, {"error": {"message": "not found"}})
 
     def create_video(self, body):
@@ -117,6 +126,56 @@ class Handler(BaseHTTPRequestHandler):
         elif status == "failed":
             payload["error"] = {"code": "1026", "message": "video description contains sensitive content"}
         self.send_json(200, {"task": payload})
+
+    def create_seedance(self, body):
+        if self.headers.get("Authorization") != "Bearer ark-key":
+            return self.send_json(401, {"error": {
+                "code": "AuthenticationError",
+                "message": "the API key or AK/SK in the request is missing or invalid.",
+            }})
+        with VIDEO_LOCK:
+            task_id = "cgt-%d" % (len(VIDEO_TASKS) + 1)
+            VIDEO_TASKS[task_id] = {
+                "provider": "seedance",
+                "body": body,
+                "queries": 0,
+                "created_at": int(time.time()),
+            }
+        sys.stderr.write("mock seedance task %s: %s\n" % (task_id, body.get("model")))
+        self.send_json(200, {"id": task_id})
+
+    def query_seedance(self, task_id):
+        with VIDEO_LOCK:
+            task = VIDEO_TASKS.get(task_id)
+            if task is None or task.get("provider") != "seedance":
+                return self.send_json(404, {"error": {
+                    "code": "InvalidParameter",
+                    "message": "the requested task does not exist",
+                }})
+            task["queries"] += 1
+            queries = task["queries"]
+            body = task["body"]
+            created_at = task["created_at"]
+        status = "running" if queries < 2 else "succeeded"
+        prompt = next((item.get("text", "") for item in body.get("content", []) if item.get("type") == "text"), "")
+        if status == "succeeded" and "fail" in prompt.lower():
+            status = "failed"
+        payload = {
+            "id": task_id,
+            "model": body.get("model", "doubao-seedance-1-0-pro-250528"),
+            "status": status,
+            "created_at": created_at,
+            "updated_at": int(time.time()),
+            "resolution": body.get("resolution", "720p"),
+            "duration": body.get("duration", 5),
+            "ratio": body.get("ratio", "16:9"),
+        }
+        if status == "succeeded":
+            payload["content"] = {"video_url": "http://127.0.0.1:%d/media/%s.mp4" % (PORT, task_id)}
+        elif status == "failed":
+            payload["error"] = {"code": "OutputVideoSensitiveContentDetected",
+                                "message": "the generated video was blocked by the safety filter"}
+        self.send_json(200, payload)
 
     def media(self):
         try:
