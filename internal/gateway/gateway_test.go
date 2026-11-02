@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -174,6 +175,99 @@ func TestChatCompletionsStream(t *testing.T) {
 	}
 	logs := env.logs(t)
 	if len(logs) != 1 || !logs[0].Stream || logs[0].PromptTokens != 7 || logs[0].CompletionTokens != 3 {
+		t.Fatalf("unexpected logs: %+v", logs)
+	}
+}
+
+func TestChatCompletionsStreamSynthesizesUsage(t *testing.T) {
+	env := newTestEnv(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		chunks := []string{
+			`{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"Hel"},"finish_reason":null}]}`,
+			`{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":"stop"}]}`,
+		}
+		for _, chunk := range chunks {
+			_, _ = io.WriteString(w, "data: "+chunk+"\n\n")
+			flusher.Flush()
+		}
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+	env.addChannel(t, "stream", upstream.URL+"/v1", "openai", 0, []string{"public-model"}, nil, 0, 0)
+
+	rec := env.chat(t, `{"model":"public-model","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"x_usage_source":"estimated"`) {
+		t.Fatalf("expected estimated usage chunk: %s", body)
+	}
+	if strings.Index(body, `"x_usage_source":"estimated"`) > strings.Index(body, "data: [DONE]") {
+		t.Fatalf("usage chunk must precede [DONE]: %s", body)
+	}
+	var usageChunk struct {
+		Usage struct {
+			TotalTokens int64 `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	found := false
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.Contains(line, `"x_usage_source":"estimated"`) {
+			continue
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &usageChunk); err != nil {
+			t.Fatalf("decode usage chunk: %v", err)
+		}
+		found = true
+	}
+	if !found || usageChunk.Usage.TotalTokens <= 0 {
+		t.Fatalf("missing non-zero usage: %s", body)
+	}
+	logs := env.logs(t)
+	if len(logs) != 1 || logs[0].PromptTokens == 0 || logs[0].CompletionTokens == 0 {
+		t.Fatalf("unexpected logs: %+v", logs)
+	}
+}
+
+func TestChatCompletionsStreamInterrupted(t *testing.T) {
+	env := newTestEnv(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("test upstream does not support hijacking")
+			return
+		}
+		conn, buf, err := hijacker.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+		payload := "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n"
+		_, _ = fmt.Fprintf(buf, "%x\r\n%s\r\n", len(payload), payload)
+		_ = buf.Flush()
+	}))
+	defer upstream.Close()
+	env.addChannel(t, "broken-stream", upstream.URL+"/v1", "openai", 0, []string{"public-model"}, nil, 0, 0)
+
+	rec := env.chat(t, `{"model":"public-model","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"partial"`) {
+		t.Fatalf("missing partial content: %s", body)
+	}
+	if !strings.Contains(body, `"code":"stream_interrupted"`) || !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("interrupted stream must send an explicit error and [DONE]: %s", body)
+	}
+	logs := env.logs(t)
+	if len(logs) != 1 || logs[0].Status != "error" || !strings.Contains(logs[0].Error, "stream interrupted") {
 		t.Fatalf("unexpected logs: %+v", logs)
 	}
 }
@@ -371,6 +465,9 @@ func TestChatCompletionsAnthropicStream(t *testing.T) {
 	}
 	if !strings.Contains(body, `"finish_reason":"stop"`) || !strings.Contains(body, "data: [DONE]") {
 		t.Fatalf("missing finish markers: %s", body)
+	}
+	if !strings.Contains(body, `"x_usage_source":"upstream"`) || !strings.Contains(body, `"prompt_tokens":9`) || !strings.Contains(body, `"completion_tokens":2`) {
+		t.Fatalf("missing translated usage chunk: %s", body)
 	}
 	logs := env.logs(t)
 	if len(logs) != 1 || logs[0].PromptTokens != 9 || logs[0].CompletionTokens != 2 || !logs[0].Stream {

@@ -176,6 +176,10 @@ func TestAdminAndRelayFlow(t *testing.T) {
 	if !strings.Contains(string(body), "hi from mock") {
 		t.Fatalf("unexpected relay response: %s", body)
 	}
+	relayRequestID := resp.Header.Get("X-Request-Id")
+	if relayRequestID == "" {
+		t.Fatal("relay response must carry X-Request-Id")
+	}
 
 	resp, body = doJSON(t, client, http.MethodGet, ts.URL+"/api/dashboard", nil, nil)
 	if resp.StatusCode != http.StatusOK {
@@ -199,6 +203,19 @@ func TestAdminAndRelayFlow(t *testing.T) {
 	_ = json.Unmarshal(body, &logsResponse)
 	if logsResponse.Total != 1 {
 		t.Fatalf("expected one log, got %s", body)
+	}
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+"/api/logs?request_id="+relayRequestID, nil, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("logs by request id status %d", resp.StatusCode)
+	}
+	_ = json.Unmarshal(body, &logsResponse)
+	if logsResponse.Total != 1 || !strings.Contains(string(body), relayRequestID) {
+		t.Fatalf("request id filter did not find the request log: %s", body)
+	}
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+"/api/logs?request_id=missing-request-id", nil, nil)
+	_ = json.Unmarshal(body, &logsResponse)
+	if logsResponse.Total != 0 {
+		t.Fatalf("unknown request id must match nothing: %s", body)
 	}
 
 	resp, body = doJSON(t, client, http.MethodGet, ts.URL+"/", nil, nil)

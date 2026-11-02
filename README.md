@@ -14,6 +14,7 @@ A self-hosted model gateway written in Go, with a React admin console. It expose
 - **Gateway keys** — per-key USD quota, model allowlists, requests-per-minute limit, expiry, enable/disable, and a one-time plaintext reveal at creation.
 - **Usage accounting** — prompt/completion tokens and cost from per-channel input/output prices, request logs with status, upstream model, latency and error detail.
 - **Admin console** — dashboard with 7-day traffic, top models and recent requests; channel, model, API key and log pages.
+- **Playground** — try any model available to a gateway key from the console: multi-turn chat, editable system prompt, temperature and max output, streaming, stop, and request IDs that link to the request log.
 - **Simple to operate** — one Go binary with the console embedded, SQLite storage, no Redis or Postgres, graceful shutdown.
 - **Ship-ready basics** — Dockerfile, docker-compose example, Makefile and GitHub Actions CI.
 
@@ -108,11 +109,15 @@ Changing `SECRET_KEY` invalidates admin sessions and makes existing channel keys
 | --- | --- |
 | ![API keys](docs/screenshots/tokens.png) | ![Request logs](docs/screenshots/logs.png) |
 
+| Playground (dark) | Playground (light) |
+| --- | --- |
+| ![Playground in dark theme](docs/screenshots/playground.png) | ![Playground in light theme](docs/screenshots/playground-light.png) |
+
 | Video generation | MiniMax model import |
 | --- | --- |
 | ![Video generation](docs/screenshots/video-generation.png) | ![MiniMax H3 channel](docs/screenshots/video-channel.png) |
 
-The **Models** page shows the public catalog, serving channels and the lowest configured price per model. The screenshots above use the local mock upstream in `scripts/mock-upstream.py` (`python3 scripts/mock-upstream.py 19090`), so `127.0.0.1` URLs are demo data rather than real providers. The mock also answers MiniMax video create/query calls and serves `scripts/media/demo.mp4` for local previews; the video screenshot additionally includes one real MiniMax-H3 generation.
+The **Models** page shows the public catalog, serving channels and the lowest configured price per model. The **Playground** page selects an existing gateway key, sends real relay requests, and shows streaming output, latency, token usage and the request ID. Most screenshots use the local mock upstream in `scripts/mock-upstream.py` (`python3 scripts/mock-upstream.py 19090`), so `127.0.0.1` URLs are demo data rather than real providers; the mock also answers MiniMax video create/query calls and serves `scripts/media/demo.mp4` for local previews, while the video screenshot additionally includes one real MiniMax-H3 generation and the Playground uses a public Pollinations GPT-OSS endpoint.
 
 Use the theme control in the top bar, or on the sign-in screen, to switch between light, dark and follow-system themes. The console remembers the selection in the browser.
 
@@ -120,13 +125,29 @@ The channel form can fetch the provider's model list and import selected models 
 
 ![Fetching upstream models in the channel form](docs/screenshots/channel-modal-fetch.png)
 
+## Playground
+
+Open **Playground** in the console after signing in. It is an admin page, but every chat request uses a gateway key exactly like an external client, so the key's model allowlist, quota, RPM limit, channel routing and request logging all apply. The page never calls an upstream directly.
+
+1. Create a gateway key on **API keys** if you do not have one, then paste it into **Gateway connection** and choose **Validate key & load models**. The model list comes from `GET /v1/models` and is filtered by that key.
+2. Pick a model. The protocol chips and configured prices come from the model catalog; the temperature range follows the serving protocol (Anthropic channels cap it at 1).
+3. Optionally edit the system prompt, temperature and maximum output tokens, then send a message. Multi-turn history, including earlier assistant replies, is sent as context on the next request.
+4. Responses stream into the conversation. **Stop generating** aborts the browser read and cancels the upstream request through the relay's request context; content already generated may still be billed. **Regenerate** asks for confirmation first because it creates a new request. **Clear conversation** removes the page's messages but not existing request logs or charges.
+5. Each completed reply shows the relay request ID, round-trip latency and token usage. Usage reported by the upstream is labeled as reported; if the upstream omits it, the gateway's final SSE usage chunk is marked `x_usage_source: "estimated"` and the page labels the value as an estimate instead of presenting it as exact. **View log** opens **Logs** filtered by that request ID.
+
+The page uses the console theme tokens and works in light, dark and follow-system themes, including the request log and confirmation dialogs.
+
+The gateway key is held only in this page's memory. It is sent to the same origin as an `Authorization: Bearer` header and is never written to the URL, `localStorage`, `sessionStorage` or application logs; refreshing or leaving the page clears it. The conversation is not stored server-side — only normal relay request logs remain. Parameter ranges are protocol-level constraints; model-specific limits (for example, reasoning models that reject temperature) are enforced by the upstream, and a rejection is shown in the conversation.
+
+See [docs/playground.md](docs/playground.md) for the full usage guide, parameter rules and the real-call verification record with request IDs.
+
 ## Routing and accounting
 
 - A channel serves a model when the model appears in its **models** list, or when it is a **public name in the model mapping**.
 - Candidates are sorted by descending priority. Within one priority, weight influences a randomized order, so traffic is spread across equivalent channels.
 - If an upstream call fails before any response bytes reach the client, the next candidate is tried. Streaming responses that have already started are not retried.
 - Cost is calculated as `prompt_tokens × input_price / 1M + completion_tokens × output_price / 1M`, using prices configured on the channel that served the request.
-- Upstream `usage` is used when present. For streams without usage and for providers that omit it, the gateway records a conservative estimate based on the request and returned text.
+- Upstream `usage` is used when present. For streams without usage and for providers that omit it, the gateway records a conservative estimate based on the request and returned text. When a stream omits usage, the relay appends an OpenAI-style final usage chunk whose `x_usage_source` field is `"estimated"`; clients can therefore tell exact and estimated numbers apart. Anthropic streams also include a translated usage chunk.
 - A key with quota `-1` is unlimited. A negative balance does not block in-flight work; the next request is rejected until the quota is raised. `rpm_limit: 0` means unlimited.
 - Quota is enforced from recorded usage, so concurrent in-flight requests can slightly overshoot a key's quota before the next request is blocked.
 
@@ -146,7 +167,7 @@ Admin endpoints use the `mr_session` HttpOnly cookie created by `POST /api/auth/
 | `POST /api/channels/{id}/test` | session | Send a minimal upstream request and report latency. |
 | `GET/POST /api/tokens` | session | List/create gateway keys. Creation returns the plaintext key once. |
 | `PUT/DELETE /api/tokens/{id}` | session | Update/delete a key. |
-| `GET /api/logs` | session | Paginated logs; filters: `model`, `status`, `token_id`, `start`, `end`, `page`, `page_size`. |
+| `GET /api/logs` | session | Paginated logs; filters: `model`, `status`, `request_id`, `token_id`, `start`, `end`, `page`, `page_size`. |
 | `GET /api/models` | session | Model catalog with channels, protocols and prices. |
 | `GET/POST /api/videos` | session | List video tasks / submit a MiniMax-H3 generation task. |
 | `GET /api/videos/{id}` | session | One video task with status and metadata. |
@@ -156,7 +177,7 @@ Admin endpoints use the `mr_session` HttpOnly cookie created by `POST /api/auth/
 | `POST /v1/embeddings` | gateway key | Embeddings passthrough for OpenAI-compatible channels. |
 | `GET /healthz` | — | Liveness check. |
 
-Gateway errors use the OpenAI error envelope, e.g. `{"error":{"message":"…","type":"invalid_api_key","code":"invalid_api_key"}}`.
+Gateway responses include an `X-Request-Id` header; the same value is stored on the request log, so it can be pasted into the log page filter or queried with `GET /api/logs?request_id=…`. Gateway errors use the OpenAI error envelope, e.g. `{"error":{"message":"…","type":"invalid_api_key","code":"invalid_api_key"}}`.
 
 ## Development
 
@@ -193,6 +214,8 @@ docs/screenshots/      console screenshots used in this README
 - The Anthropic adapter translates text, image data URLs, tool calls and tool results. Remote image URLs are not converted. OpenAI's Responses API, audio, rerank and native Anthropic endpoints are out of scope.
 - MiniMax-H3 video tasks are managed from the admin console; there is no gateway-key video API and video generation is not charged against key quotas. Task history and downloaded MP4 files stay in `DATA_DIR` until removed manually.
 - Cost accounting trusts the configured prices and upstream token counts; it is an operational estimate, not an invoice.
+- The Playground gateway key is a credential held in browser memory. It is not persisted by the console, but it is visible in browser developer tools on outgoing requests; use a dedicated key with a model allowlist and quota for testing.
+- Playground parameter ranges are protocol-level. Model-specific limits are enforced by the upstream and surfaced as errors; the page does not maintain a per-model capability database.
 - Channel failover is retried for listed transient statuses. A `400`/`422` from an upstream is returned to the client because it usually reflects the request rather than channel health.
 
 ## Design notes

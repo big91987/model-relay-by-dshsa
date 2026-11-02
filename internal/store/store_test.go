@@ -119,3 +119,16 @@ func TestLogsAndDashboard(t *testing.T) {
 		t.Fatalf("unexpected top models: %+v", dashboard.TopModels)
 	}
 }
+
+func TestListLogsByRequestID(t *testing.T) {
+	s := testStore(t)
+	for _, requestID := range []string{"req-a", "req-b"} {
+		if err := s.InsertLog(&Log{RequestID: requestID, Model: "m", Status: "success"}); err != nil {
+			t.Fatalf("InsertLog: %v", err)
+		}
+	}
+	logs, total, err := s.ListLogs(LogFilter{Page: 1, PageSize: 10, RequestID: "req-b"})
+	if err != nil || total != 1 || len(logs) != 1 || logs[0].RequestID != "req-b" {
+		t.Fatalf("ListLogs by request id: total=%d logs=%+v err=%v", total, logs, err)
+	}
+}

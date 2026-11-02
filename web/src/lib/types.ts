@@ -161,6 +161,7 @@ export interface LogQuery {
   page_size?: number
   model?: string
   status?: string
+  request_id?: string
   token_id?: number
   start?: number
   end?: number

@@ -134,6 +134,8 @@ func (s *Store) migrate() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_video_tasks_created_at ON video_tasks(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_video_tasks_status ON video_tasks(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_logs_request_id ON logs(request_id)`,
+
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -453,13 +455,14 @@ func (s *Store) InsertLog(l *Log) error {
 
 // LogFilter selects logs for the admin API.
 type LogFilter struct {
-	Page     int
-	PageSize int
-	Model    string
-	Status   string
-	TokenID  int64
-	Start    int64
-	End      int64
+	Page      int
+	PageSize  int
+	Model     string
+	Status    string
+	RequestID string
+	TokenID   int64
+	Start     int64
+	End       int64
 }
 
 // ListLogs returns one page of logs and the total number of matches.
@@ -479,6 +482,10 @@ func (s *Store) ListLogs(f LogFilter) ([]Log, int64, error) {
 	if f.Status != "" {
 		clauses = append(clauses, `status = ?`)
 		args = append(args, f.Status)
+	}
+	if f.RequestID != "" {
+		clauses = append(clauses, `request_id = ?`)
+		args = append(args, f.RequestID)
 	}
 	if f.TokenID > 0 {
 		clauses = append(clauses, `token_id = ?`)

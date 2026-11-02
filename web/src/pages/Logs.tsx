@@ -1,24 +1,30 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Icon } from '../components/Icon'
 import { Modal } from '../components/Modal'
 import { EmptyState, ErrorBanner, PageHeader, Spinner, StatusBadge } from '../components/ui'
 import { api } from '../lib/api'
 import { formatCost, formatDateTime, formatDuration, formatNumber, formatTime } from '../lib/format'
+import { useToast } from '../lib/toast'
 import type { LogItem, LogsResponse, Token } from '../lib/types'
 
 interface Filters {
   model: string
   status: string
+  request_id: string
   token_id: string
 }
 
-const emptyFilters: Filters = { model: '', status: '', token_id: '' }
+const emptyFilters: Filters = { model: '', status: '', request_id: '', token_id: '' }
 const pageSize = 25
 
 export default function Logs() {
-  const [draft, setDraft] = useState<Filters>(emptyFilters)
-  const [filters, setFilters] = useState<Filters>(emptyFilters)
+  const toast = useToast()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const initialRequestId = (searchParams.get('request_id') ?? '').trim()
+  const [draft, setDraft] = useState<Filters>({ ...emptyFilters, request_id: initialRequestId })
+  const [filters, setFilters] = useState<Filters>({ ...emptyFilters, request_id: initialRequestId })
   const [page, setPage] = useState(1)
   const [data, setData] = useState<LogsResponse | null>(null)
   const [loading, setLoading] = useState(true)
@@ -34,6 +40,7 @@ export default function Logs() {
         page_size: pageSize,
         model: filters.model.trim() || undefined,
         status: filters.status || undefined,
+        request_id: filters.request_id.trim() || undefined,
         token_id: filters.token_id ? Number(filters.token_id) : undefined,
       })
       setData(response)
@@ -56,16 +63,36 @@ export default function Logs() {
       .catch(() => undefined)
   }, [])
 
+  useEffect(() => {
+    const requestId = (searchParams.get('request_id') ?? '').trim()
+    if (requestId === filters.request_id) return
+    setDraft((current) => ({ ...current, request_id: requestId }))
+    setFilters((current) => ({ ...current, request_id: requestId }))
+    setPage(1)
+  }, [searchParams, filters.request_id])
+
   const applyFilters = (event: FormEvent) => {
     event.preventDefault()
+    const next = { ...draft, request_id: draft.request_id.trim() }
     setPage(1)
-    setFilters({ ...draft })
+    setFilters(next)
+    setSearchParams(next.request_id ? { request_id: next.request_id } : {}, { replace: true })
   }
 
   const resetFilters = () => {
-    setDraft(emptyFilters)
+    setDraft({ ...emptyFilters })
     setPage(1)
-    setFilters(emptyFilters)
+    setFilters({ ...emptyFilters })
+    setSearchParams({}, { replace: true })
+  }
+
+  const copyRequestId = async (requestId: string) => {
+    try {
+      await navigator.clipboard.writeText(requestId)
+      toast.success('Request ID copied')
+    } catch {
+      toast.error('Cannot access the clipboard; select and copy the value manually')
+    }
   }
 
   const totalPages = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1
@@ -83,6 +110,13 @@ export default function Logs() {
             value={draft.model}
             onChange={(event) => setDraft({ ...draft, model: event.target.value })}
             aria-label="Filter by model"
+          />
+          <input
+            className="input"
+            placeholder="Filter by request ID"
+            value={draft.request_id}
+            onChange={(event) => setDraft({ ...draft, request_id: event.target.value })}
+            aria-label="Filter by request ID"
           />
           <select
             className="input"
@@ -234,6 +268,15 @@ export default function Logs() {
               <strong className="detail-status">
                 <StatusBadge status={selected.status} />
                 <span className="muted">HTTP {selected.status_code}</span>
+              </strong>
+            </div>
+            <div className="detail-wide">
+              <span>Request ID</span>
+              <strong className="request-id-detail">
+                <code>{selected.request_id}</code>
+                <button className="link-button" type="button" onClick={() => void copyRequestId(selected.request_id)}>
+                  Copy
+                </button>
               </strong>
             </div>
             <div>
