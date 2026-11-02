@@ -428,7 +428,7 @@ func (g *Gateway) attemptOpenAI(w http.ResponseWriter, r *http.Request, ch *stor
 		return outcome{status: resp.StatusCode, errMsg: msg}
 	}
 	if stream {
-		prompt, completion, err := g.streamOpenAI(w, resp, promptTokens)
+		prompt, completion, err := g.streamOpenAI(w, resp, promptTokens, rawModel(raw))
 		if err != nil {
 			return outcome{committed: true, status: http.StatusOK, prompt: prompt, completion: completion, errMsg: "stream interrupted: " + err.Error()}
 		}

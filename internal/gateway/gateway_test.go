@@ -267,6 +267,32 @@ func TestChatCompletionsQuotaAndRateLimit(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsStreamFallbackForNonStreamingUpstream(t *testing.T) {
+	env := newTestEnv(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-fallback","created":1,"choices":[{"index":0,"message":{"role":"assistant","content":"streamed mock"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}`)
+	}))
+	defer upstream.Close()
+	env.addChannel(t, "fallback", upstream.URL+"/v1", "openai", 0, []string{"public-model"}, nil, 0, 0)
+
+	rec := env.chat(t, `{"model":"public-model","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Header().Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("expected an SSE content type, got %q", rec.Header().Get("Content-Type"))
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "data: ") || !strings.Contains(body, "streamed mock") || !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("unexpected fallback stream: %s", body)
+	}
+	logs := env.logs(t)
+	if len(logs) != 1 || !logs[0].Stream || logs[0].PromptTokens != 5 || logs[0].CompletionTokens != 2 {
+		t.Fatalf("unexpected logs: %+v", logs)
+	}
+}
+
 func TestChatCompletionsAnthropicTranslation(t *testing.T) {
 	env := newTestEnv(t)
 	var gotPath, gotKey, gotVersion string
