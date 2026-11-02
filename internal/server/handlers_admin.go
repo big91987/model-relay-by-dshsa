@@ -410,6 +410,22 @@ func (s *Server) handleListLogs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListReservations(queryInt(r, "limit", 100))
+	if err != nil {
+		s.logger.Error("list quota ledger failed", "error", err)
+		writeErr(w, http.StatusInternalServerError, "failed to load quota ledger")
+		return
+	}
+	pending := 0.0
+	for _, item := range items {
+		if item.Status == store.ReservationPending {
+			pending += item.ReservedCost
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": items, "pending_cost": pending})
+}
+
 type modelSummary struct {
 	ID          string   `json:"id"`
 	Channels    []string `json:"channels"`

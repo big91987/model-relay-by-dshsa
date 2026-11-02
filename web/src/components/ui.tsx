@@ -38,6 +38,27 @@ export function StatusBadge({ status }: { status: string }) {
   )
 }
 
+const costStatusLabels: Record<string, string> = {
+  actual: 'Actual',
+  estimated: 'Estimated',
+  unverified: 'Unverified',
+  free: 'No charge',
+  pending: 'Pending',
+}
+
+export function CostStatusBadge({ status }: { status: string }) {
+  let tone: 'success' | 'danger' | 'muted' = 'muted'
+  if (status === 'actual') tone = 'success'
+  if (status === 'unverified') tone = 'danger'
+  const label = costStatusLabels[status] ?? status
+  return (
+    <span className={`badge badge-${tone}`}>
+      <span className={`badge-dot badge-dot-${tone}`} />
+      {label}
+    </span>
+  )
+}
+
 export function ErrorBanner({ message }: { message: string }) {
   return (
     <div className="error-banner" role="alert">

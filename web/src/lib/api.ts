@@ -3,6 +3,7 @@ import type {
   Channel,
   ChannelInput,
   Dashboard,
+  LedgerResponse,
   LogsResponse,
   LogQuery,
   ModelInfo,
@@ -121,5 +122,8 @@ export const api = {
   },
   models() {
     return request<{ data: ModelInfo[] }>('/api/models')
+  },
+  ledger(limit = 100) {
+    return request<LedgerResponse>(`/api/ledger?limit=${limit}`)
   },
 }

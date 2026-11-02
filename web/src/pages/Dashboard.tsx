@@ -144,7 +144,11 @@ export default function Dashboard() {
         <StatCard
           label="Spend"
           value={formatCost(totals.cost)}
-          hint={`${formatCost(today.cost)} today`}
+          hint={
+            totals.unverified_cost > 0
+              ? `${formatCost(today.cost)} today · ${formatCost(totals.unverified_cost)} unverified`
+              : `${formatCost(today.cost)} today`
+          }
           icon="dollar"
         />
         <StatCard

@@ -46,6 +46,22 @@ func main() {
 	}
 	defer st.Close()
 
+	// A single-node gateway cannot still be serving requests from a previous
+	// process. Pending reservations are therefore recovered at startup and
+	// charged at their reserved upper bound, marked as unverified.
+	recovered, err := st.RecoverPendingReservations()
+	if err != nil {
+		logger.Error("recover in-flight quota reservations failed", "error", err)
+	}
+	if len(recovered) > 0 {
+		var amount float64
+		for _, res := range recovered {
+			amount += res.SettledCost
+		}
+		logger.Warn("recovered in-flight quota reservations after restart",
+			"count", len(recovered), "charged", amount)
+	}
+
 	created, err := st.EnsureAdmin(cfg.AdminUsername, cfg.AdminPassword)
 	if err != nil {
 		logger.Error("seed admin user failed", "error", err)
