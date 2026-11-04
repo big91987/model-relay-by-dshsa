@@ -6,7 +6,7 @@ export interface User {
   created_at: number
 }
 
-export type ChannelType = 'openai' | 'anthropic' | 'minimax'
+export type ChannelType = 'openai' | 'anthropic' | 'minimax' | 'seedance'
 export type ChannelStatus = 'enabled' | 'disabled'
 
 export interface Channel {

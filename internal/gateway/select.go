@@ -68,8 +68,13 @@ func orderCandidates(channels []store.Channel, model string) []candidate {
 // isChatChannel reports whether a channel type serves chat completions.
 func isChatChannel(typ string) bool { return typ == "openai" || typ == "anthropic" }
 
+// isVideoChannel reports whether a channel type serves the asynchronous video
+// workflow instead of chat completions.
+func isVideoChannel(typ string) bool { return typ == "minimax" || typ == "seedance" }
+
 // chatCandidates keeps only channels that speak a chat-capable protocol.
-// MiniMax video channels are served by the separate video task flow.
+// MiniMax and Seedance video channels are served by the separate video task
+// flow.
 func chatCandidates(candidates []candidate) []candidate {
 	out := make([]candidate, 0, len(candidates))
 	for _, cand := range candidates {

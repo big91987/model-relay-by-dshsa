@@ -535,7 +535,7 @@ func scanLog(row interface{ Scan(dest ...any) error }) (*Log, error) {
 	return &l, nil
 }
 
-// VideoTask is one asynchronous MiniMax-H3 generation task.
+// VideoTask is one asynchronous video generation task.
 type VideoTask struct {
 	ID             int64  `json:"id"`
 	UpstreamTaskID string `json:"upstream_task_id"`

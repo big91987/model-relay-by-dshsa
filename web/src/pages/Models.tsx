@@ -6,6 +6,10 @@ import { api } from '../lib/api'
 import { channelTypeLabel, formatPrice } from '../lib/format'
 import type { ModelInfo } from '../lib/types'
 
+function isVideoModel(model: ModelInfo): boolean {
+  return model.types.includes('minimax') || model.types.includes('seedance')
+}
+
 export default function Models() {
   const [models, setModels] = useState<ModelInfo[]>([])
   const [loading, setLoading] = useState(true)
@@ -123,10 +127,10 @@ export default function Models() {
                       </div>
                     </td>
                     <td className="num">
-                      {model.types.includes('minimax') ? <span className="muted">Not metered</span> : formatPrice(model.input_price)}
+                      {isVideoModel(model) ? <span className="muted">Not metered</span> : formatPrice(model.input_price)}
                     </td>
                     <td className="num">
-                      {model.types.includes('minimax') ? <span className="muted">Not metered</span> : formatPrice(model.output_price)}
+                      {isVideoModel(model) ? <span className="muted">Not metered</span> : formatPrice(model.output_price)}
                     </td>
                   </tr>
                 ))}
