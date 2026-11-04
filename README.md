@@ -128,9 +128,9 @@ Changing `SECRET_KEY` invalidates admin sessions and makes existing channel keys
 
 | Video generation (Seedance) | Seedance channel |
 | --- | --- |
-| ![Seedance video generation](docs/screenshots/video-seedance-after.png) | ![Seedance channel](docs/screenshots/channel-seedance-after.png) |
+| ![Seedance video generation](docs/screenshots/video-seedance-live.png) | ![Seedance channel](docs/screenshots/channel-seedance-after.png) |
 
-The **Models** page shows the public catalog, serving channels and the lowest configured price per model. The **Playground** page selects an existing gateway key, sends real relay requests, and shows streaming output, latency, token usage and the request ID. Most screenshots use the local mock upstream in `scripts/mock-upstream.py` (`python3 scripts/mock-upstream.py 19090`), so `127.0.0.1` URLs are demo data rather than real providers; the mock also answers MiniMax and Seedance video create/query calls and serves `scripts/media/demo.mp4` for local previews, while the video screenshot additionally includes one real MiniMax-H3 generation and the Playground uses a public Pollinations GPT-OSS endpoint.
+The **Models** page shows the public catalog, serving channels and the lowest configured price per model. The **Playground** page selects an existing gateway key, sends real relay requests, and shows streaming output, latency, token usage and the request ID. Most screenshots use the local mock upstream in `scripts/mock-upstream.py` (`python3 scripts/mock-upstream.py 19090`), so `127.0.0.1` URLs are demo data rather than real providers; the mock also answers MiniMax and Seedance video create/query calls and serves `scripts/media/demo.mp4` for local previews. The MiniMax and Seedance video screenshots additionally include one real generation each (`MiniMax-H3` and `doubao-seedance-2-0-260128`), and the Playground uses a public Pollinations GPT-OSS endpoint.
 
 Use the theme control in the top bar, or on the sign-in screen, to switch between light, dark and follow-system themes. The console remembers the selection in the browser.
 
