@@ -8,7 +8,7 @@ A self-hosted model gateway written in Go, with a React admin console. It expose
 
 - **OpenAI-compatible relay** — `POST /v1/chat/completions` (streaming and non-streaming), `POST /v1/embeddings`, `GET /v1/models`.
 - **Two chat upstream protocols** — OpenAI-compatible channels (OpenAI, DeepSeek, Moonshot, Qwen, vLLM, Ollama, …) and Anthropic Messages channels, translated to and from the OpenAI format.
-- **MiniMax-H3 video generation** — text-to-video and first-frame image-to-video from the console, with asynchronous tasks, live status, video preview and MP4 download.
+- **MiniMax-H3 and Seedance video generation** — text-to-video and first-frame image-to-video from the console, with asynchronous tasks, live status, video preview and MP4 download. Supports MiniMax-H3 and ByteDance Seedance on Volcano Ark.
 - **Channel routing** — priority first, weighted load balancing inside a priority, public-to-upstream model aliases, and automatic failover on connection errors, `401`, `403`, `404`, `429` and `5xx`.
 - **Upstream model discovery** — fetch the provider's model list in the channel form, tick the models to import, and keep manual entries and public aliases.
 - **Gateway keys** — per-key USD balance, daily spending budget, model allowlists, requests-per-minute, tokens-per-minute and concurrency limits, expiry, enable/disable, and a one-time plaintext reveal at creation.
@@ -88,15 +88,24 @@ claude-sonnet-4=claude-sonnet-4-20250514
 
 Clients keep using the OpenAI chat format; the gateway translates requests and Anthropic SSE events in both directions. Public model names in mappings are also listed by `/v1/models`.
 
-### MiniMax-H3 video generation
+### Video generation (MiniMax-H3 and Seedance)
 
-Add a channel with protocol **MiniMax H3 (video)**, base URL `https://api.minimax.io` (or `https://api.minimaxi.com` for the China platform) and model `MiniMax-H3` (or one of the H3 variants). The API key is sent as `Authorization: Bearer …` to the MiniMax V2 video endpoints. Video channels are separate from chat routing, so video models are not exposed by `/v1/chat/completions` or `/v1/models`. The provider's OpenAI-compatible model list omits video models, so **Fetch models** adds the H3 family (`MiniMax-H3`, `MiniMax-H3-Highspeed`, `MiniMax-H3-Lite`, `MiniMax-H3-Max`) alongside the language models it returns; the **Video** page lists only the H3 family.
+**MiniMax-H3.** Add a channel with protocol **MiniMax H3 (video)**, base URL `https://api.minimax.io` (or `https://api.minimaxi.com` for the China platform) and model `MiniMax-H3` (or one of the H3 variants). The API key is sent as `Authorization: Bearer …` to the MiniMax V2 video endpoints. The provider's OpenAI-compatible model list omits video models, so **Fetch models** adds the H3 family (`MiniMax-H3`, `MiniMax-H3-Highspeed`, `MiniMax-H3-Lite`, `MiniMax-H3-Max`) alongside the language models it returns.
 
-Open **Video** in the console to:
+**Seedance (Volcano Ark).** Seedance is ByteDance's video model on Volcano Engine Ark. Add a channel with protocol **Seedance (Volcano Ark, video)**, base URL `https://ark.cn-beijing.volces.com/api/v3`, and the model IDs to serve, for example `doubao-seedance-1-0-pro-250528` or `doubao-seedance-1-0-pro-fast-251015`. **Fetch models** reads `GET /api/v3/models` and also offers the Seedance family; public aliases such as `my-video=doubao-seedance-2-0-260128` are supported. The key is sent as `Authorization: Bearer …` to `POST /api/v3/contents/generations/tasks`, and task status is polled at `GET /api/v3/contents/generations/tasks/{id}`.
 
-1. pick a MiniMax-H3 model and enter a prompt;
+#### Getting a Seedance API key
+
+1. Sign in to the [Volcano Engine console](https://console.volcengine.com/ark) and complete real-name verification if prompted.
+2. Open **Volcano Ark → API Key management** (<https://console.volcengine.com/ark/region:ark+cn-beijing/apikey>) and create an API key. Copy it and keep it secret.
+3. Open **Volcano Ark → Activation management** (<https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement>) and enable the Seedance model you plan to call, for example `doubao-seedance-1-0-pro-250528`. Model IDs are listed in the [Volcano Ark model list](https://ark.volcengine.com/region:cn-beijing/docs/model-list).
+4. Paste the key into the channel's **API key** field. Video channels are separate from chat routing, so Seedance models are not exposed by `/v1/chat/completions` or `/v1/models`.
+
+Then open **Video** in the console to:
+
+1. pick a video model and enter a prompt;
 2. optionally attach a first-frame image (PNG, JPEG, WEBP, HEIC or HEIF, up to 30 MB) for image-to-video;
-3. choose resolution (768P/2K for `MiniMax-H3`), duration (4–15 s) and, for text-to-video, an aspect ratio.
+3. choose resolution, duration and, for text-to-video, an aspect ratio. The form offers the values each model supports: MiniMax uses 480P/768P/2K and 4–15 s; Seedance uses 480p/720p/1080p (plus 4k on some 2.x models) and 2–12 s, 4–15 s or 4–30 s depending on the model family.
 
 The gateway submits the asynchronous task, polls it in the background, and stores the finished MP4 under `DATA_DIR/videos/`. Finished videos can be previewed in the browser and downloaded with the **Download MP4** action. Tasks left in flight are resumed after a restart. Video generation is console-only for now: it is not metered per gateway key and does not appear in request logs.
 
@@ -124,7 +133,7 @@ For Compose, create a `.env` file containing `SECRET_KEY` and `ADMIN_PASSWORD` (
 | `ADMIN_PASSWORD` | `admin123` | Admin password created on first boot (minimum 6 characters). |
 | `SESSION_TTL_HOURS` | `24` | Admin session lifetime. |
 | `REQUEST_TIMEOUT_SECONDS` | `300` | Timeout for non-streaming upstream requests. Streaming is bounded by the client connection. |
-| `VIDEO_POLL_SECONDS` | `8` | How often asynchronous MiniMax video tasks are polled. |
+| `VIDEO_POLL_SECONDS` | `8` | How often asynchronous video tasks are polled. |
 
 Changing `SECRET_KEY` invalidates admin sessions and makes existing channel keys undecryptable — re-enter the upstream keys after rotating it.
 
@@ -146,7 +155,11 @@ Changing `SECRET_KEY` invalidates admin sessions and makes existing channel keys
 | --- | --- |
 | ![Video generation](docs/screenshots/video-generation.png) | ![MiniMax H3 channel](docs/screenshots/video-channel.png) |
 
-The **Models** page shows the public catalog, serving channels and the lowest configured price per model. The **Playground** page selects an existing gateway key, sends real relay requests, and shows streaming output, latency, token usage and the request ID. Most screenshots use the local mock upstream in `scripts/mock-upstream.py` (`python3 scripts/mock-upstream.py 19090`), so `127.0.0.1` URLs are demo data rather than real providers; the mock also answers MiniMax video create/query calls and serves `scripts/media/demo.mp4` for local previews, while the video screenshot additionally includes one real MiniMax-H3 generation and the Playground uses a public Pollinations GPT-OSS endpoint.
+| Video generation (Seedance) | Seedance channel |
+| --- | --- |
+| ![Seedance video generation](docs/screenshots/video-seedance-live.png) | ![Seedance channel](docs/screenshots/channel-seedance-after.png) |
+
+The **Models** page shows the public catalog, serving channels and the lowest configured price per model. The **Playground** page selects an existing gateway key, sends real relay requests, and shows streaming output, latency, token usage and the request ID. Most screenshots use the local mock upstream in `scripts/mock-upstream.py` (`python3 scripts/mock-upstream.py 19090`), so `127.0.0.1` URLs are demo data rather than real providers; the mock also answers MiniMax and Seedance video create/query calls and serves `scripts/media/demo.mp4` for local previews. The MiniMax and Seedance video screenshots additionally include one real generation each (`MiniMax-H3` and `doubao-seedance-2-0-260128`), and the Playground uses a public Pollinations GPT-OSS endpoint.
 
 Use the theme control in the top bar, or on the sign-in screen, to switch between light, dark and follow-system themes. The console remembers the selection in the browser.
 
@@ -227,7 +240,7 @@ Project layout:
 cmd/server/            entrypoint
 internal/auth/         password hashing, API keys, session JWTs
 internal/config/       environment configuration
-internal/gateway/      relay, routing, OpenAI/Anthropic adapters, MiniMax video tasks, accounting
+internal/gateway/      relay, routing, OpenAI/Anthropic adapters, video tasks, accounting
 internal/secretbox/    AES-GCM encryption for upstream keys
 internal/server/       HTTP API, middleware, static console
 internal/store/        SQLite schema and queries

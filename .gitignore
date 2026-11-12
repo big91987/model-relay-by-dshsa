@@ -22,3 +22,5 @@ web/dist/
 
 # test output
 coverage.out
+
+__pycache__/
