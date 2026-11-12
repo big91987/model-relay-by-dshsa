@@ -16,6 +16,28 @@ import (
 // ErrNotFound is returned when a requested record does not exist.
 var ErrNotFound = errors.New("not found")
 
+// ErrTokenInactive is returned when a gateway key was disabled before a
+// reservation could be placed.
+var ErrTokenInactive = errors.New("token is not active")
+
+// ErrTokenExpired is returned when a gateway key expired before a reservation
+// could be placed.
+var ErrTokenExpired = errors.New("token has expired")
+
+// InsufficientQuotaError reports a rejected quota reservation. It carries the
+// figures used by the decision so the gateway can explain the rejection.
+type InsufficientQuotaError struct {
+	Required  float64
+	Available float64
+	Quota     float64
+	Used      float64
+	Reserved  float64
+}
+
+func (e *InsufficientQuotaError) Error() string {
+	return "insufficient quota"
+}
+
 // Store wraps the SQLite database.
 type Store struct {
 	db *sql.DB
@@ -106,6 +128,9 @@ func (s *Store) migrate() error {
 			completion_tokens INTEGER NOT NULL DEFAULT 0,
 			total_tokens INTEGER NOT NULL DEFAULT 0,
 			cost REAL NOT NULL DEFAULT 0,
+			reserved_cost REAL NOT NULL DEFAULT 0,
+			cost_status TEXT NOT NULL DEFAULT 'actual',
+			reservation_id TEXT NOT NULL DEFAULT '',
 			status TEXT NOT NULL DEFAULT 'success',
 			status_code INTEGER NOT NULL DEFAULT 0,
 			error TEXT NOT NULL DEFAULT '',
@@ -116,6 +141,29 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_logs_created_at ON logs(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_token_id ON logs(token_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_model ON logs(model)`,
+		`CREATE TABLE IF NOT EXISTS token_reservations (
+			id TEXT PRIMARY KEY,
+			token_id INTEGER NOT NULL,
+			token_name TEXT NOT NULL DEFAULT '',
+			request_id TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			reserved_cost REAL NOT NULL DEFAULT 0,
+			settled_cost REAL NOT NULL DEFAULT 0,
+			cost_status TEXT NOT NULL DEFAULT 'pending',
+			prompt_tokens INTEGER NOT NULL DEFAULT 0,
+			completion_tokens INTEGER NOT NULL DEFAULT 0,
+			model TEXT NOT NULL DEFAULT '',
+			upstream_model TEXT NOT NULL DEFAULT '',
+			channel_id INTEGER NOT NULL DEFAULT 0,
+			channel_name TEXT NOT NULL DEFAULT '',
+			stream INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL,
+			settled_at INTEGER,
+			expires_at INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_reservations_token_status ON token_reservations(token_id, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_reservations_status ON token_reservations(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_reservations_created_at ON token_reservations(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_token_created_at ON logs(token_id, created_at)`,
 		`CREATE TABLE IF NOT EXISTS video_tasks (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -147,6 +195,15 @@ func (s *Store) migrate() error {
 	}
 	// Columns added after the first release. SQLite has no
 	// "ADD COLUMN IF NOT EXISTS", so inspect the schema first.
+	for _, column := range []struct{ name, definition string }{
+		{"cost_status", `TEXT NOT NULL DEFAULT 'actual'`},
+		{"reserved_cost", `REAL NOT NULL DEFAULT 0`},
+		{"reservation_id", `TEXT NOT NULL DEFAULT ''`},
+	} {
+		if err := s.ensureColumn("logs", column.name, column.definition); err != nil {
+			return fmt.Errorf("migrate database: %w", err)
+		}
+	}
 	for _, column := range []struct{ name, definition string }{
 		{"tpm_limit", `INTEGER NOT NULL DEFAULT 0`},
 		{"max_concurrency", `INTEGER NOT NULL DEFAULT 0`},
@@ -347,6 +404,7 @@ type Token struct {
 	Status         string   `json:"status"`
 	Quota          float64  `json:"quota"`
 	UsedQuota      float64  `json:"used_quota"`
+	ReservedQuota  float64  `json:"reserved_quota"`
 	DailyQuota     float64  `json:"daily_quota"`
 	DailyUsedQuota float64  `json:"daily_used_quota"`
 	AllowedModels  []string `json:"allowed_models"`
@@ -358,7 +416,9 @@ type Token struct {
 	CreatedAt      int64    `json:"created_at"`
 }
 
-const tokenColumns = `id, user_id, name, key_hash, key_prefix, status, quota, used_quota, daily_quota, allowed_models, rpm_limit, tpm_limit, max_concurrency, expires_at, last_used_at, created_at`
+const tokenColumns = `id, user_id, name, key_hash, key_prefix, status, quota, used_quota,
+	COALESCE((SELECT SUM(reserved_cost) FROM token_reservations WHERE token_id = tokens.id AND status = 'pending'), 0),
+	daily_quota, allowed_models, rpm_limit, tpm_limit, max_concurrency, expires_at, last_used_at, created_at`
 
 // ListTokens returns every gateway key with today's spend attached.
 func (s *Store) ListTokens() ([]Token, error) {
@@ -391,7 +451,7 @@ func (s *Store) ListTokens() ([]Token, error) {
 // tokenDailySpend returns today's spend per key since the given unix timestamp.
 func (s *Store) tokenDailySpend(since int64) (map[int64]float64, error) {
 	rows, err := s.db.Query(`SELECT token_id, COALESCE(SUM(cost), 0) FROM logs
-		WHERE status = 'success' AND created_at >= ? GROUP BY token_id`, since)
+		WHERE created_at >= ? GROUP BY token_id`, since)
 	if err != nil {
 		return nil, err
 	}
@@ -413,7 +473,7 @@ func (s *Store) tokenDailySpend(since int64) (map[int64]float64, error) {
 func (s *Store) TokenSpendSince(id int64, since int64) (float64, error) {
 	var total float64
 	err := s.db.QueryRow(`SELECT COALESCE(SUM(cost), 0) FROM logs
-		WHERE token_id = ? AND status = 'success' AND created_at >= ?`, id, since).Scan(&total)
+		WHERE token_id = ? AND created_at >= ?`, id, since).Scan(&total)
 	return total, err
 }
 
@@ -445,7 +505,7 @@ func scanToken(row interface{ Scan(dest ...any) error }) (*Token, error) {
 	var t Token
 	var allowed string
 	var expires, lastUsed sql.NullInt64
-	err := row.Scan(&t.ID, &t.UserID, &t.Name, &t.KeyHash, &t.KeyPrefix, &t.Status, &t.Quota, &t.UsedQuota, &t.DailyQuota,
+	err := row.Scan(&t.ID, &t.UserID, &t.Name, &t.KeyHash, &t.KeyPrefix, &t.Status, &t.Quota, &t.UsedQuota, &t.ReservedQuota, &t.DailyQuota,
 		&allowed, &t.RPMLimit, &t.TPMLimit, &t.MaxConcurrency, &expires, &lastUsed, &t.CreatedAt)
 	if err != nil {
 		return nil, err
@@ -510,6 +570,7 @@ func (s *Store) AddTokenUsage(id int64, cost float64) error {
 type Log struct {
 	ID               int64   `json:"id"`
 	RequestID        string  `json:"request_id"`
+	ReservationID    string  `json:"reservation_id"`
 	UserID           int64   `json:"user_id"`
 	TokenID          int64   `json:"token_id"`
 	ChannelID        int64   `json:"channel_id"`
@@ -521,6 +582,8 @@ type Log struct {
 	CompletionTokens int64   `json:"completion_tokens"`
 	TotalTokens      int64   `json:"total_tokens"`
 	Cost             float64 `json:"cost"`
+	ReservedCost     float64 `json:"reserved_cost"`
+	CostStatus       string  `json:"cost_status"`
 	Status           string  `json:"status"`
 	StatusCode       int     `json:"status_code"`
 	Error            string  `json:"error"`
@@ -534,11 +597,14 @@ func (s *Store) InsertLog(l *Log) error {
 	if l.CreatedAt == 0 {
 		l.CreatedAt = now()
 	}
-	res, err := s.db.Exec(`INSERT INTO logs (request_id, user_id, token_id, channel_id, token_name, channel_name, model, upstream_model,
-		prompt_tokens, completion_tokens, total_tokens, cost, status, status_code, error, latency_ms, stream, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		l.RequestID, l.UserID, l.TokenID, l.ChannelID, l.TokenName, l.ChannelName, l.Model, l.UpstreamModel,
-		l.PromptTokens, l.CompletionTokens, l.TotalTokens, l.Cost, l.Status, l.StatusCode, l.Error, l.LatencyMS, l.Stream, l.CreatedAt)
+	if l.CostStatus == "" {
+		l.CostStatus = "actual"
+	}
+	res, err := s.db.Exec(`INSERT INTO logs (request_id, reservation_id, user_id, token_id, channel_id, token_name, channel_name, model, upstream_model,
+		prompt_tokens, completion_tokens, total_tokens, cost, reserved_cost, cost_status, status, status_code, error, latency_ms, stream, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		l.RequestID, l.ReservationID, l.UserID, l.TokenID, l.ChannelID, l.TokenName, l.ChannelName, l.Model, l.UpstreamModel,
+		l.PromptTokens, l.CompletionTokens, l.TotalTokens, l.Cost, l.ReservedCost, l.CostStatus, l.Status, l.StatusCode, l.Error, l.LatencyMS, l.Stream, l.CreatedAt)
 	if err != nil {
 		return err
 	}
@@ -601,8 +667,8 @@ func (s *Store) ListLogs(f LogFilter) ([]Log, int64, error) {
 		return nil, 0, err
 	}
 	queryArgs := append(append([]any{}, args...), f.PageSize, (f.Page-1)*f.PageSize)
-	rows, err := s.db.Query(`SELECT id, request_id, user_id, token_id, channel_id, token_name, channel_name, model, upstream_model,
-		prompt_tokens, completion_tokens, total_tokens, cost, status, status_code, error, latency_ms, stream, created_at
+	rows, err := s.db.Query(`SELECT id, request_id, reservation_id, user_id, token_id, channel_id, token_name, channel_name, model, upstream_model,
+		prompt_tokens, completion_tokens, total_tokens, cost, reserved_cost, cost_status, status, status_code, error, latency_ms, stream, created_at
 		FROM logs`+where+` ORDER BY id DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		return nil, 0, err
@@ -621,8 +687,8 @@ func (s *Store) ListLogs(f LogFilter) ([]Log, int64, error) {
 
 func scanLog(row interface{ Scan(dest ...any) error }) (*Log, error) {
 	var l Log
-	err := row.Scan(&l.ID, &l.RequestID, &l.UserID, &l.TokenID, &l.ChannelID, &l.TokenName, &l.ChannelName, &l.Model, &l.UpstreamModel,
-		&l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.Cost, &l.Status, &l.StatusCode, &l.Error, &l.LatencyMS, &l.Stream, &l.CreatedAt)
+	err := row.Scan(&l.ID, &l.RequestID, &l.ReservationID, &l.UserID, &l.TokenID, &l.ChannelID, &l.TokenName, &l.ChannelName, &l.Model, &l.UpstreamModel,
+		&l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.Cost, &l.ReservedCost, &l.CostStatus, &l.Status, &l.StatusCode, &l.Error, &l.LatencyMS, &l.Stream, &l.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -755,6 +821,7 @@ type Totals struct {
 	CompletionTokens int64   `json:"completion_tokens"`
 	TotalTokens      int64   `json:"total_tokens"`
 	Cost             float64 `json:"cost"`
+	UnverifiedCost   float64 `json:"unverified_cost"`
 }
 
 // DayStat is one day of traffic.
@@ -875,13 +942,14 @@ func (s *Store) totalsSince(start int64) (Totals, error) {
 		COALESCE(SUM(prompt_tokens), 0),
 		COALESCE(SUM(completion_tokens), 0),
 		COALESCE(SUM(total_tokens), 0),
-		COALESCE(SUM(cost), 0)
+		COALESCE(SUM(cost), 0),
+		COALESCE(SUM(CASE WHEN cost_status = 'unverified' THEN cost ELSE 0 END), 0)
 		FROM logs`
 	var err error
 	if start > 0 {
-		err = s.db.QueryRow(query+` WHERE created_at >= ?`, start).Scan(&t.Requests, &t.Success, &t.Errors, &t.PromptTokens, &t.CompletionTokens, &t.TotalTokens, &t.Cost)
+		err = s.db.QueryRow(query+` WHERE created_at >= ?`, start).Scan(&t.Requests, &t.Success, &t.Errors, &t.PromptTokens, &t.CompletionTokens, &t.TotalTokens, &t.Cost, &t.UnverifiedCost)
 	} else {
-		err = s.db.QueryRow(query).Scan(&t.Requests, &t.Success, &t.Errors, &t.PromptTokens, &t.CompletionTokens, &t.TotalTokens, &t.Cost)
+		err = s.db.QueryRow(query).Scan(&t.Requests, &t.Success, &t.Errors, &t.PromptTokens, &t.CompletionTokens, &t.TotalTokens, &t.Cost, &t.UnverifiedCost)
 	}
 	return t, err
 }

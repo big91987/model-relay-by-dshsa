@@ -320,6 +320,9 @@ export default function Tokens() {
                             <span style={{ width: `${quotaProgress(token)}%` }} />
                           </span>
                         ) : null}
+                        {token.reserved_quota > 0 ? (
+                          <span className="quota-reserved">{formatCost(token.reserved_quota)} in flight</span>
+                        ) : null}
                         {token.daily_quota > 0 ? (
                           <span className="quota-daily">
                             Today {formatCost(token.daily_used_quota)} / {formatCost(token.daily_quota)}

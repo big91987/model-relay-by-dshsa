@@ -343,9 +343,12 @@ func TestChatCompletionsQuotaAndRateLimit(t *testing.T) {
 		_, _ = io.WriteString(w, `{"id":"x","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
 	}))
 	defer upstream.Close()
-	env.addChannel(t, "primary", upstream.URL+"/v1", "openai", 0, []string{"public-model"}, nil, 0, 0)
+	env.addChannel(t, "primary", upstream.URL+"/v1", "openai", 0, []string{"public-model"}, nil, 1, 2)
 
 	env.token.Quota = 0
+	if err := env.st.UpdateToken(env.token); err != nil {
+		t.Fatalf("update token: %v", err)
+	}
 	if rec := env.chat(t, `{"model":"public-model","messages":[{"role":"user","content":"hi"}]}`); rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected quota rejection, got %d: %s", rec.Code, rec.Body.String())
 	}

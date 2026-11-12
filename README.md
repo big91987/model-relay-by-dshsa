@@ -132,7 +132,9 @@ For Compose, create a `.env` file containing `SECRET_KEY` and `ADMIN_PASSWORD` (
 | `ADMIN_USERNAME` | `admin` | Admin username created on first boot. |
 | `ADMIN_PASSWORD` | `admin123` | Admin password created on first boot (minimum 6 characters). |
 | `SESSION_TTL_HOURS` | `24` | Admin session lifetime. |
-| `REQUEST_TIMEOUT_SECONDS` | `300` | Timeout for non-streaming upstream requests. Streaming is bounded by the client connection. |
+| `REQUEST_TIMEOUT_SECONDS` | `300` | Timeout for non-streaming upstream requests. A timeout after the request may have reached the provider is booked as an unverified charge. |
+| `STREAM_TIMEOUT_SECONDS` | `1800` | Hard overall limit for a streaming request. It bounds how long a stream can hold a quota reservation. Set to `0` to disable the cap. |
+| `QUOTA_DEFAULT_OUTPUT_TOKENS` | `4096` | Output-token cap used for finite-quota keys when a chat request omits `max_tokens`/`max_completion_tokens`. The gateway sends this cap upstream so the quota reservation is a real upper bound. |
 | `VIDEO_POLL_SECONDS` | `8` | How often asynchronous video tasks are polled. |
 
 Changing `SECRET_KEY` invalidates admin sessions and makes existing channel keys undecryptable — re-enter the upstream keys after rotating it.
@@ -189,9 +191,61 @@ See [docs/playground.md](docs/playground.md) for the full usage guide, parameter
 - Candidates are sorted by descending priority. Within one priority, weight influences a randomized order, so traffic is spread across equivalent channels.
 - If an upstream call fails before any response bytes reach the client, the next candidate is tried. Streaming responses that have already started are not retried.
 - Cost is calculated as `prompt_tokens × input_price / 1M + completion_tokens × output_price / 1M`, using prices configured on the channel that served the request.
-- Upstream `usage` is used when present. For streams without usage and for providers that omit it, the gateway records a conservative estimate based on the request and returned text. When a stream omits usage, the relay appends an OpenAI-style final usage chunk whose `x_usage_source` field is `"estimated"`; clients can therefore tell exact and estimated numbers apart. Anthropic streams also include a translated usage chunk.
-- A key with quota `-1` is unlimited. A negative balance does not block in-flight work; the next request is rejected until the quota is raised. `rpm_limit: 0` means unlimited.
-- Quota is enforced from recorded usage, so concurrent in-flight requests can slightly overshoot a key's quota before the next request is blocked.
+- Upstream `usage` is used when present (`actual`). For streams without usage and for providers that omit it, the gateway records a conservative estimate based on the request and returned text (`estimated`).
+- When a stream omits usage, the relay appends an OpenAI-style final usage chunk whose `x_usage_source` field is `"estimated"`, so clients can tell exact and estimated numbers apart. Anthropic streams also include a translated usage chunk.
+
+### Quota reservations and settlement
+
+Finite-quota keys are admitted against a balance that includes in-flight reservations:
+
+```text
+available = quota - used_quota - SUM(pending reservation amounts)
+```
+
+The reservation is created atomically in SQLite before the request is sent upstream, so two concurrent requests for the same key cannot spend the same balance. Before sending, the gateway computes a cost upper bound:
+
+- Prompt tokens: the request body's byte length plus chat framing overhead. A token never encodes fewer than one byte, so this is a true upper bound (conservative for text and image payloads).
+- Completion tokens: the client's `max_tokens`/`max_completion_tokens` (the larger one) multiplied by `n`. When the client omits a limit and the key has a finite quota, the gateway injects `max_tokens = QUOTA_DEFAULT_OUTPUT_TOKENS` so the upstream cannot generate more than was reserved.
+- Price: the highest input/output price among the candidate channels, so a failover to a more expensive channel stays covered.
+
+If the upper bound does not fit in the available balance, the request is rejected with HTTP `429`, `type: insufficient_quota`, and a message stating the required and available amounts. Requests are never serialized globally; unrelated keys and requests that fit their own balance proceed concurrently.
+
+Every reservation is finalized exactly once, in one SQLite transaction that updates `used_quota` and writes the request log. A duplicate completion notification for the same reservation is ignored. The log records `cost_status`:
+
+| `cost_status` | Meaning |
+| --- | --- |
+| `actual` | Upstream reported token usage; cost is computed from it. |
+| `estimated` | Upstream omitted usage; cost is computed from locally counted request/response text. |
+| `unverified` | Real usage is unknown after a timeout, cancellation, restart or a 2xx response whose body could not be read. The reserved upper bound is charged and surfaced for review. |
+| `free` | No upstream usage was possible (rejected before the call, dial/DNS failure) or the upstream rejected the request before generation. No charge. |
+
+Failure handling:
+
+- Pre-call failures (validation, authorization, rate limit, no channel, insufficient quota, key decryption, dial/DNS errors) are not charged.
+- A non-2xx upstream response is retried on the next candidate and is not charged if all candidates fail. An upstream `400`/`422` is returned without a charge.
+- Once an upstream returns `2xx`, the request is never retried on another channel. A stream that breaks, a client cancellation, or a timeout is settled from the usage received so far (`actual`/`estimated`) or at the reserved upper bound (`unverified`) when usage is unknowable. This avoids double-billing the same request.
+- Channel failover before any response bytes charges only the channel that finally serves the request.
+
+### Restart recovery
+
+This is a single-node gateway, so a reservation found `pending` at startup cannot still be running. `RecoverPendingReservations` runs on every boot and, for each such request:
+
+1. charges the reserved upper bound to the key,
+2. marks the reservation `recovered` and the charge `unverified`,
+3. writes an error log explaining that the process restarted before completion.
+
+Settled charges are committed in SQLite and are not lost. In-flight holds are therefore never released for free and never lock a key forever. The admin ledger endpoint `GET /api/ledger` lists recent reservations and their states; the dashboard shows unverified spend separately from the note in the Spend card, and the Request logs page shows the cost basis for every call.
+
+A key with quota `-1` is unlimited: it still gets reservations and records usage, but it is never rejected for balance. `rpm_limit: 0` means unlimited. Model allowlists and RPM limits are enforced before the reservation and are unchanged.
+
+### Known limits
+
+- Reservations use a byte-based prompt-token upper bound. It is safe but deliberately conservative, especially for large image payloads; a finite-quota key may be able to keep less work in flight than its nominal balance suggests.
+- A provider that ignores `max_tokens` (or bills for a failed request) can exceed the reserved upper bound. The gateway still settles the actual reported cost and logs a warning, but it cannot prevent an upstream that violates its own limits from overcharging.
+- A non-2xx upstream response during failover is treated as unbilled because no usage is reported. Providers that charge for rejected or failed requests cannot be detected from a non-2xx response; those charges are invisible to the gateway and must be reconciled with the provider.
+- Prompt upper bounds count the serialized body, so multimodal inputs and large JSON payloads reserve much more than their eventual token cost. This is deliberate: it keeps the hold conservative, and the unused amount is released at settlement.
+- `unverified` charges are conservative by design: when a timeout or cancellation happens after the request may have reached the provider, the reserved upper bound is charged instead of silently recording zero. Review them in Request logs; the gateway does not currently provide an automatic refund workflow.
+- The reservations are enforced with SQLite transactions on one node. Multi-node deployments would need a shared transactional store and are out of scope.
 
 ## HTTP API
 
@@ -210,6 +264,7 @@ Admin endpoints use the `mr_session` HttpOnly cookie created by `POST /api/auth/
 | `GET/POST /api/tokens` | session | List/create gateway keys. Creation returns the plaintext key once. |
 | `PUT/DELETE /api/tokens/{id}` | session | Update/delete a key. |
 | `GET /api/logs` | session | Paginated logs; filters: `model`, `status`, `request_id`, `token_id`, `start`, `end`, `page`, `page_size`. |
+| `GET /api/ledger` | session | Recent quota reservations and pending cost; `limit` defaults to 100. |
 | `GET /api/models` | session | Model catalog with channels, protocols and prices. |
 | `GET /api/playground/models?token_id=…` | session | Models available to a selected gateway key for Playground. |
 | `POST /api/playground/chat?token_id=…` | session | Relay a Playground chat as the selected gateway key; the browser never receives the key secret. |
@@ -234,6 +289,8 @@ make dev         # Vite dev server on :5173, proxying /api and /v1 to :8080
 
 Run the backend separately with `go run ./cmd/server` (serves a "console not built" placeholder unless built with `-tags embed`).
 
+`scripts/quota-test-upstream.py` is a deterministic local upstream for quota, streaming and recovery checks. Model names select behaviour (`ok-model`, `no-usage-model`, `stream-break-model`, `fail-model`, `slow-model`, `embed-model`); see the script header for details.
+
 Project layout:
 
 ```text
@@ -257,10 +314,16 @@ docs/screenshots/      console screenshots used in this README
 - Upstream channel URLs are configured by an authenticated admin. The gateway will fetch whatever URL is configured, so restrict admin access accordingly.
 - The Anthropic adapter translates text, image data URLs, tool calls and tool results. Remote image URLs are not converted. OpenAI's Responses API, audio, rerank and native Anthropic endpoints are out of scope.
 - MiniMax-H3 video tasks are managed from the admin console; there is no gateway-key video API and video generation is not charged against key quotas. Task history and downloaded MP4 files stay in `DATA_DIR` until removed manually.
-- Cost accounting trusts the configured prices and upstream token counts; it is an operational estimate, not an invoice.
+- Cost accounting trusts the configured prices and upstream token counts; it is an operational estimate, not an invoice. `estimated` and `unverified` charges are marked explicitly and should be reviewed before using the numbers for billing.
 - Playground uses the selected gateway key through an admin-authenticated server endpoint; the browser never receives the key secret. An admin session can therefore spend any key's quota, so restrict admin access accordingly.
 - Playground parameter ranges are protocol-level. Model-specific limits are enforced by the upstream and surfaced as errors; the page does not maintain a per-model capability database.
 - Channel failover is retried for listed transient statuses. A `400`/`422` from an upstream is returned to the client because it usually reflects the request rather than channel health.
+
+## Upgrading an existing installation
+
+The SQLite schema is migrated automatically on startup: the gateway adds `logs.cost_status`, `logs.reserved_cost`, `logs.reservation_id` and the `token_reservations` table when they are missing, along with the per-key limit columns (`tpm_limit`, `max_concurrency`, `daily_quota`) and the `video_tasks` table introduced on `main`. No manual database step is required.
+
+Existing keys and channels keep their configuration. Because the previous version had no reservations, the first boot after the upgrade has no pending reservations to recover; settled historical costs remain as recorded. New optional environment variables (`STREAM_TIMEOUT_SECONDS`, `QUOTA_DEFAULT_OUTPUT_TOKENS`) default to the values in the table above. Restart the binary (or rebuild the Docker image) as usual.
 
 ## Design notes
 

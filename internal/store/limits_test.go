@@ -43,14 +43,16 @@ func TestTokenLimitsAndDailySpend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TokenSpendSince: %v", err)
 	}
-	if spent != 0.4 {
-		t.Fatalf("daily spend = %v, want 0.4", spent)
+	// Error logs can carry a real charge (estimated/unverified usage), so
+	// daily spend includes every recorded cost, not only successful requests.
+	if spent != 9.4 {
+		t.Fatalf("daily spend = %v, want 9.4", spent)
 	}
 	tokens, err := s.ListTokens()
 	if err != nil {
 		t.Fatalf("ListTokens: %v", err)
 	}
-	if len(tokens) != 1 || tokens[0].DailyUsedQuota != 0.4 {
+	if len(tokens) != 1 || tokens[0].DailyUsedQuota != 9.4 {
 		t.Fatalf("ListTokens daily spend = %+v", tokens)
 	}
 }

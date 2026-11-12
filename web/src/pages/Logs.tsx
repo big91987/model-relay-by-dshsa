@@ -3,7 +3,7 @@ import type { FormEvent } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Icon } from '../components/Icon'
 import { Modal } from '../components/Modal'
-import { EmptyState, ErrorBanner, PageHeader, Spinner, StatusBadge } from '../components/ui'
+import { CostStatusBadge, EmptyState, ErrorBanner, PageHeader, Spinner, StatusBadge } from '../components/ui'
 import { api } from '../lib/api'
 import { formatCost, formatDateTime, formatDuration, formatNumber, formatTime } from '../lib/format'
 import { useToast } from '../lib/toast'
@@ -209,7 +209,12 @@ export default function Logs() {
                         {formatNumber(log.prompt_tokens)} in · {formatNumber(log.completion_tokens)} out
                       </div>
                     </td>
-                    <td className="num">{formatCost(log.cost)}</td>
+                    <td className="num">
+                      <div className="cost-cell">
+                        <span>{formatCost(log.cost)}</span>
+                        <CostStatusBadge status={log.cost_status} />
+                      </div>
+                    </td>
                     <td className="num muted">{formatDuration(log.latency_ms)}</td>
                   </tr>
                 ))}
@@ -310,6 +315,16 @@ export default function Logs() {
             <div>
               <span>Cost</span>
               <strong>{formatCost(selected.cost)}</strong>
+            </div>
+            <div>
+              <span>Cost basis</span>
+              <strong className="detail-status">
+                <CostStatusBadge status={selected.cost_status} />
+              </strong>
+            </div>
+            <div>
+              <span>Reserved for this request</span>
+              <strong>{formatCost(selected.reserved_cost)}</strong>
             </div>
             <div>
               <span>Latency</span>

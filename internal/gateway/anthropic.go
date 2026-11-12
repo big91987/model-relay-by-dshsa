@@ -334,10 +334,10 @@ func chatID(id string) string {
 }
 
 // anthropicToOpenAI converts a non-streaming Anthropic response into an OpenAI response.
-func anthropicToOpenAI(data []byte, model string, promptFallback int64) ([]byte, int64, int64, error) {
+func anthropicToOpenAI(data []byte, model string, promptFallback int64) ([]byte, int64, int64, bool, error) {
 	var ar anthropicResponse
 	if err := json.Unmarshal(data, &ar); err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, false, err
 	}
 	var text strings.Builder
 	var args strings.Builder
@@ -366,6 +366,7 @@ func anthropicToOpenAI(data []byte, model string, promptFallback int64) ([]byte,
 	if len(toolCalls) > 0 {
 		message["tool_calls"] = toolCalls
 	}
+	reported := ar.Usage.InputTokens > 0 && ar.Usage.OutputTokens > 0
 	prompt := ar.Usage.InputTokens
 	if prompt == 0 {
 		prompt = promptFallback
@@ -391,11 +392,11 @@ func anthropicToOpenAI(data []byte, model string, promptFallback int64) ([]byte,
 		},
 	}
 	encoded, err := json.Marshal(out)
-	return encoded, prompt, completion, err
+	return encoded, prompt, completion, reported, err
 }
 
 // streamAnthropic translates an Anthropic SSE stream into OpenAI chat completion chunks.
-func (g *Gateway) streamAnthropic(w http.ResponseWriter, resp *http.Response, promptFallback int64, model string) (int64, int64, error) {
+func (g *Gateway) streamAnthropic(w http.ResponseWriter, resp *http.Response, promptFallback int64, model string) (int64, int64, bool, error) {
 	defer resp.Body.Close()
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -434,13 +435,15 @@ func (g *Gateway) streamAnthropic(w http.ResponseWriter, resp *http.Response, pr
 		return nil
 	}
 	if err := writeChunk(map[string]any{"role": "assistant", "content": ""}, nil); err != nil {
-		return 0, 0, err
+		return 0, 0, false, err
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	var prompt, completion int64
+	var usageInput, usageOutput int64
 	var text, toolArgs strings.Builder
+	reported := false
 	toolIndexByBlock := map[int]int{}
 	nextTool := 0
 	stopReason := "end_turn"
@@ -519,6 +522,10 @@ func (g *Gateway) streamAnthropic(w http.ResponseWriter, resp *http.Response, pr
 		case "message_start":
 			prompt = ev.Message.Usage.InputTokens
 			completion = ev.Message.Usage.OutputTokens
+			usageInput = ev.Message.Usage.InputTokens
+			if ev.Message.Usage.OutputTokens > 0 {
+				usageOutput = ev.Message.Usage.OutputTokens
+			}
 		case "content_block_start":
 			if ev.ContentBlock.Type == "tool_use" {
 				toolIndex := nextTool
@@ -534,7 +541,7 @@ func (g *Gateway) streamAnthropic(w http.ResponseWriter, resp *http.Response, pr
 					},
 				}}}
 				if err := writeChunk(delta, nil); err != nil {
-					return prompt, completion, err
+					return prompt, completion, reported, err
 				}
 			}
 		case "content_block_delta":
@@ -542,7 +549,7 @@ func (g *Gateway) streamAnthropic(w http.ResponseWriter, resp *http.Response, pr
 			case "text_delta":
 				text.WriteString(ev.Delta.Text)
 				if err := writeChunk(map[string]any{"content": ev.Delta.Text}, nil); err != nil {
-					return prompt, completion, err
+					return prompt, completion, reported, err
 				}
 			case "input_json_delta":
 				toolIndex := toolIndexByBlock[ev.Index]
@@ -552,7 +559,7 @@ func (g *Gateway) streamAnthropic(w http.ResponseWriter, resp *http.Response, pr
 					"function": map[string]any{"arguments": ev.Delta.PartialJSON},
 				}}}
 				if err := writeChunk(delta, nil); err != nil {
-					return prompt, completion, err
+					return prompt, completion, reported, err
 				}
 			}
 		case "message_delta":
@@ -561,18 +568,22 @@ func (g *Gateway) streamAnthropic(w http.ResponseWriter, resp *http.Response, pr
 			}
 			if ev.Usage.OutputTokens > 0 {
 				completion = ev.Usage.OutputTokens
+				usageOutput = ev.Usage.OutputTokens
+			}
+			if usageInput > 0 && usageOutput > 0 {
+				reported = true
 			}
 		case "message_stop":
 			if err := writeChunk(map[string]any{}, mapStopReason(stopReason)); err != nil {
-				return prompt, completion, err
+				return prompt, completion, reported, err
 			}
 			if !usageSent {
 				if err := writeUsage(); err != nil {
-					return prompt, completion, err
+					return prompt, completion, reported, err
 				}
 			}
 			if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
-				return prompt, completion, err
+				return prompt, completion, reported, err
 			}
 			if flusher != nil {
 				flusher.Flush()
@@ -592,9 +603,12 @@ func (g *Gateway) streamAnthropic(w http.ResponseWriter, resp *http.Response, pr
 			if flusher != nil {
 				flusher.Flush()
 			}
-			return prompt, completion, fmt.Errorf("%s", msg)
+			return prompt, completion, reported, fmt.Errorf("%s", msg)
 		}
 		event = ""
+		if done {
+			break
+		}
 	}
 	if !done {
 		if streamErr := scanner.Err(); streamErr != nil {
@@ -617,5 +631,12 @@ func (g *Gateway) streamAnthropic(w http.ResponseWriter, resp *http.Response, pr
 	if completion == 0 {
 		completion = estimateTokens(text.String() + toolArgs.String())
 	}
-	return prompt, completion, scanner.Err()
+	reported = usageInput > 0 && usageOutput > 0
+	if err := scanner.Err(); err != nil {
+		return prompt, completion, reported, err
+	}
+	if !done {
+		return prompt, completion, reported, fmt.Errorf("upstream stream ended before message_stop")
+	}
+	return prompt, completion, reported, nil
 }

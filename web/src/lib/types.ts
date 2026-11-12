@@ -64,6 +64,7 @@ export interface Token {
   status: TokenStatus
   quota: number
   used_quota: number
+  reserved_quota: number
   daily_quota: number
   daily_used_quota: number
   allowed_models: string[]
@@ -87,9 +88,12 @@ export interface TokenInput {
   status: TokenStatus
 }
 
+export type CostStatus = 'actual' | 'estimated' | 'unverified' | 'free' | 'pending'
+
 export interface LogItem {
   id: number
   request_id: string
+  reservation_id: string
   user_id: number
   token_id: number
   channel_id: number
@@ -101,12 +105,40 @@ export interface LogItem {
   completion_tokens: number
   total_tokens: number
   cost: number
+  reserved_cost: number
+  cost_status: CostStatus | string
   status: 'success' | 'error' | string
   status_code: number
   error: string
   latency_ms: number
   stream: boolean
   created_at: number
+}
+
+export interface LedgerItem {
+  id: string
+  token_id: number
+  token_name: string
+  request_id: string
+  status: 'pending' | 'settled' | 'released' | 'recovered' | string
+  reserved_cost: number
+  settled_cost: number
+  cost_status: CostStatus | string
+  prompt_tokens: number
+  completion_tokens: number
+  model: string
+  upstream_model: string
+  channel_id: number
+  channel_name: string
+  stream: boolean
+  created_at: number
+  settled_at: number | null
+  expires_at: number
+}
+
+export interface LedgerResponse {
+  data: LedgerItem[]
+  pending_cost: number
 }
 
 export interface LogsResponse {
@@ -124,6 +156,7 @@ export interface Totals {
   completion_tokens: number
   total_tokens: number
   cost: number
+  unverified_cost: number
 }
 
 export interface DayStat {

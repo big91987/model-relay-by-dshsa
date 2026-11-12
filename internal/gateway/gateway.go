@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -79,11 +80,13 @@ type openAIChatPayload struct {
 }
 
 type outcome struct {
-	committed  bool
-	status     int
-	prompt     int64
-	completion int64
-	errMsg     string
+	committed     bool
+	ambiguous     bool
+	status        int
+	prompt        int64
+	completion    int64
+	usageReported bool
+	errMsg        string
 }
 
 // ChatCompletions handles POST /v1/chat/completions.
@@ -94,14 +97,16 @@ func (g *Gateway) ChatCompletions(w http.ResponseWriter, r *http.Request, tok *s
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxChatBody))
 	if err != nil {
-		writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request body is too large", "invalid_request_error", "body_too_large")
-		g.record(tok, nil, requestID, "", "", false, "error", http.StatusRequestEntityTooLarge, "request body is too large", 0, 0, started)
+		msg := "request body is too large"
+		writeOpenAIError(w, http.StatusRequestEntityTooLarge, msg, "invalid_request_error", "body_too_large")
+		g.recordFree(tok, requestID, "", false, "error", http.StatusRequestEntityTooLarge, msg, started)
 		return
 	}
 	var raw map[string]any
 	if err := json.Unmarshal(body, &raw); err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "request body must be valid JSON", "invalid_request_error", "invalid_json")
-		g.record(tok, nil, requestID, "", "", false, "error", http.StatusBadRequest, "invalid JSON body", 0, 0, started)
+		msg := "request body must be valid JSON"
+		writeOpenAIError(w, http.StatusBadRequest, msg, "invalid_request_error", "invalid_json")
+		g.recordFree(tok, requestID, "", false, "error", http.StatusBadRequest, msg, started)
 		return
 	}
 	var payload openAIChatPayload
@@ -109,16 +114,16 @@ func (g *Gateway) ChatCompletions(w http.ResponseWriter, r *http.Request, tok *s
 	_ = json.Unmarshal(body, &payload)
 	model := strings.TrimSpace(payload.Model)
 	if model == "" {
-		writeOpenAIError(w, http.StatusBadRequest, "model is required", "invalid_request_error", "model_required")
-		g.record(tok, nil, requestID, "", "", payload.Stream, "error", http.StatusBadRequest, "model is required", 0, 0, started)
+		msg := "model is required"
+		writeOpenAIError(w, http.StatusBadRequest, msg, "invalid_request_error", "model_required")
+		g.recordFree(tok, requestID, "", payload.Stream, "error", http.StatusBadRequest, msg, started)
 		return
 	}
 	if code, msg := authorize(tok, model); code != 0 {
 		writeOpenAIError(w, code, msg, authErrorType(code), "")
-		g.record(tok, nil, requestID, model, "", payload.Stream, "error", code, msg, 0, 0, started)
+		g.recordFree(tok, requestID, model, payload.Stream, "error", code, msg, started)
 		return
 	}
-
 	promptTokens := estimateChatPrompt(payload)
 	requestLease, ok := g.admit(w, tok, requestID, model, payload.Stream, promptTokens, completionTokenUpper(raw), started)
 	if !ok {
@@ -135,8 +140,30 @@ func (g *Gateway) ChatCompletions(w http.ResponseWriter, r *http.Request, tok *s
 	if len(candidates) == 0 {
 		msg := fmt.Sprintf("model %q is not available on any enabled channel", model)
 		writeOpenAIError(w, http.StatusNotFound, msg, "invalid_request_error", "model_not_found")
-		g.record(tok, nil, requestID, model, "", payload.Stream, "error", http.StatusNotFound, msg, 0, 0, started)
+		g.recordFree(tok, requestID, model, payload.Stream, "error", http.StatusNotFound, msg, started)
 		return
+	}
+
+	plan := g.planChatQuota(body, raw, len(payload.Messages), candidates)
+	reservation, err := g.reserveQuota(tok, requestID, model, plan, payload.Stream)
+	if err != nil {
+		g.quotaRejection(w, tok, requestID, model, payload.Stream, started, err)
+		return
+	}
+	// For a finite-quota key the reservation must be a real limit. When the
+	// client omitted an output cap, send the configured cap upstream so the
+	// upstream cannot generate more than was reserved.
+	if plan.capOutput && tok.Quota >= 0 {
+		hasPositiveLimit := false
+		if v, ok := intValue(raw["max_tokens"]); ok && v > 0 {
+			hasPositiveLimit = true
+		}
+		if v, ok := intValue(raw["max_completion_tokens"]); ok && v > 0 {
+			hasPositiveLimit = true
+		}
+		if !hasPositiveLimit {
+			raw["max_tokens"] = plan.outputCapPerChoice
+		}
 	}
 
 	var lastErr string
@@ -163,11 +190,15 @@ func (g *Gateway) ChatCompletions(w http.ResponseWriter, r *http.Request, tok *s
 			continue
 		}
 		if out.committed {
+			logStatus := "success"
 			if out.errMsg != "" {
-				g.record(tok, &ch, requestID, model, cand.upstream, payload.Stream, "error", http.StatusOK, out.errMsg, out.prompt, out.completion, started)
-			} else {
-				g.record(tok, &ch, requestID, model, cand.upstream, payload.Stream, "success", http.StatusOK, "", out.prompt, out.completion, started)
+				logStatus = "error"
 			}
+			g.settleRequest(tok, reservation, &ch, cand.upstream, model, payload.Stream, logStatus, http.StatusOK, out.errMsg, out.prompt, out.completion, usageStatus(out.usageReported), started)
+			return
+		}
+		if out.ambiguous {
+			g.settleUnverified(w, tok, reservation, &ch, cand.upstream, model, payload.Stream, out.status, out.errMsg, started)
 			return
 		}
 		if out.status == 0 {
@@ -185,7 +216,7 @@ func (g *Gateway) ChatCompletions(w http.ResponseWriter, r *http.Request, tok *s
 			msg = http.StatusText(out.status)
 		}
 		writeOpenAIError(w, out.status, msg, "upstream_error", fmt.Sprintf("upstream_status_%d", out.status))
-		g.record(tok, &ch, requestID, model, cand.upstream, payload.Stream, "error", out.status, msg, 0, 0, started)
+		g.releaseRequest(tok, reservation, &ch, cand.upstream, model, payload.Stream, "error", out.status, msg, started)
 		return
 	}
 
@@ -197,7 +228,7 @@ func (g *Gateway) ChatCompletions(w http.ResponseWriter, r *http.Request, tok *s
 	}
 	g.logger.Error("all upstream channels failed", "model", model, "error", lastErr)
 	writeOpenAIError(w, status, msg, "upstream_error", "upstream_unavailable")
-	g.record(tok, lastChannel, requestID, model, "", payload.Stream, "error", status, msg, 0, 0, started)
+	g.releaseRequest(tok, reservation, lastChannel, "", model, payload.Stream, "error", status, msg, started)
 }
 
 // Embeddings handles POST /v1/embeddings (OpenAI-compatible channels only).
@@ -207,24 +238,30 @@ func (g *Gateway) Embeddings(w http.ResponseWriter, r *http.Request, tok *store.
 	started := time.Now()
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxChatBody))
 	if err != nil {
-		writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request body is too large", "invalid_request_error", "body_too_large")
+		msg := "request body is too large"
+		writeOpenAIError(w, http.StatusRequestEntityTooLarge, msg, "invalid_request_error", "body_too_large")
+		g.recordFree(tok, requestID, "", false, "error", http.StatusRequestEntityTooLarge, msg, started)
 		return
 	}
 	var payload struct {
 		Model string `json:"model"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "request body must be valid JSON", "invalid_request_error", "invalid_json")
+		msg := "request body must be valid JSON"
+		writeOpenAIError(w, http.StatusBadRequest, msg, "invalid_request_error", "invalid_json")
+		g.recordFree(tok, requestID, "", false, "error", http.StatusBadRequest, msg, started)
 		return
 	}
 	model := strings.TrimSpace(payload.Model)
 	if model == "" {
-		writeOpenAIError(w, http.StatusBadRequest, "model is required", "invalid_request_error", "model_required")
+		msg := "model is required"
+		writeOpenAIError(w, http.StatusBadRequest, msg, "invalid_request_error", "model_required")
+		g.recordFree(tok, requestID, "", false, "error", http.StatusBadRequest, msg, started)
 		return
 	}
 	if code, msg := authorize(tok, model); code != 0 {
 		writeOpenAIError(w, code, msg, authErrorType(code), "")
-		g.record(tok, nil, requestID, model, "", false, "error", code, msg, 0, 0, started)
+		g.recordFree(tok, requestID, model, false, "error", code, msg, started)
 		return
 	}
 	promptEstimate := estimateTokens(string(body))
@@ -239,13 +276,29 @@ func (g *Gateway) Embeddings(w http.ResponseWriter, r *http.Request, tok *store.
 		g.serverError(w, tok, requestID, model, false, started, err)
 		return
 	}
+	allCandidates := orderCandidates(channels, model)
+	candidates := make([]candidate, 0, len(allCandidates))
+	for _, cand := range allCandidates {
+		if cand.channel.Type == "openai" {
+			candidates = append(candidates, cand)
+		}
+	}
+	if len(candidates) == 0 {
+		msg := "no upstream channel supports embeddings for this model"
+		writeOpenAIError(w, http.StatusBadGateway, msg, "upstream_error", "upstream_unavailable")
+		g.recordFree(tok, requestID, model, false, "error", http.StatusBadGateway, msg, started)
+		return
+	}
+	plan := g.planEmbeddingQuota(body, candidates)
+	reservation, err := g.reserveQuota(tok, requestID, model, plan, false)
+	if err != nil {
+		g.quotaRejection(w, tok, requestID, model, false, started, err)
+		return
+	}
 	var lastErr string
 	var lastChannel *store.Channel
-	for _, cand := range orderCandidates(channels, model) {
+	for _, cand := range candidates {
 		ch := cand.channel
-		if ch.Type != "openai" {
-			continue
-		}
 		lastChannel = &ch
 		apiKey, err := g.secrets.Decrypt(ch.APIKeyEncrypted)
 		if err != nil {
@@ -263,6 +316,10 @@ func (g *Gateway) Embeddings(w http.ResponseWriter, r *http.Request, tok *store.
 		}
 		resp, err := g.client.Do(req)
 		if err != nil {
+			if transportErrorIsAmbiguous(err) {
+				g.settleUnverified(w, tok, reservation, &ch, cand.upstream, model, false, ambiguityStatus(err), err.Error(), started)
+				return
+			}
 			lastErr = err.Error()
 			continue
 		}
@@ -274,30 +331,24 @@ func (g *Gateway) Embeddings(w http.ResponseWriter, r *http.Request, tok *store.
 				continue
 			}
 			writeOpenAIError(w, resp.StatusCode, msg, "upstream_error", "upstream_error")
-			g.record(tok, &ch, requestID, model, cand.upstream, false, "error", resp.StatusCode, msg, 0, 0, started)
+			g.releaseRequest(tok, reservation, &ch, cand.upstream, model, false, "error", resp.StatusCode, msg, started)
 			return
 		}
 		data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 		resp.Body.Close()
 		if err != nil {
-			lastErr = err.Error()
-			continue
+			g.settleUnverified(w, tok, reservation, &ch, cand.upstream, model, false, http.StatusBadGateway, "read upstream response: "+err.Error(), started)
+			return
 		}
-		var parsed struct {
-			Usage struct {
-				PromptTokens int64 `json:"prompt_tokens"`
-				TotalTokens  int64 `json:"total_tokens"`
-			} `json:"usage"`
-		}
-		_ = json.Unmarshal(data, &parsed)
-		prompt := parsed.Usage.PromptTokens
+		usage := usageFromJSON(data)
+		prompt := usage.prompt
 		if prompt == 0 {
 			prompt = promptEstimate
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(data)
-		g.record(tok, &ch, requestID, model, cand.upstream, false, "success", resp.StatusCode, "", prompt, 0, started)
+		g.settleRequest(tok, reservation, &ch, cand.upstream, model, false, "success", resp.StatusCode, "", prompt, 0, usageStatus(usage.reported), started)
 		return
 	}
 	status := http.StatusBadGateway
@@ -306,7 +357,7 @@ func (g *Gateway) Embeddings(w http.ResponseWriter, r *http.Request, tok *store.
 		msg = lastErr
 	}
 	writeOpenAIError(w, status, msg, "upstream_error", "upstream_unavailable")
-	g.record(tok, lastChannel, requestID, model, "", false, "error", status, msg, 0, 0, started)
+	g.releaseRequest(tok, reservation, lastChannel, "", model, false, "error", status, msg, started)
 }
 
 // Models handles GET /v1/models.
@@ -446,6 +497,9 @@ func (g *Gateway) attemptOpenAI(w http.ResponseWriter, r *http.Request, ch *stor
 	}
 	resp, err := g.client.Do(req)
 	if err != nil {
+		if transportErrorIsAmbiguous(err) {
+			return outcome{ambiguous: true, status: ambiguityStatus(err), errMsg: err.Error()}
+		}
 		return outcome{errMsg: err.Error()}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -454,22 +508,29 @@ func (g *Gateway) attemptOpenAI(w http.ResponseWriter, r *http.Request, ch *stor
 		return outcome{status: resp.StatusCode, errMsg: msg}
 	}
 	if stream {
-		prompt, completion, err := g.streamOpenAI(w, resp, promptTokens, rawModel(raw))
+		prompt, completion, reported, err := g.streamOpenAI(w, resp, promptTokens, rawModel(raw))
 		if err != nil {
-			return outcome{committed: true, status: http.StatusOK, prompt: prompt, completion: completion, errMsg: "stream interrupted: " + err.Error()}
+			var preCommit *streamStartError
+			if errors.As(err, &preCommit) {
+				return outcome{ambiguous: true, status: http.StatusBadGateway, errMsg: err.Error()}
+			}
+			return outcome{committed: true, status: http.StatusOK, prompt: prompt, completion: completion, usageReported: reported, errMsg: "stream interrupted: " + err.Error()}
 		}
-		return outcome{committed: true, status: http.StatusOK, prompt: prompt, completion: completion}
+		return outcome{committed: true, status: http.StatusOK, prompt: prompt, completion: completion, usageReported: reported}
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	resp.Body.Close()
 	if err != nil {
-		return outcome{errMsg: "read upstream response: " + err.Error()}
+		// The upstream accepted the request (2xx) but the body could not be
+		// read. Usage is unknowable; do not retry another channel and risk a
+		// second real charge.
+		return outcome{ambiguous: true, status: http.StatusBadGateway, errMsg: "read upstream response: " + err.Error()}
 	}
-	prompt, completion := openAIUsage(data, promptTokens)
+	prompt, completion, reported := openAIUsage(data, promptTokens)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
-	return outcome{committed: true, status: http.StatusOK, prompt: prompt, completion: completion}
+	return outcome{committed: true, status: http.StatusOK, prompt: prompt, completion: completion, usageReported: reported}
 }
 
 func (g *Gateway) attemptAnthropic(w http.ResponseWriter, r *http.Request, ch *store.Channel, apiKey, upstream string, raw map[string]any, promptTokens int64) outcome {
@@ -486,6 +547,9 @@ func (g *Gateway) attemptAnthropic(w http.ResponseWriter, r *http.Request, ch *s
 	}
 	resp, err := g.client.Do(req)
 	if err != nil {
+		if transportErrorIsAmbiguous(err) {
+			return outcome{ambiguous: true, status: ambiguityStatus(err), errMsg: err.Error()}
+		}
 		return outcome{errMsg: err.Error()}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -494,25 +558,50 @@ func (g *Gateway) attemptAnthropic(w http.ResponseWriter, r *http.Request, ch *s
 		return outcome{status: resp.StatusCode, errMsg: msg}
 	}
 	if stream {
-		prompt, completion, err := g.streamAnthropic(w, resp, promptTokens, rawModel(raw))
+		prompt, completion, reported, err := g.streamAnthropic(w, resp, promptTokens, rawModel(raw))
 		if err != nil {
-			return outcome{committed: true, status: http.StatusOK, prompt: prompt, completion: completion, errMsg: "stream interrupted: " + err.Error()}
+			return outcome{committed: true, status: http.StatusOK, prompt: prompt, completion: completion, usageReported: reported, errMsg: "stream interrupted: " + err.Error()}
 		}
-		return outcome{committed: true, status: http.StatusOK, prompt: prompt, completion: completion}
+		return outcome{committed: true, status: http.StatusOK, prompt: prompt, completion: completion, usageReported: reported}
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	resp.Body.Close()
 	if err != nil {
-		return outcome{errMsg: "read upstream response: " + err.Error()}
+		return outcome{ambiguous: true, status: http.StatusBadGateway, errMsg: "read upstream response: " + err.Error()}
 	}
-	translated, prompt, completion, err := anthropicToOpenAI(data, rawModel(raw), promptTokens)
+	translated, prompt, completion, reported, err := anthropicToOpenAI(data, rawModel(raw), promptTokens)
 	if err != nil {
-		return outcome{errMsg: "translate Anthropic response: " + err.Error()}
+		return outcome{ambiguous: true, status: http.StatusBadGateway, errMsg: "translate Anthropic response: " + err.Error()}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(translated)
-	return outcome{committed: true, status: http.StatusOK, prompt: prompt, completion: completion}
+	return outcome{committed: true, status: http.StatusOK, prompt: prompt, completion: completion, usageReported: reported}
+}
+
+// transportErrorIsAmbiguous reports whether a failed upstream call may still
+// have been received and billed. Dial and DNS failures happen before the
+// request can reach the provider and are safe to treat as free.
+func transportErrorIsAmbiguous(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return false
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return false
+	}
+	return true
+}
+
+func ambiguityStatus(err error) int {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusGatewayTimeout
+	}
+	return http.StatusBadGateway
 }
 
 func rawModel(raw map[string]any) string {
@@ -520,12 +609,18 @@ func rawModel(raw map[string]any) string {
 	return m
 }
 
-// requestContext applies the configured timeout to non-streaming upstream calls.
+// requestContext applies the configured timeout to upstream calls. Streaming
+// requests get a hard overall limit so a stuck stream cannot hold a quota
+// reservation indefinitely.
 func (g *Gateway) requestContext(ctx context.Context, stream bool) (context.Context, context.CancelFunc) {
-	if stream || g.cfg.RequestTimeout <= 0 {
+	timeout := g.cfg.RequestTimeout
+	if stream {
+		timeout = g.cfg.StreamTimeout
+	}
+	if timeout <= 0 {
 		return ctx, func() {}
 	}
-	return context.WithTimeout(ctx, g.cfg.RequestTimeout)
+	return context.WithTimeout(ctx, timeout)
 }
 
 func (g *Gateway) upstreamRequest(ctx context.Context, ch *store.Channel, method, path string, body []byte, apiKey string, stream, acceptJSON bool) (*http.Request, error) {
@@ -553,25 +648,52 @@ func (g *Gateway) upstreamRequest(ctx context.Context, ch *store.Channel, method
 	return req, nil
 }
 
-func (g *Gateway) record(tok *store.Token, ch *store.Channel, requestID, model, upstream string, stream bool, status string, code int, errMsg string, prompt, completion int64, started time.Time) {
-	// Replace the prompt reservation made at admission with the real usage so
-	// the TPM window reflects what upstream actually consumed.
-	g.limits.Settle(tok.ID, requestID, prompt, completion)
-	total := prompt + completion
-	cost := 0.0
-	if ch != nil {
-		cost = round6((float64(prompt)*ch.InputPrice + float64(completion)*ch.OutputPrice) / 1_000_000)
+// recordFree records a request that never produced upstream usage and
+// therefore carries no charge.
+func (g *Gateway) recordFree(tok *store.Token, requestID, model string, stream bool, status string, code int, errMsg string, started time.Time) {
+	// Admission may have held token capacity for this request; drop it.
+	g.limits.Settle(tok.ID, requestID, 0, 0)
+	l := &store.Log{
+		RequestID:  requestID,
+		TokenID:    tok.ID,
+		TokenName:  tok.Name,
+		Model:      model,
+		CostStatus: store.CostFree,
+		Status:     status,
+		StatusCode: code,
+		Error:      truncate(errMsg, 1000),
+		LatencyMS:  time.Since(started).Milliseconds(),
+		Stream:     stream,
+	}
+	if err := g.store.InsertLog(l); err != nil {
+		g.logger.Error("failed to write request log", "error", err)
+	}
+	if err := g.store.MarkTokenUsed(tok.ID); err != nil {
+		g.logger.Error("failed to update key last-used time", "error", err)
+	}
+}
+
+// settleRequest releases the unused reservation and records the charge in one
+// transaction. FinalizeReservation refuses a second settlement, so a duplicate
+// completion notification cannot charge the key twice.
+func (g *Gateway) settleRequest(tok *store.Token, res *store.Reservation, ch *store.Channel, upstream, model string, stream bool, status string, code int, errMsg string, prompt, completion int64, costStatus string, started time.Time) {
+	cost := costFor(ch, prompt, completion)
+	if cost > res.ReservedCost+1e-9 {
+		g.logger.Warn("settled cost exceeded the reserved upper bound",
+			"request_id", res.RequestID, "cost", cost, "reserved", res.ReservedCost)
 	}
 	l := &store.Log{
-		RequestID:        requestID,
+		RequestID:        res.RequestID,
 		TokenID:          tok.ID,
 		TokenName:        tok.Name,
 		Model:            model,
 		UpstreamModel:    upstream,
 		PromptTokens:     prompt,
 		CompletionTokens: completion,
-		TotalTokens:      total,
+		TotalTokens:      prompt + completion,
 		Cost:             cost,
+		ReservedCost:     res.ReservedCost,
+		CostStatus:       costStatus,
 		Status:           status,
 		StatusCode:       code,
 		Error:            truncate(errMsg, 1000),
@@ -582,17 +704,109 @@ func (g *Gateway) record(tok *store.Token, ch *store.Channel, requestID, model, 
 		l.ChannelID = ch.ID
 		l.ChannelName = ch.Name
 	}
-	if err := g.store.InsertLog(l); err != nil {
-		g.logger.Error("failed to write request log", "error", err)
-	}
-	if status == "success" {
-		if err := g.store.AddTokenUsage(tok.ID, cost); err != nil {
-			g.logger.Error("failed to update key usage", "error", err)
-		}
+	ok, err := g.store.FinalizeReservation(res.ID, l, cost, costStatus, false)
+	if err != nil {
+		g.logger.Error("failed to settle quota reservation", "request_id", res.RequestID, "error", err)
 		return
 	}
-	if err := g.store.MarkTokenUsed(tok.ID); err != nil {
-		g.logger.Error("failed to update key last-used time", "error", err)
+	if !ok {
+		g.logger.Warn("quota reservation was already finalized", "request_id", res.RequestID)
+		return
+	}
+	// Replace the token reservation made at admission with the real usage so
+	// the TPM window reflects what upstream actually consumed. Do this only
+	// after the reservation settles so a duplicate notification cannot add the
+	// same tokens to the TPM window twice.
+	g.limits.Settle(tok.ID, res.RequestID, prompt, completion)
+}
+
+// settleUnverified handles a request that certainly or possibly reached an
+// upstream but whose real usage is unknowable. It charges the reserved upper
+// bound and marks the charge unverified; it never retries another channel
+// because that could bill the same request twice.
+func (g *Gateway) settleUnverified(w http.ResponseWriter, tok *store.Token, res *store.Reservation, ch *store.Channel, upstream, model string, stream bool, code int, errMsg string, started time.Time) {
+	msg := strings.TrimSpace(errMsg)
+	if msg == "" {
+		msg = "upstream request outcome is unknown"
+	}
+	if code < 400 || code > 599 {
+		code = http.StatusBadGateway
+	}
+	writeOpenAIError(w, code, msg, "upstream_error", "upstream_usage_unknown")
+	l := &store.Log{
+		RequestID:     res.RequestID,
+		TokenID:       tok.ID,
+		TokenName:     tok.Name,
+		Model:         model,
+		UpstreamModel: upstream,
+		Cost:          res.ReservedCost,
+		ReservedCost:  res.ReservedCost,
+		CostStatus:    store.CostUnverified,
+		Status:        "error",
+		StatusCode:    code,
+		Error:         truncate(msg, 1000),
+		LatencyMS:     time.Since(started).Milliseconds(),
+		Stream:        stream,
+	}
+	if ch != nil {
+		l.ChannelID = ch.ID
+		l.ChannelName = ch.Name
+	}
+	ok, err := g.store.FinalizeReservation(res.ID, l, res.ReservedCost, store.CostUnverified, false)
+	if err != nil {
+		g.logger.Error("failed to settle unverified request", "request_id", res.RequestID, "error", err)
+		return
+	}
+	if !ok {
+		g.logger.Warn("quota reservation was already finalized", "request_id", res.RequestID)
+	}
+}
+
+// releaseRequest records a request that produced no charge and frees its hold.
+func (g *Gateway) releaseRequest(tok *store.Token, res *store.Reservation, ch *store.Channel, upstream, model string, stream bool, status string, code int, errMsg string, started time.Time) {
+	l := &store.Log{
+		RequestID:     res.RequestID,
+		TokenID:       tok.ID,
+		TokenName:     tok.Name,
+		Model:         model,
+		UpstreamModel: upstream,
+		ReservedCost:  res.ReservedCost,
+		CostStatus:    store.CostFree,
+		Status:        status,
+		StatusCode:    code,
+		Error:         truncate(errMsg, 1000),
+		LatencyMS:     time.Since(started).Milliseconds(),
+		Stream:        stream,
+	}
+	if ch != nil {
+		l.ChannelID = ch.ID
+		l.ChannelName = ch.Name
+	}
+	ok, err := g.store.FinalizeReservation(res.ID, l, 0, store.CostFree, true)
+	if err != nil {
+		g.logger.Error("failed to release quota reservation", "request_id", res.RequestID, "error", err)
+		return
+	}
+	if !ok {
+		g.logger.Warn("quota reservation was already finalized", "request_id", res.RequestID)
+	}
+}
+
+// quotaRejection answers a request whose quota reservation could not be placed.
+func (g *Gateway) quotaRejection(w http.ResponseWriter, tok *store.Token, requestID, model string, stream bool, started time.Time, err error) {
+	var insufficient *store.InsufficientQuotaError
+	switch {
+	case errors.As(err, &insufficient):
+		msg := fmt.Sprintf("insufficient quota: this request reserves up to $%.6f but only $%.6f is available (used $%.6f, in flight $%.6f)",
+			insufficient.Required, insufficient.Available, insufficient.Used, insufficient.Reserved)
+		writeOpenAIError(w, http.StatusTooManyRequests, msg, "insufficient_quota", "insufficient_quota")
+		g.recordFree(tok, requestID, model, stream, "error", http.StatusTooManyRequests, msg, started)
+	case errors.Is(err, store.ErrTokenInactive), errors.Is(err, store.ErrTokenExpired):
+		msg := err.Error()
+		writeOpenAIError(w, http.StatusUnauthorized, msg, "invalid_api_key", "key_unavailable")
+		g.recordFree(tok, requestID, model, stream, "error", http.StatusUnauthorized, msg, started)
+	default:
+		g.serverError(w, tok, requestID, model, stream, started, err)
 	}
 }
 
@@ -609,7 +823,7 @@ func (g *Gateway) admit(w http.ResponseWriter, tok *store.Token, requestID, mode
 		if spent >= tok.DailyQuota {
 			msg := "daily spending limit reached for this gateway key"
 			writeOpenAIError(w, http.StatusTooManyRequests, msg, "insufficient_quota", "daily_quota_exceeded")
-			g.record(tok, nil, requestID, model, "", stream, "error", http.StatusTooManyRequests, msg, 0, 0, started)
+			g.recordFree(tok, requestID, model, stream, "error", http.StatusTooManyRequests, msg, started)
 			return nil, false
 		}
 	}
@@ -625,7 +839,7 @@ func (g *Gateway) admit(w http.ResponseWriter, tok *store.Token, requestID, mode
 	})
 	if lerr != nil {
 		writeLimitError(w, lerr)
-		g.record(tok, nil, requestID, model, "", stream, "error", http.StatusTooManyRequests, lerr.Error(), 0, 0, started)
+		g.recordFree(tok, requestID, model, stream, "error", http.StatusTooManyRequests, lerr.Error(), started)
 		return nil, false
 	}
 	writeRateLimitHeaders(w, requestLease.Snapshot())
@@ -641,7 +855,7 @@ func startOfDayUnix(t time.Time) int64 {
 func (g *Gateway) serverError(w http.ResponseWriter, tok *store.Token, requestID, model string, stream bool, started time.Time, err error) {
 	g.logger.Error("gateway internal error", "error", err)
 	writeOpenAIError(w, http.StatusInternalServerError, "internal server error", "server_error", "")
-	g.record(tok, nil, requestID, model, "", stream, "error", http.StatusInternalServerError, err.Error(), 0, 0, started)
+	g.recordFree(tok, requestID, model, stream, "error", http.StatusInternalServerError, err.Error(), started)
 }
 
 func authorize(tok *store.Token, model string) (int, string) {
@@ -654,9 +868,8 @@ func authorize(tok *store.Token, model string) (int, string) {
 	if !modelAllowed(tok, model) {
 		return http.StatusForbidden, fmt.Sprintf("model %q is not allowed by this gateway key", model)
 	}
-	if tok.Quota >= 0 && tok.UsedQuota >= tok.Quota {
-		return http.StatusTooManyRequests, "insufficient quota for this gateway key"
-	}
+	// Balance is enforced atomically against settled spend plus in-flight
+	// reservations when the request is admitted, not from this stale snapshot.
 	return 0, ""
 }
 
