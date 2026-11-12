@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { Navigate } from 'react-router-dom'
 import { useAuth } from '../lib/auth'
+import { ThemeSwitcher } from '../components/ThemeSwitcher'
 import { ErrorBanner, FormField, Spinner } from '../components/ui'
 
 export default function Login() {
@@ -38,6 +39,9 @@ export default function Login() {
     <div className="login-page">
       <div className="login-orb login-orb-a" />
       <div className="login-orb login-orb-b" />
+      <div className="login-theme">
+        <ThemeSwitcher />
+      </div>
       <div className="login-panel">
         <div className="login-brand">
           <div className="brand-mark large">MR</div>

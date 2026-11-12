@@ -26,6 +26,7 @@ type Config struct {
 	// keys when a chat request omits max_tokens/max_completion_tokens. It gives
 	// the reservation a trustworthy upper bound.
 	QuotaDefaultOutputTokens int
+	VideoPollInterval        time.Duration
 	Version                  string
 
 	// UsingDefaults reports settings still on insecure development defaults.
@@ -45,6 +46,7 @@ func Load(version string) (*Config, error) {
 		RequestTimeout:           time.Duration(envInt("REQUEST_TIMEOUT_SECONDS", 300)) * time.Second,
 		StreamTimeout:            time.Duration(envInt("STREAM_TIMEOUT_SECONDS", 1800)) * time.Second,
 		QuotaDefaultOutputTokens: envInt("QUOTA_DEFAULT_OUTPUT_TOKENS", 4096),
+		VideoPollInterval:        time.Duration(envInt("VIDEO_POLL_SECONDS", 8)) * time.Second,
 		Version:                  version,
 	}
 	if cfg.Port <= 0 || cfg.Port > 65535 {

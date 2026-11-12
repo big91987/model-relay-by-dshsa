@@ -3,19 +3,24 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { Icon, type IconName } from './Icon'
+import { ThemeSwitcher } from './ThemeSwitcher'
 
 const navigation: { to: string; label: string; icon: IconName }[] = [
   { to: '/dashboard', label: 'Dashboard', icon: 'dashboard' },
+  { to: '/playground', label: 'Playground', icon: 'spark' },
   { to: '/channels', label: 'Channels', icon: 'channels' },
   { to: '/models', label: 'Models', icon: 'models' },
+  { to: '/videos', label: 'Video', icon: 'video' },
   { to: '/tokens', label: 'API keys', icon: 'key' },
   { to: '/logs', label: 'Logs', icon: 'logs' },
 ]
 
 const titles: Record<string, string> = {
   '/dashboard': 'Dashboard',
+  '/playground': 'Playground',
   '/channels': 'Channels',
   '/models': 'Models',
+  '/videos': 'Video generation',
   '/tokens': 'API keys',
   '/logs': 'Logs',
 }
@@ -91,6 +96,7 @@ export function AppLayout() {
             <span>{title}</span>
           </div>
           <div className="topbar-actions">
+            <ThemeSwitcher />
             <span className="user-chip">
               <span className="avatar">{initial}</span>
               <span>{user?.username}</span>

@@ -45,17 +45,14 @@ func (in *channelInput) normalize(requireKey bool) error {
 	if in.Type == "" {
 		in.Type = "openai"
 	}
-	if in.Type != "openai" && in.Type != "anthropic" {
-		return errors.New("type must be openai or anthropic")
+	if in.Type != "openai" && in.Type != "anthropic" && in.Type != "minimax" && in.Type != "seedance" {
+		return errors.New("type must be openai, anthropic, minimax or seedance")
 	}
-	in.BaseURL = strings.TrimRight(strings.TrimSpace(in.BaseURL), "/")
-	if in.BaseURL == "" {
-		return errors.New("base_url is required")
+	baseURL, err := normalizeBaseURL(in.BaseURL)
+	if err != nil {
+		return err
 	}
-	u, err := url.Parse(in.BaseURL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return errors.New("base_url must be an absolute http(s) URL")
-	}
+	in.BaseURL = baseURL
 	if requireKey && strings.TrimSpace(in.APIKey) == "" {
 		return errors.New("api_key is required")
 	}
@@ -80,6 +77,88 @@ func (in *channelInput) normalize(requireKey bool) error {
 		return errors.New("configure at least one model or model mapping")
 	}
 	return nil
+}
+
+func normalizeBaseURL(raw string) (string, error) {
+	raw = strings.TrimRight(strings.TrimSpace(raw), "/")
+	if raw == "" {
+		return "", errors.New("base_url is required")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", errors.New("base_url must be an absolute http(s) URL")
+	}
+	return raw, nil
+}
+
+type upstreamModelsInput struct {
+	ChannelID int64  `json:"channel_id"`
+	Type      string `json:"type"`
+	BaseURL   string `json:"base_url"`
+	APIKey    string `json:"api_key"`
+}
+
+// handleFetchUpstreamModels asks the configured provider for its model list so
+// the console can offer a checkbox import. It never persists anything: a failed
+// fetch leaves the channel's stored models and aliases untouched.
+func (s *Server) handleFetchUpstreamModels(w http.ResponseWriter, r *http.Request) {
+	var in upstreamModelsInput
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	var stored *store.Channel
+	if in.ChannelID > 0 {
+		channel, err := s.store.GetChannel(in.ChannelID)
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "channel not found")
+			return
+		}
+		if err != nil {
+			s.logger.Error("load channel failed", "error", err)
+			writeErr(w, http.StatusInternalServerError, "failed to load channel")
+			return
+		}
+		stored = channel
+		if strings.TrimSpace(in.Type) == "" {
+			in.Type = stored.Type
+		}
+		if strings.TrimSpace(in.BaseURL) == "" {
+			in.BaseURL = stored.BaseURL
+		}
+	}
+	in.Type = strings.ToLower(strings.TrimSpace(in.Type))
+	if in.Type == "" {
+		in.Type = "openai"
+	}
+	if in.Type != "openai" && in.Type != "anthropic" && in.Type != "minimax" && in.Type != "seedance" {
+		writeErr(w, http.StatusBadRequest, "type must be openai, anthropic, minimax or seedance")
+		return
+	}
+	baseURL, err := normalizeBaseURL(in.BaseURL)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	apiKey := strings.TrimSpace(in.APIKey)
+	if apiKey == "" {
+		if stored == nil {
+			writeErr(w, http.StatusBadRequest, "api_key is required to fetch upstream models")
+			return
+		}
+		apiKey, err = s.secrets.Decrypt(stored.APIKeyEncrypted)
+		if err != nil {
+			s.logger.Error("decrypt channel key failed", "error", err)
+			writeErr(w, http.StatusInternalServerError, "failed to read the stored channel key")
+			return
+		}
+	}
+	models, err := s.gw.FetchModels(r.Context(), in.Type, baseURL, apiKey)
+	if err != nil {
+		s.logger.Warn("fetch upstream models failed", "channel_id", in.ChannelID, "type", in.Type, "error", err)
+		writeErr(w, http.StatusBadGateway, "failed to fetch models from the upstream provider: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"models": models})
 }
 
 func (s *Server) handleListChannels(w http.ResponseWriter, r *http.Request) {
@@ -236,12 +315,32 @@ func (s *Server) handleTestChannel(w http.ResponseWriter, r *http.Request) {
 }
 
 type tokenInput struct {
-	Name          string   `json:"name"`
-	Quota         *float64 `json:"quota"`
-	AllowedModels []string `json:"allowed_models"`
-	RPMLimit      int      `json:"rpm_limit"`
-	ExpiresAt     *int64   `json:"expires_at"`
-	Status        string   `json:"status"`
+	Name           string   `json:"name"`
+	Quota          *float64 `json:"quota"`
+	DailyQuota     *float64 `json:"daily_quota"`
+	AllowedModels  []string `json:"allowed_models"`
+	RPMLimit       int      `json:"rpm_limit"`
+	TPMLimit       int      `json:"tpm_limit"`
+	MaxConcurrency int      `json:"max_concurrency"`
+	ExpiresAt      *int64   `json:"expires_at"`
+	Status         string   `json:"status"`
+}
+
+// validateTokenLimits reports the first invalid per-key limit.
+func validateTokenLimits(in tokenInput) string {
+	switch {
+	case in.RPMLimit < 0:
+		return "rpm_limit must be zero or greater"
+	case in.TPMLimit < 0:
+		return "tpm_limit must be zero or greater"
+	case in.MaxConcurrency < 0:
+		return "max_concurrency must be zero or greater"
+	case in.Quota != nil && *in.Quota < -1:
+		return "quota must be -1 (unlimited) or greater"
+	case in.DailyQuota != nil && *in.DailyQuota < 0:
+		return "daily_quota must be zero or greater"
+	}
+	return ""
 }
 
 func (s *Server) handleListTokens(w http.ResponseWriter, r *http.Request) {
@@ -272,17 +371,17 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		}
 		status = in.Status
 	}
-	if in.RPMLimit < 0 {
-		writeErr(w, http.StatusBadRequest, "rpm_limit must be zero or greater")
+	if msg := validateTokenLimits(in); msg != "" {
+		writeErr(w, http.StatusBadRequest, msg)
 		return
 	}
 	quota := -1.0
 	if in.Quota != nil {
 		quota = *in.Quota
 	}
-	if quota < -1 {
-		writeErr(w, http.StatusBadRequest, "quota must be -1 (unlimited) or greater")
-		return
+	dailyQuota := 0.0
+	if in.DailyQuota != nil {
+		dailyQuota = *in.DailyQuota
 	}
 	plain, prefix, hash, err := auth.GenerateAPIKey()
 	if err != nil {
@@ -291,15 +390,18 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := &store.Token{
-		UserID:        userFrom(r).ID,
-		Name:          name,
-		KeyHash:       hash,
-		KeyPrefix:     prefix,
-		Status:        status,
-		Quota:         quota,
-		AllowedModels: cleanList(in.AllowedModels),
-		RPMLimit:      in.RPMLimit,
-		ExpiresAt:     in.ExpiresAt,
+		UserID:         userFrom(r).ID,
+		Name:           name,
+		KeyHash:        hash,
+		KeyPrefix:      prefix,
+		Status:         status,
+		Quota:          quota,
+		DailyQuota:     dailyQuota,
+		AllowedModels:  cleanList(in.AllowedModels),
+		RPMLimit:       in.RPMLimit,
+		TPMLimit:       in.TPMLimit,
+		MaxConcurrency: in.MaxConcurrency,
+		ExpiresAt:      in.ExpiresAt,
 	}
 	if err := s.store.CreateToken(token); err != nil {
 		s.logger.Error("create token failed", "error", err)
@@ -331,18 +433,19 @@ func (s *Server) handleUpdateToken(w http.ResponseWriter, r *http.Request) {
 	if name := strings.TrimSpace(in.Name); name != "" {
 		token.Name = name
 	}
-	if in.Quota != nil {
-		if *in.Quota < -1 {
-			writeErr(w, http.StatusBadRequest, "quota must be -1 (unlimited) or greater")
-			return
-		}
-		token.Quota = *in.Quota
-	}
-	if in.RPMLimit < 0 {
-		writeErr(w, http.StatusBadRequest, "rpm_limit must be zero or greater")
+	if msg := validateTokenLimits(in); msg != "" {
+		writeErr(w, http.StatusBadRequest, msg)
 		return
 	}
+	if in.Quota != nil {
+		token.Quota = *in.Quota
+	}
+	if in.DailyQuota != nil {
+		token.DailyQuota = *in.DailyQuota
+	}
 	token.RPMLimit = in.RPMLimit
+	token.TPMLimit = in.TPMLimit
+	token.MaxConcurrency = in.MaxConcurrency
 	token.AllowedModels = cleanList(in.AllowedModels)
 	token.ExpiresAt = in.ExpiresAt
 	if in.Status != "" {
@@ -380,11 +483,12 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListLogs(w http.ResponseWriter, r *http.Request) {
 	filter := store.LogFilter{
-		Page:     queryInt(r, "page", 1),
-		PageSize: queryInt(r, "page_size", 50),
-		Model:    strings.TrimSpace(r.URL.Query().Get("model")),
-		Status:   strings.TrimSpace(r.URL.Query().Get("status")),
-		TokenID:  int64(queryInt(r, "token_id", 0)),
+		Page:      queryInt(r, "page", 1),
+		PageSize:  queryInt(r, "page_size", 50),
+		Model:     strings.TrimSpace(r.URL.Query().Get("model")),
+		Status:    strings.TrimSpace(r.URL.Query().Get("status")),
+		RequestID: strings.TrimSpace(r.URL.Query().Get("request_id")),
+		TokenID:   int64(queryInt(r, "token_id", 0)),
 	}
 	if v := r.URL.Query().Get("start"); v != "" {
 		if n, err := parseInt64(v); err == nil {

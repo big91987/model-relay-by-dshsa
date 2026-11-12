@@ -78,6 +78,7 @@ func main() {
 	}
 	gw := gateway.New(cfg, st, secrets, logger)
 	api := server.New(cfg, st, secrets, gw, logger)
+	gw.ResumeVideoTasks()
 
 	httpServer := &http.Server{
 		Addr:              net.JoinHostPort("", strconv.Itoa(cfg.Port)),

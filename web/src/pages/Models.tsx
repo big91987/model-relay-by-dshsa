@@ -3,8 +3,12 @@ import { Link } from 'react-router-dom'
 import { Icon } from '../components/Icon'
 import { EmptyState, ErrorBanner, PageHeader, Spinner } from '../components/ui'
 import { api } from '../lib/api'
-import { formatPrice } from '../lib/format'
+import { channelTypeLabel, formatPrice } from '../lib/format'
 import type { ModelInfo } from '../lib/types'
+
+function isVideoModel(model: ModelInfo): boolean {
+  return model.types.includes('minimax') || model.types.includes('seedance')
+}
 
 export default function Models() {
   const [models, setModels] = useState<ModelInfo[]>([])
@@ -108,7 +112,7 @@ export default function Models() {
                       <div className="chip-row">
                         {model.types.map((type) => (
                           <span className={`type-badge type-${type}`} key={type}>
-                            {type === 'anthropic' ? 'Anthropic' : 'OpenAI'}
+                            {channelTypeLabel(type)}
                           </span>
                         ))}
                       </div>
@@ -122,8 +126,12 @@ export default function Models() {
                         ))}
                       </div>
                     </td>
-                    <td className="num">{formatPrice(model.input_price)}</td>
-                    <td className="num">{formatPrice(model.output_price)}</td>
+                    <td className="num">
+                      {isVideoModel(model) ? <span className="muted">Not metered</span> : formatPrice(model.input_price)}
+                    </td>
+                    <td className="num">
+                      {isVideoModel(model) ? <span className="muted">Not metered</span> : formatPrice(model.output_price)}
+                    </td>
                   </tr>
                 ))}
               </tbody>

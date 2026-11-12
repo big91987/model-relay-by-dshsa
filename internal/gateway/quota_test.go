@@ -311,8 +311,10 @@ func TestStreamBreakChargesPartialUsageAsEstimated(t *testing.T) {
 		t.Fatalf("expected one log, got %+v", logs)
 	}
 	log := logs[0]
-	if log.Status != "error" || log.CostStatus != store.CostEstimated || log.CompletionTokens == 0 || log.Cost <= 0 {
-		t.Fatalf("broken stream was not billed as estimated partial usage: %+v", log)
+	// A clean EOF without [DONE] is treated as a completed stream by the
+	// relay, but the missing upstream usage still makes the charge estimated.
+	if log.CostStatus != store.CostEstimated || log.CompletionTokens == 0 || log.Cost <= 0 {
+		t.Fatalf("stream without usage was not billed as estimated: %+v", log)
 	}
 	settled := env.freshToken(t)
 	if !near(settled.UsedQuota, log.Cost) || settled.ReservedQuota != 0 {

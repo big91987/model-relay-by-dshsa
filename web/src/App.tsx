@@ -7,7 +7,9 @@ import Dashboard from './pages/Dashboard'
 import Login from './pages/Login'
 import Logs from './pages/Logs'
 import Models from './pages/Models'
+import Playground from './pages/Playground'
 import Tokens from './pages/Tokens'
+import Videos from './pages/Videos'
 
 function BootScreen() {
   return (
@@ -31,8 +33,10 @@ export default function App() {
       <Route path="/login" element={<Login />} />
       <Route element={<Protected />}>
         <Route path="/dashboard" element={<Dashboard />} />
+        <Route path="/playground" element={<Playground />} />
         <Route path="/channels" element={<Channels />} />
         <Route path="/models" element={<Models />} />
+        <Route path="/videos" element={<Videos />} />
         <Route path="/tokens" element={<Tokens />} />
         <Route path="/logs" element={<Logs />} />
       </Route>

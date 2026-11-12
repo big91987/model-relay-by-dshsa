@@ -107,6 +107,9 @@ func (s *Store) migrate() error {
 			used_quota REAL NOT NULL DEFAULT 0,
 			allowed_models TEXT NOT NULL DEFAULT '[]',
 			rpm_limit INTEGER NOT NULL DEFAULT 0,
+			tpm_limit INTEGER NOT NULL DEFAULT 0,
+			max_concurrency INTEGER NOT NULL DEFAULT 0,
+			daily_quota REAL NOT NULL DEFAULT 0,
 			expires_at INTEGER,
 			last_used_at INTEGER,
 			created_at INTEGER NOT NULL
@@ -161,6 +164,29 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_reservations_token_status ON token_reservations(token_id, status)`,
 		`CREATE INDEX IF NOT EXISTS idx_reservations_status ON token_reservations(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_reservations_created_at ON token_reservations(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_logs_token_created_at ON logs(token_id, created_at)`,
+		`CREATE TABLE IF NOT EXISTS video_tasks (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			upstream_task_id TEXT NOT NULL DEFAULT '',
+			channel_id INTEGER NOT NULL DEFAULT 0,
+			channel_name TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			upstream_model TEXT NOT NULL DEFAULT '',
+			prompt TEXT NOT NULL DEFAULT '',
+			mode TEXT NOT NULL DEFAULT 'text',
+			resolution TEXT NOT NULL DEFAULT '',
+			duration INTEGER NOT NULL DEFAULT 0,
+			ratio TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'queued',
+			error TEXT NOT NULL DEFAULT '',
+			video_path TEXT NOT NULL DEFAULT '',
+			remote_url TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_video_tasks_created_at ON video_tasks(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_video_tasks_status ON video_tasks(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_logs_request_id ON logs(request_id)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -175,6 +201,15 @@ func (s *Store) migrate() error {
 		{"reservation_id", `TEXT NOT NULL DEFAULT ''`},
 	} {
 		if err := s.ensureColumn("logs", column.name, column.definition); err != nil {
+			return fmt.Errorf("migrate database: %w", err)
+		}
+	}
+	for _, column := range []struct{ name, definition string }{
+		{"tpm_limit", `INTEGER NOT NULL DEFAULT 0`},
+		{"max_concurrency", `INTEGER NOT NULL DEFAULT 0`},
+		{"daily_quota", `REAL NOT NULL DEFAULT 0`},
+	} {
+		if err := s.ensureColumn("tokens", column.name, column.definition); err != nil {
 			return fmt.Errorf("migrate database: %w", err)
 		}
 	}
@@ -361,27 +396,31 @@ func (s *Store) DeleteChannel(id int64) error {
 
 // Token is a gateway API key bound to a user.
 type Token struct {
-	ID            int64    `json:"id"`
-	UserID        int64    `json:"user_id"`
-	Name          string   `json:"name"`
-	KeyHash       string   `json:"-"`
-	KeyPrefix     string   `json:"key_prefix"`
-	Status        string   `json:"status"`
-	Quota         float64  `json:"quota"`
-	UsedQuota     float64  `json:"used_quota"`
-	ReservedQuota float64  `json:"reserved_quota"`
-	AllowedModels []string `json:"allowed_models"`
-	RPMLimit      int      `json:"rpm_limit"`
-	ExpiresAt     *int64   `json:"expires_at"`
-	LastUsedAt    *int64   `json:"last_used_at"`
-	CreatedAt     int64    `json:"created_at"`
+	ID             int64    `json:"id"`
+	UserID         int64    `json:"user_id"`
+	Name           string   `json:"name"`
+	KeyHash        string   `json:"-"`
+	KeyPrefix      string   `json:"key_prefix"`
+	Status         string   `json:"status"`
+	Quota          float64  `json:"quota"`
+	UsedQuota      float64  `json:"used_quota"`
+	ReservedQuota  float64  `json:"reserved_quota"`
+	DailyQuota     float64  `json:"daily_quota"`
+	DailyUsedQuota float64  `json:"daily_used_quota"`
+	AllowedModels  []string `json:"allowed_models"`
+	RPMLimit       int      `json:"rpm_limit"`
+	TPMLimit       int      `json:"tpm_limit"`
+	MaxConcurrency int      `json:"max_concurrency"`
+	ExpiresAt      *int64   `json:"expires_at"`
+	LastUsedAt     *int64   `json:"last_used_at"`
+	CreatedAt      int64    `json:"created_at"`
 }
 
 const tokenColumns = `id, user_id, name, key_hash, key_prefix, status, quota, used_quota,
 	COALESCE((SELECT SUM(reserved_cost) FROM token_reservations WHERE token_id = tokens.id AND status = 'pending'), 0),
-	allowed_models, rpm_limit, expires_at, last_used_at, created_at`
+	daily_quota, allowed_models, rpm_limit, tpm_limit, max_concurrency, expires_at, last_used_at, created_at`
 
-// ListTokens returns every gateway key.
+// ListTokens returns every gateway key with today's spend attached.
 func (s *Store) ListTokens() ([]Token, error) {
 	rows, err := s.db.Query(`SELECT ` + tokenColumns + ` FROM tokens ORDER BY id DESC`)
 	if err != nil {
@@ -396,7 +435,52 @@ func (s *Store) ListTokens() ([]Token, error) {
 		}
 		out = append(out, *t)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	daily, err := s.tokenDailySpend(startOfDay(now()))
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].DailyUsedQuota = daily[out[i].ID]
+	}
+	return out, nil
+}
+
+// tokenDailySpend returns today's spend per key since the given unix timestamp.
+func (s *Store) tokenDailySpend(since int64) (map[int64]float64, error) {
+	rows, err := s.db.Query(`SELECT token_id, COALESCE(SUM(cost), 0) FROM logs
+		WHERE created_at >= ? GROUP BY token_id`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]float64{}
+	for rows.Next() {
+		var id int64
+		var total float64
+		if err := rows.Scan(&id, &total); err != nil {
+			return nil, err
+		}
+		out[id] = total
+	}
 	return out, rows.Err()
+}
+
+// TokenSpendSince sums the cost of successful requests for a key since a unix
+// timestamp. It backs the per-key daily spending limit.
+func (s *Store) TokenSpendSince(id int64, since int64) (float64, error) {
+	var total float64
+	err := s.db.QueryRow(`SELECT COALESCE(SUM(cost), 0) FROM logs
+		WHERE token_id = ? AND created_at >= ?`, id, since).Scan(&total)
+	return total, err
+}
+
+// startOfDay returns the unix timestamp of local midnight for t.
+func startOfDay(t int64) int64 {
+	tm := time.Unix(t, 0)
+	return time.Date(tm.Year(), tm.Month(), tm.Day(), 0, 0, 0, 0, tm.Location()).Unix()
 }
 
 // GetTokenByID returns a key by id.
@@ -421,8 +505,8 @@ func scanToken(row interface{ Scan(dest ...any) error }) (*Token, error) {
 	var t Token
 	var allowed string
 	var expires, lastUsed sql.NullInt64
-	err := row.Scan(&t.ID, &t.UserID, &t.Name, &t.KeyHash, &t.KeyPrefix, &t.Status, &t.Quota, &t.UsedQuota, &t.ReservedQuota,
-		&allowed, &t.RPMLimit, &expires, &lastUsed, &t.CreatedAt)
+	err := row.Scan(&t.ID, &t.UserID, &t.Name, &t.KeyHash, &t.KeyPrefix, &t.Status, &t.Quota, &t.UsedQuota, &t.ReservedQuota, &t.DailyQuota,
+		&allowed, &t.RPMLimit, &t.TPMLimit, &t.MaxConcurrency, &expires, &lastUsed, &t.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -441,9 +525,9 @@ func scanToken(row interface{ Scan(dest ...any) error }) (*Token, error) {
 // CreateToken inserts a key.
 func (s *Store) CreateToken(t *Token) error {
 	t.CreatedAt = now()
-	res, err := s.db.Exec(`INSERT INTO tokens (user_id, name, key_hash, key_prefix, status, quota, used_quota, allowed_models, rpm_limit, expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.UserID, t.Name, t.KeyHash, t.KeyPrefix, t.Status, t.Quota, t.UsedQuota, encodeStrings(t.AllowedModels), t.RPMLimit, t.ExpiresAt, t.CreatedAt)
+	res, err := s.db.Exec(`INSERT INTO tokens (user_id, name, key_hash, key_prefix, status, quota, used_quota, daily_quota, allowed_models, rpm_limit, tpm_limit, max_concurrency, expires_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.UserID, t.Name, t.KeyHash, t.KeyPrefix, t.Status, t.Quota, t.UsedQuota, t.DailyQuota, encodeStrings(t.AllowedModels), t.RPMLimit, t.TPMLimit, t.MaxConcurrency, t.ExpiresAt, t.CreatedAt)
 	if err != nil {
 		return err
 	}
@@ -453,8 +537,8 @@ func (s *Store) CreateToken(t *Token) error {
 
 // UpdateToken persists mutable key fields.
 func (s *Store) UpdateToken(t *Token) error {
-	_, err := s.db.Exec(`UPDATE tokens SET name=?, status=?, quota=?, allowed_models=?, rpm_limit=?, expires_at=? WHERE id=?`,
-		t.Name, t.Status, t.Quota, encodeStrings(t.AllowedModels), t.RPMLimit, t.ExpiresAt, t.ID)
+	_, err := s.db.Exec(`UPDATE tokens SET name=?, status=?, quota=?, daily_quota=?, allowed_models=?, rpm_limit=?, tpm_limit=?, max_concurrency=?, expires_at=? WHERE id=?`,
+		t.Name, t.Status, t.Quota, t.DailyQuota, encodeStrings(t.AllowedModels), t.RPMLimit, t.TPMLimit, t.MaxConcurrency, t.ExpiresAt, t.ID)
 	return err
 }
 
@@ -530,13 +614,14 @@ func (s *Store) InsertLog(l *Log) error {
 
 // LogFilter selects logs for the admin API.
 type LogFilter struct {
-	Page     int
-	PageSize int
-	Model    string
-	Status   string
-	TokenID  int64
-	Start    int64
-	End      int64
+	Page      int
+	PageSize  int
+	Model     string
+	Status    string
+	RequestID string
+	TokenID   int64
+	Start     int64
+	End       int64
 }
 
 // ListLogs returns one page of logs and the total number of matches.
@@ -556,6 +641,10 @@ func (s *Store) ListLogs(f LogFilter) ([]Log, int64, error) {
 	if f.Status != "" {
 		clauses = append(clauses, `status = ?`)
 		args = append(args, f.Status)
+	}
+	if f.RequestID != "" {
+		clauses = append(clauses, `request_id = ?`)
+		args = append(args, f.RequestID)
 	}
 	if f.TokenID > 0 {
 		clauses = append(clauses, `token_id = ?`)
@@ -604,6 +693,123 @@ func scanLog(row interface{ Scan(dest ...any) error }) (*Log, error) {
 		return nil, err
 	}
 	return &l, nil
+}
+
+// VideoTask is one asynchronous video generation task.
+type VideoTask struct {
+	ID             int64  `json:"id"`
+	UpstreamTaskID string `json:"upstream_task_id"`
+	ChannelID      int64  `json:"channel_id"`
+	ChannelName    string `json:"channel_name"`
+	Model          string `json:"model"`
+	UpstreamModel  string `json:"upstream_model"`
+	Prompt         string `json:"prompt"`
+	Mode           string `json:"mode"`
+	Resolution     string `json:"resolution"`
+	Duration       int    `json:"duration"`
+	Ratio          string `json:"ratio"`
+	Status         string `json:"status"`
+	Error          string `json:"error"`
+	VideoPath      string `json:"-"`
+	RemoteURL      string `json:"-"`
+	CreatedAt      int64  `json:"created_at"`
+	UpdatedAt      int64  `json:"updated_at"`
+}
+
+const videoTaskColumns = `id, upstream_task_id, channel_id, channel_name, model, upstream_model, prompt, mode, resolution, duration, ratio, status, error, video_path, remote_url, created_at, updated_at`
+
+// CreateVideoTask inserts a video task and sets its id.
+func (s *Store) CreateVideoTask(v *VideoTask) error {
+	now := now()
+	v.CreatedAt, v.UpdatedAt = now, now
+	res, err := s.db.Exec(`INSERT INTO video_tasks (upstream_task_id, channel_id, channel_name, model, upstream_model, prompt, mode,
+		resolution, duration, ratio, status, error, video_path, remote_url, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		v.UpstreamTaskID, v.ChannelID, v.ChannelName, v.Model, v.UpstreamModel, v.Prompt, v.Mode,
+		v.Resolution, v.Duration, v.Ratio, v.Status, v.Error, v.VideoPath, v.RemoteURL, v.CreatedAt, v.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	v.ID, err = res.LastInsertId()
+	return err
+}
+
+// UpdateVideoTask persists the mutable state of a video task.
+func (s *Store) UpdateVideoTask(v *VideoTask) error {
+	v.UpdatedAt = now()
+	_, err := s.db.Exec(`UPDATE video_tasks SET status=?, error=?, video_path=?, remote_url=?, resolution=?, duration=?, ratio=?, updated_at=? WHERE id=?`,
+		v.Status, v.Error, v.VideoPath, v.RemoteURL, v.Resolution, v.Duration, v.Ratio, v.UpdatedAt, v.ID)
+	return err
+}
+
+// GetVideoTask returns a video task by id.
+func (s *Store) GetVideoTask(id int64) (*VideoTask, error) {
+	row := s.db.QueryRow(`SELECT `+videoTaskColumns+` FROM video_tasks WHERE id = ?`, id)
+	v, err := scanVideoTask(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return v, err
+}
+
+// ListVideoTasks returns one page of video tasks, newest first, with the total count.
+func (s *Store) ListVideoTasks(page, pageSize int) ([]VideoTask, int64, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	var total int64
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM video_tasks`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.Query(`SELECT `+videoTaskColumns+` FROM video_tasks ORDER BY id DESC LIMIT ? OFFSET ?`,
+		pageSize, (page-1)*pageSize)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := make([]VideoTask, 0)
+	for rows.Next() {
+		v, err := scanVideoTask(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, *v)
+	}
+	return out, total, rows.Err()
+}
+
+// ListResumableVideoTasks returns tasks whose upstream work should still be polled
+// or whose generated video still has to be downloaded.
+func (s *Store) ListResumableVideoTasks() ([]VideoTask, error) {
+	rows, err := s.db.Query(`SELECT ` + videoTaskColumns + ` FROM video_tasks
+		WHERE status IN ('queued', 'running') OR (status = 'succeeded' AND video_path = '')
+		ORDER BY id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]VideoTask, 0)
+	for rows.Next() {
+		v, err := scanVideoTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *v)
+	}
+	return out, rows.Err()
+}
+
+func scanVideoTask(row interface{ Scan(dest ...any) error }) (*VideoTask, error) {
+	var v VideoTask
+	err := row.Scan(&v.ID, &v.UpstreamTaskID, &v.ChannelID, &v.ChannelName, &v.Model, &v.UpstreamModel, &v.Prompt, &v.Mode,
+		&v.Resolution, &v.Duration, &v.Ratio, &v.Status, &v.Error, &v.VideoPath, &v.RemoteURL, &v.CreatedAt, &v.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
 }
 
 // Totals aggregates request counts, token usage and spend.

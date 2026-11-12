@@ -97,16 +97,25 @@ export function FormField({
   children,
   htmlFor,
   wide,
+  action,
 }: {
   label: string
   hint?: string
   children: ReactNode
   htmlFor?: string
   wide?: boolean
+  action?: ReactNode
 }) {
   return (
     <label className={`field${wide ? ' wide' : ''}`} htmlFor={htmlFor}>
-      <span className="field-label">{label}</span>
+      {action ? (
+        <span className="field-head">
+          <span className="field-label">{label}</span>
+          <span className="field-action">{action}</span>
+        </span>
+      ) : (
+        <span className="field-label">{label}</span>
+      )}
       {children}
       {hint ? <span className="field-hint">{hint}</span> : null}
     </label>

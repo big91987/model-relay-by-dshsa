@@ -77,6 +77,7 @@ func (s *Server) routes() {
 
 	mux.Handle("GET /api/channels", s.withAdmin(http.HandlerFunc(s.handleListChannels)))
 	mux.Handle("POST /api/channels", s.withAdmin(http.HandlerFunc(s.handleCreateChannel)))
+	mux.Handle("POST /api/channels/upstream-models", s.withAdmin(http.HandlerFunc(s.handleFetchUpstreamModels)))
 	mux.Handle("GET /api/channels/{id}", s.withAdmin(http.HandlerFunc(s.handleGetChannel)))
 	mux.Handle("PUT /api/channels/{id}", s.withAdmin(http.HandlerFunc(s.handleUpdateChannel)))
 	mux.Handle("DELETE /api/channels/{id}", s.withAdmin(http.HandlerFunc(s.handleDeleteChannel)))
@@ -90,6 +91,14 @@ func (s *Server) routes() {
 	mux.Handle("GET /api/logs", s.withAdmin(http.HandlerFunc(s.handleListLogs)))
 	mux.Handle("GET /api/ledger", s.withAdmin(http.HandlerFunc(s.handleListReservations)))
 	mux.Handle("GET /api/models", s.withAdmin(http.HandlerFunc(s.handleListModels)))
+
+	mux.Handle("GET /api/videos", s.withAdmin(http.HandlerFunc(s.handleListVideos)))
+	mux.Handle("POST /api/videos", s.withAdmin(http.HandlerFunc(s.handleCreateVideo)))
+	mux.Handle("GET /api/videos/{id}", s.withAdmin(http.HandlerFunc(s.handleGetVideo)))
+	mux.Handle("GET /api/videos/{id}/content", s.withAdmin(http.HandlerFunc(s.handleVideoContent)))
+
+	mux.Handle("GET /api/playground/models", s.withAdmin(http.HandlerFunc(s.handlePlaygroundModels)))
+	mux.Handle("POST /api/playground/chat", s.withAdmin(http.HandlerFunc(s.handlePlaygroundChat)))
 
 	mux.Handle("GET /v1/models", s.withToken(s.gatewayHandler(s.gw.Models)))
 	mux.Handle("POST /v1/chat/completions", s.withToken(s.gatewayHandler(s.gw.ChatCompletions)))
@@ -116,6 +125,7 @@ func (s *Server) withCommon(next http.Handler) http.Handler {
 			rec.Header().Set("Access-Control-Allow-Origin", "*")
 			rec.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, x-api-key, anthropic-version")
 			rec.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			rec.Header().Set("Access-Control-Expose-Headers", "X-Request-Id, Retry-After, X-RateLimit-Limit-Requests, X-RateLimit-Remaining-Requests, X-RateLimit-Reset-Requests, X-RateLimit-Limit-Tokens, X-RateLimit-Remaining-Tokens, X-RateLimit-Reset-Tokens, X-RateLimit-Limit-Concurrency, X-RateLimit-Remaining-Concurrency")
 			if r.Method == http.MethodOptions {
 				rec.WriteHeader(http.StatusNoContent)
 				return

@@ -4,8 +4,6 @@ import (
 	"math"
 	"math/rand/v2"
 	"sort"
-	"sync"
-	"time"
 
 	"github.com/big91987/model-relay-by-dshsa/internal/store"
 )
@@ -65,36 +63,24 @@ func orderCandidates(channels []store.Channel, model string) []candidate {
 	return out
 }
 
-type rateLimiter struct {
-	mu   sync.Mutex
-	hits map[int64][]time.Time
-}
+// isChatChannel reports whether a channel type serves chat completions.
+func isChatChannel(typ string) bool { return typ == "openai" || typ == "anthropic" }
 
-func newRateLimiter() *rateLimiter {
-	return &rateLimiter{hits: map[int64][]time.Time{}}
-}
+// isVideoChannel reports whether a channel type serves the asynchronous video
+// workflow instead of chat completions.
+func isVideoChannel(typ string) bool { return typ == "minimax" || typ == "seedance" }
 
-// Allow records a request and reports whether it fits within the key's RPM budget.
-func (rl *rateLimiter) Allow(id int64, limit int) bool {
-	if limit <= 0 {
-		return true
-	}
-	now := time.Now()
-	cutoff := now.Add(-time.Minute)
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	kept := rl.hits[id][:0]
-	for _, t := range rl.hits[id] {
-		if t.After(cutoff) {
-			kept = append(kept, t)
+// chatCandidates keeps only channels that speak a chat-capable protocol.
+// MiniMax and Seedance video channels are served by the separate video task
+// flow.
+func chatCandidates(candidates []candidate) []candidate {
+	out := make([]candidate, 0, len(candidates))
+	for _, cand := range candidates {
+		if isChatChannel(cand.channel.Type) {
+			out = append(out, cand)
 		}
 	}
-	if len(kept) >= limit {
-		rl.hits[id] = kept
-		return false
-	}
-	rl.hits[id] = append(kept, now)
-	return true
+	return out
 }
 
 func sortStrings(v []string) { sort.Strings(v) }

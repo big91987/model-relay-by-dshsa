@@ -11,8 +11,11 @@ interface TokenFormState {
   name: string
   unlimited: boolean
   quota: string
+  daily_quota: string
   allowed_models: string
   rpm_limit: string
+  tpm_limit: string
+  max_concurrency: string
   expires_at: string
   status: TokenStatus
 }
@@ -21,8 +24,11 @@ const emptyForm: TokenFormState = {
   name: '',
   unlimited: true,
   quota: '',
+  daily_quota: '',
   allowed_models: '',
   rpm_limit: '0',
+  tpm_limit: '0',
+  max_concurrency: '0',
   expires_at: '',
   status: 'active',
 }
@@ -32,8 +38,11 @@ function tokenToForm(token: Token): TokenFormState {
     name: token.name,
     unlimited: token.quota < 0,
     quota: token.quota < 0 ? '' : String(token.quota),
+    daily_quota: token.daily_quota > 0 ? String(token.daily_quota) : '',
     allowed_models: token.allowed_models.join(', '),
     rpm_limit: String(token.rpm_limit),
+    tpm_limit: String(token.tpm_limit),
+    max_concurrency: String(token.max_concurrency),
     expires_at: localDateTimeValue(token.expires_at),
     status: token.status,
   }
@@ -50,8 +59,11 @@ function toPayload(form: TokenFormState): TokenInput {
   return {
     name: form.name.trim(),
     quota: form.unlimited ? -1 : Number.parseFloat(form.quota) || 0,
+    daily_quota: Number.parseFloat(form.daily_quota) || 0,
     allowed_models: parseModelList(form.allowed_models),
     rpm_limit: Number.parseInt(form.rpm_limit, 10) || 0,
+    tpm_limit: Number.parseInt(form.tpm_limit, 10) || 0,
+    max_concurrency: Number.parseInt(form.max_concurrency, 10) || 0,
     expires_at: parseLocalDateTime(form.expires_at),
     status: form.status,
   }
@@ -61,8 +73,11 @@ function payloadFromToken(token: Token, overrides: Partial<TokenInput> = {}): To
   return {
     name: token.name,
     quota: token.quota,
+    daily_quota: token.daily_quota,
     allowed_models: token.allowed_models,
     rpm_limit: token.rpm_limit,
+    tpm_limit: token.tpm_limit,
+    max_concurrency: token.max_concurrency,
     expires_at: token.expires_at,
     status: token.status,
     ...overrides,
@@ -78,6 +93,14 @@ function quotaProgress(token: Token): number {
   if (token.quota < 0) return 0
   if (token.quota === 0) return 100
   return Math.min(100, (token.used_quota / token.quota) * 100)
+}
+
+function limitsLabel(token: Token): string {
+  const limits: string[] = []
+  if (token.rpm_limit > 0) limits.push(`${token.rpm_limit} RPM`)
+  if (token.tpm_limit > 0) limits.push(`${token.tpm_limit.toLocaleString()} TPM`)
+  if (token.max_concurrency > 0) limits.push(`${token.max_concurrency} concurrent`)
+  return limits.length > 0 ? limits.join(' · ') : 'Unlimited'
 }
 
 export default function Tokens() {
@@ -135,8 +158,21 @@ export default function Tokens() {
       toast.error('Enter a quota, or mark the key as unlimited')
       return
     }
-    if (payload.rpm_limit < 0) {
-      toast.error('Rate limit must be zero or greater')
+    if (payload.rpm_limit < 0 || payload.tpm_limit < 0 || payload.max_concurrency < 0) {
+      toast.error('Rate limits must be zero or greater')
+      return
+    }
+    if (payload.daily_quota < 0) {
+      toast.error('Daily spend limit must be zero or greater')
+      return
+    }
+    if (
+      Number.isNaN(payload.rpm_limit) ||
+      Number.isNaN(payload.tpm_limit) ||
+      Number.isNaN(payload.max_concurrency) ||
+      Number.isNaN(payload.daily_quota)
+    ) {
+      toast.error('Limits must be valid numbers')
       return
     }
     setSaving(true)
@@ -200,7 +236,7 @@ export default function Tokens() {
     <div className="page">
       <PageHeader
         title="API keys"
-        subtitle="Gateway keys authenticate OpenAI-compatible clients. Set per-key quotas, model access and rate limits."
+        subtitle="Gateway keys authenticate OpenAI-compatible clients. Set per-key balances, daily budgets, model access and rate limits."
         actions={
           <button className="btn btn-primary" onClick={openCreate}>
             <Icon name="plus" size={16} /> Create key
@@ -235,7 +271,7 @@ export default function Tokens() {
                   <th>Key</th>
                   <th>Status</th>
                   <th>Quota</th>
-                  <th>Rate limit</th>
+                  <th>Limits</th>
                   <th>Last used</th>
                   <th>Expires</th>
                   <th className="right">Actions</th>
@@ -287,9 +323,16 @@ export default function Tokens() {
                         {token.reserved_quota > 0 ? (
                           <span className="quota-reserved">{formatCost(token.reserved_quota)} in flight</span>
                         ) : null}
+                        {token.daily_quota > 0 ? (
+                          <span className="quota-daily">
+                            Today {formatCost(token.daily_used_quota)} / {formatCost(token.daily_quota)}
+                          </span>
+                        ) : null}
                       </div>
                     </td>
-                    <td className="muted">{token.rpm_limit > 0 ? `${token.rpm_limit} RPM` : 'Unlimited'}</td>
+                    <td className="muted">
+                      <span className="limits-label">{limitsLabel(token)}</span>
+                    </td>
                     <td className="muted">{relativeTime(token.last_used_at)}</td>
                     <td className="muted">{token.expires_at ? formatTime(token.expires_at) : 'Never'}</td>
                     <td className="right">
@@ -370,13 +413,45 @@ export default function Tokens() {
               </label>
             </div>
           </FormField>
-          <FormField label="Rate limit (RPM)" hint="0 means unlimited.">
+          <FormField
+            label="Daily spend limit (USD)"
+            hint="Budget for the current day, resets at local midnight. 0 means unlimited."
+          >
+            <input
+              className="input"
+              type="number"
+              min={0}
+              step="0.01"
+              value={form.daily_quota}
+              onChange={(event) => setField('daily_quota', event.target.value)}
+              placeholder="0"
+            />
+          </FormField>
+          <FormField label="Requests per minute (RPM)" hint="0 means unlimited.">
             <input
               className="input"
               type="number"
               min={0}
               value={form.rpm_limit}
               onChange={(event) => setField('rpm_limit', event.target.value)}
+            />
+          </FormField>
+          <FormField label="Tokens per minute (TPM)" hint="Prompt and completion tokens. 0 means unlimited.">
+            <input
+              className="input"
+              type="number"
+              min={0}
+              value={form.tpm_limit}
+              onChange={(event) => setField('tpm_limit', event.target.value)}
+            />
+          </FormField>
+          <FormField label="Max concurrency" hint="Requests this key may have in flight. 0 means unlimited.">
+            <input
+              className="input"
+              type="number"
+              min={0}
+              value={form.max_concurrency}
+              onChange={(event) => setField('max_concurrency', event.target.value)}
             />
           </FormField>
           <FormField

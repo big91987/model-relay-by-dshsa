@@ -129,32 +129,62 @@ func (g *Gateway) streamOpenAI(w http.ResponseWriter, resp *http.Response, promp
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	var prompt, completion int64
-	var usagePrompt, usageCompletion int64
-	var content, toolArgs strings.Builder
+	var promptReported, completionReported bool
 	reported := false
+	var content, toolArgs strings.Builder
+	streamID, streamModel := "", requestedModel
+	var streamCreated int64
 	done := false
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		payload := ""
+		if strings.HasPrefix(line, "data:") {
+			payload = strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		}
+		if payload == "[DONE]" {
+			// Clients that asked for usage chunks expect them before [DONE].
+			// When the upstream omitted usage, report the gateway's estimate and
+			// mark it as such instead of pretending it is exact.
+			if !promptReported || !completionReported {
+				p, c := prompt, completion
+				if p == 0 {
+					p = promptFallback
+				}
+				if c == 0 {
+					c = estimateTokens(content.String()) + estimateTokens(toolArgs.String())
+				}
+				chunkID := streamID
+				if chunkID == "" {
+					chunkID = "chatcmpl-" + newRequestID()
+				}
+				if err := writeUsageChunk(w, chunkID, streamCreated, streamModel, p, c, "estimated"); err != nil {
+					return prompt, completion, reported, err
+				}
+			}
+			if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
+				return prompt, completion, reported, err
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			done = true
+			break
+		}
 		if _, err := io.WriteString(w, line+"\n"); err != nil {
 			return prompt, completion, reported, err
 		}
 		if flusher != nil {
 			flusher.Flush()
 		}
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if payload == "" {
 			continue
 		}
-		if payload == "[DONE]" {
-			done = true
-			break
-		}
 		var chunk struct {
-			Usage *struct {
+			ID      string `json:"id"`
+			Created int64  `json:"created"`
+			Model   string `json:"model"`
+			Usage   *struct {
 				PromptTokens     int64 `json:"prompt_tokens"`
 				CompletionTokens int64 `json:"completion_tokens"`
 			} `json:"usage"`
@@ -172,17 +202,23 @@ func (g *Gateway) streamOpenAI(w http.ResponseWriter, resp *http.Response, promp
 		if json.Unmarshal([]byte(payload), &chunk) != nil {
 			continue
 		}
+		if streamID == "" && chunk.ID != "" {
+			streamID = chunk.ID
+		}
+		if streamCreated == 0 && chunk.Created > 0 {
+			streamCreated = chunk.Created
+		}
+		if streamModel == "" && chunk.Model != "" {
+			streamModel = chunk.Model
+		}
 		if chunk.Usage != nil {
 			if chunk.Usage.PromptTokens > 0 {
 				prompt = chunk.Usage.PromptTokens
-				usagePrompt = chunk.Usage.PromptTokens
+				promptReported = true
 			}
 			if chunk.Usage.CompletionTokens > 0 {
 				completion = chunk.Usage.CompletionTokens
-				usageCompletion = chunk.Usage.CompletionTokens
-			}
-			if usagePrompt > 0 && usageCompletion > 0 {
-				reported = true
+				completionReported = true
 			}
 		}
 		for _, c := range chunk.Choices {
@@ -192,20 +228,91 @@ func (g *Gateway) streamOpenAI(w http.ResponseWriter, resp *http.Response, promp
 			}
 		}
 	}
+	if !done {
+		if streamErr := scanner.Err(); streamErr != nil {
+			// The upstream connection broke after partial content. Tell the
+			// client explicitly so it does not mistake the cut-off for a
+			// completed answer.
+			_ = writeStreamError(w, "upstream stream interrupted: "+streamErr.Error())
+			_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		} else {
+			if !promptReported || !completionReported {
+				// Some upstreams end the stream without a [DONE] marker. Emit
+				// usage after the last chunk so clients still receive an
+				// accounting hint.
+				p, c := prompt, completion
+				if p == 0 {
+					p = promptFallback
+				}
+				if c == 0 {
+					c = estimateTokens(content.String()) + estimateTokens(toolArgs.String())
+				}
+				chunkID := streamID
+				if chunkID == "" {
+					chunkID = "chatcmpl-" + newRequestID()
+				}
+				if err := writeUsageChunk(w, chunkID, streamCreated, streamModel, p, c, "estimated"); err != nil {
+					return prompt, completion, reported, err
+				}
+			}
+			_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
 	if prompt == 0 {
 		prompt = promptFallback
 	}
 	if completion == 0 {
 		completion = estimateTokens(content.String()) + estimateTokens(toolArgs.String())
 	}
-	reported = usagePrompt > 0 && usageCompletion > 0
-	if err := scanner.Err(); err != nil {
-		return prompt, completion, reported, err
+	reported = promptReported && completionReported
+	return prompt, completion, reported, scanner.Err()
+}
+
+// writeStreamError emits an OpenAI-style error event after a stream has already
+// started. HTTP status headers are long gone at that point, so the error must
+// travel inside the SSE body.
+func writeStreamError(w io.Writer, message string) error {
+	encoded, err := json.Marshal(map[string]any{"error": map[string]any{
+		"message": message,
+		"type":    "upstream_error",
+		"code":    "stream_interrupted",
+	}})
+	if err != nil {
+		return err
 	}
-	if !done {
-		return prompt, completion, reported, fmt.Errorf("upstream stream ended before the [DONE] marker")
+	_, err = fmt.Fprintf(w, "data: %s\n\n", encoded)
+	return err
+}
+
+// writeUsageChunk emits the OpenAI-style final usage chunk. source is
+// "upstream" when the numbers came from the provider and "estimated" when the
+// gateway filled in a fallback, so clients can label the value honestly.
+func writeUsageChunk(w io.Writer, id string, created int64, model string, prompt, completion int64, source string) error {
+	if created == 0 {
+		created = time.Now().Unix()
 	}
-	return prompt, completion, reported, nil
+	chunk := map[string]any{
+		"id":      id,
+		"object":  "chat.completion.chunk",
+		"created": created,
+		"model":   model,
+		"choices": []any{},
+		"usage": map[string]any{
+			"prompt_tokens":     prompt,
+			"completion_tokens": completion,
+			"total_tokens":      prompt + completion,
+		},
+		"x_usage_source": source,
+	}
+	encoded, err := json.Marshal(chunk)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(w, "data: %s\n\n", encoded)
+	return err
 }
 
 // streamOpenAIFallback turns a non-streaming completion into OpenAI SSE chunks.
@@ -257,10 +364,12 @@ func (g *Gateway) streamOpenAIFallback(w http.ResponseWriter, resp *http.Respons
 	if model == "" {
 		model = "unknown"
 	}
+	usageSource := "upstream"
 	reported := payload.Usage.PromptTokens > 0 && payload.Usage.CompletionTokens > 0
 	prompt := payload.Usage.PromptTokens
 	if prompt == 0 {
 		prompt = promptFallback
+		usageSource = "estimated"
 	}
 	completion := payload.Usage.CompletionTokens
 	if completion == 0 {
@@ -270,6 +379,7 @@ func (g *Gateway) streamOpenAIFallback(w http.ResponseWriter, resp *http.Respons
 			text.WriteString(call.Function.Arguments)
 		}
 		completion = estimateTokens(text.String())
+		usageSource = "estimated"
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -363,6 +473,9 @@ func (g *Gateway) streamOpenAIFallback(w http.ResponseWriter, resp *http.Respons
 		finishReason = "stop"
 	}
 	if err := writeChunk(map[string]any{}, finishReason); err != nil {
+		return prompt, completion, reported, err
+	}
+	if err := writeUsageChunk(w, id, created, model, prompt, completion, usageSource); err != nil {
 		return prompt, completion, reported, err
 	}
 	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {

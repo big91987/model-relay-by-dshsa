@@ -10,7 +10,11 @@ import type {
   TestResult,
   Token,
   TokenInput,
+  UpstreamModelsInput,
   User,
+  VideoInput,
+  VideosResponse,
+  VideoTask,
 } from './types'
 
 export class ApiError extends Error {
@@ -99,6 +103,9 @@ export const api = {
     const query = model ? `?model=${encodeURIComponent(model)}` : ''
     return request<TestResult>(`/api/channels/${id}/test${query}`, { method: 'POST' })
   },
+  fetchUpstreamModels(input: UpstreamModelsInput) {
+    return request<{ models: string[] }>('/api/channels/upstream-models', { method: 'POST', ...jsonBody(input) })
+  },
   tokens() {
     return request<{ data: Token[] }>('/api/tokens')
   },
@@ -125,5 +132,14 @@ export const api = {
   },
   ledger(limit = 100) {
     return request<LedgerResponse>(`/api/ledger?limit=${limit}`)
+  },
+  videos() {
+    return request<VideosResponse>('/api/videos?page_size=50')
+  },
+  createVideo(input: VideoInput) {
+    return request<VideoTask>('/api/videos', { method: 'POST', ...jsonBody(input) })
+  },
+  playgroundModels(tokenId: number) {
+    return request<{ data: { id: string }[] }>(`/api/playground/models?token_id=${tokenId}`)
   },
 }

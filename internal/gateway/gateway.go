@@ -30,8 +30,12 @@ type Gateway struct {
 	store   *store.Store
 	secrets *secretbox.Cipher
 	client  *http.Client
-	limiter *rateLimiter
+	limits  *limitState
 	logger  *slog.Logger
+
+	// videoPollInterval controls how often asynchronous video tasks are polled.
+	// Tests shorten it; production uses MiniMax's recommended polling cadence.
+	videoPollInterval time.Duration
 }
 
 // New builds a Gateway with a tuned upstream HTTP client.
@@ -50,13 +54,18 @@ func New(cfg *config.Config, st *store.Store, secrets *secretbox.Cipher, logger 
 		ExpectContinueTimeout: time.Second,
 		ResponseHeaderTimeout: 120 * time.Second,
 	}
+	pollInterval := cfg.VideoPollInterval
+	if pollInterval <= 0 {
+		pollInterval = 8 * time.Second
+	}
 	return &Gateway{
-		cfg:     cfg,
-		store:   st,
-		secrets: secrets,
-		client:  &http.Client{Transport: transport},
-		limiter: newRateLimiter(),
-		logger:  logger,
+		cfg:               cfg,
+		store:             st,
+		secrets:           secrets,
+		client:            &http.Client{Transport: transport},
+		limits:            newLimitState(),
+		logger:            logger,
+		videoPollInterval: pollInterval,
 	}
 }
 
@@ -115,19 +124,19 @@ func (g *Gateway) ChatCompletions(w http.ResponseWriter, r *http.Request, tok *s
 		g.recordFree(tok, requestID, model, payload.Stream, "error", code, msg, started)
 		return
 	}
-	if !g.limiter.Allow(tok.ID, tok.RPMLimit) {
-		msg := fmt.Sprintf("rate limit exceeded (%d requests per minute)", tok.RPMLimit)
-		writeOpenAIError(w, http.StatusTooManyRequests, msg, "rate_limit_exceeded", "rate_limit_exceeded")
-		g.recordFree(tok, requestID, model, payload.Stream, "error", http.StatusTooManyRequests, msg, started)
+	promptTokens := estimateChatPrompt(payload)
+	requestLease, ok := g.admit(w, tok, requestID, model, payload.Stream, promptTokens, completionTokenUpper(raw), started)
+	if !ok {
 		return
 	}
+	defer requestLease.Release()
 
 	channels, err := g.store.ListChannels()
 	if err != nil {
 		g.serverError(w, tok, requestID, model, payload.Stream, started, err)
 		return
 	}
-	candidates := orderCandidates(channels, model)
+	candidates := chatCandidates(orderCandidates(channels, model))
 	if len(candidates) == 0 {
 		msg := fmt.Sprintf("model %q is not available on any enabled channel", model)
 		writeOpenAIError(w, http.StatusNotFound, msg, "invalid_request_error", "model_not_found")
@@ -157,7 +166,6 @@ func (g *Gateway) ChatCompletions(w http.ResponseWriter, r *http.Request, tok *s
 		}
 	}
 
-	promptFallback := estimateChatPrompt(payload)
 	var lastErr string
 	var lastStatus int
 	var lastChannel *store.Channel
@@ -174,9 +182,9 @@ func (g *Gateway) ChatCompletions(w http.ResponseWriter, r *http.Request, tok *s
 		var out outcome
 		switch ch.Type {
 		case "openai":
-			out = g.attemptOpenAI(w, r, &ch, apiKey, cand.upstream, raw, payload.Stream, promptFallback)
+			out = g.attemptOpenAI(w, r, &ch, apiKey, cand.upstream, raw, payload.Stream, promptTokens)
 		case "anthropic":
-			out = g.attemptAnthropic(w, r, &ch, apiKey, cand.upstream, raw, promptFallback)
+			out = g.attemptAnthropic(w, r, &ch, apiKey, cand.upstream, raw, promptTokens)
 		default:
 			lastErr = fmt.Sprintf("channel %q has unsupported type %q", ch.Name, ch.Type)
 			continue
@@ -256,12 +264,13 @@ func (g *Gateway) Embeddings(w http.ResponseWriter, r *http.Request, tok *store.
 		g.recordFree(tok, requestID, model, false, "error", code, msg, started)
 		return
 	}
-	if !g.limiter.Allow(tok.ID, tok.RPMLimit) {
-		msg := fmt.Sprintf("rate limit exceeded (%d requests per minute)", tok.RPMLimit)
-		writeOpenAIError(w, http.StatusTooManyRequests, msg, "rate_limit_exceeded", "rate_limit_exceeded")
-		g.recordFree(tok, requestID, model, false, "error", http.StatusTooManyRequests, msg, started)
+	promptEstimate := estimateTokens(string(body))
+	requestLease, ok := g.admit(w, tok, requestID, model, false, promptEstimate, 0, started)
+	if !ok {
 		return
 	}
+	defer requestLease.Release()
+
 	channels, err := g.store.ListChannels()
 	if err != nil {
 		g.serverError(w, tok, requestID, model, false, started, err)
@@ -334,7 +343,7 @@ func (g *Gateway) Embeddings(w http.ResponseWriter, r *http.Request, tok *store.
 		usage := usageFromJSON(data)
 		prompt := usage.prompt
 		if prompt == 0 {
-			prompt = estimateTokens(string(body))
+			prompt = promptEstimate
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
@@ -368,7 +377,7 @@ func (g *Gateway) Models(w http.ResponseWriter, r *http.Request, tok *store.Toke
 		ids = append(ids, id)
 	}
 	for _, ch := range channels {
-		if ch.Status != "enabled" {
+		if ch.Status != "enabled" || !isChatChannel(ch.Type) {
 			continue
 		}
 		for _, m := range ch.Models {
@@ -423,14 +432,23 @@ func (g *Gateway) TestChannel(ctx context.Context, ch *store.Channel, model stri
 	defer cancel()
 	started := time.Now()
 	var req *http.Request
-	if ch.Type == "anthropic" {
+	switch ch.Type {
+	case "anthropic":
 		body, _ := json.Marshal(map[string]any{
 			"model":      upstream,
 			"max_tokens": 8,
 			"messages":   []any{map[string]any{"role": "user", "content": "ping"}},
 		})
 		req, err = g.upstreamRequest(ctx, ch, http.MethodPost, "/messages", body, apiKey, false, true)
-	} else {
+	case "minimax":
+		// A query for an unknown task verifies reachability and credentials
+		// without creating a billable video generation task.
+		req, err = g.upstreamRequest(ctx, ch, http.MethodGet, "/v2/query/video_generation/connectivity-probe", nil, apiKey, false, true)
+	case "seedance":
+		// As with MiniMax, querying a task that does not exist checks the
+		// endpoint and credentials without creating a billable task.
+		req, err = g.upstreamRequest(ctx, ch, http.MethodGet, "/contents/generations/tasks/connectivity-probe", nil, apiKey, false, true)
+	default:
 		body, _ := json.Marshal(map[string]any{
 			"model":      upstream,
 			"max_tokens": 8,
@@ -452,7 +470,13 @@ func (g *Gateway) TestChannel(ctx context.Context, ch *store.Channel, model stri
 	if message == "" {
 		message = http.StatusText(resp.StatusCode)
 	}
-	return TestResult{OK: resp.StatusCode >= 200 && resp.StatusCode < 300, LatencyMS: latency, StatusCode: resp.StatusCode, Message: message}
+	ok = resp.StatusCode >= 200 && resp.StatusCode < 300
+	if isVideoChannel(ch.Type) {
+		// The probe task does not exist, so a validation error still proves
+		// that the endpoint and key are valid; 401/403 do not.
+		ok = ok || resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusUnprocessableEntity
+	}
+	return TestResult{OK: ok, LatencyMS: latency, StatusCode: resp.StatusCode, Message: message}
 }
 
 func (g *Gateway) attemptOpenAI(w http.ResponseWriter, r *http.Request, ch *store.Channel, apiKey, upstream string, raw map[string]any, stream bool, promptTokens int64) outcome {
@@ -627,6 +651,8 @@ func (g *Gateway) upstreamRequest(ctx context.Context, ch *store.Channel, method
 // recordFree records a request that never produced upstream usage and
 // therefore carries no charge.
 func (g *Gateway) recordFree(tok *store.Token, requestID, model string, stream bool, status string, code int, errMsg string, started time.Time) {
+	// Admission may have held token capacity for this request; drop it.
+	g.limits.Settle(tok.ID, requestID, 0, 0)
 	l := &store.Log{
 		RequestID:  requestID,
 		TokenID:    tok.ID,
@@ -685,7 +711,13 @@ func (g *Gateway) settleRequest(tok *store.Token, res *store.Reservation, ch *st
 	}
 	if !ok {
 		g.logger.Warn("quota reservation was already finalized", "request_id", res.RequestID)
+		return
 	}
+	// Replace the token reservation made at admission with the real usage so
+	// the TPM window reflects what upstream actually consumed. Do this only
+	// after the reservation settles so a duplicate notification cannot add the
+	// same tokens to the TPM window twice.
+	g.limits.Settle(tok.ID, res.RequestID, prompt, completion)
 }
 
 // settleUnverified handles a request that certainly or possibly reached an
@@ -776,6 +808,48 @@ func (g *Gateway) quotaRejection(w http.ResponseWriter, tok *store.Token, reques
 	default:
 		g.serverError(w, tok, requestID, model, stream, started, err)
 	}
+}
+
+// admit enforces the key's daily spending budget and per-key rate limits
+// before a request reaches an upstream. It writes the rejection itself and
+// reports false when the caller must stop.
+func (g *Gateway) admit(w http.ResponseWriter, tok *store.Token, requestID, model string, stream bool, promptTokens, completionTokens int64, started time.Time) (*lease, bool) {
+	if tok.DailyQuota > 0 {
+		spent, err := g.store.TokenSpendSince(tok.ID, startOfDayUnix(time.Now()))
+		if err != nil {
+			g.serverError(w, tok, requestID, model, stream, started, err)
+			return nil, false
+		}
+		if spent >= tok.DailyQuota {
+			msg := "daily spending limit reached for this gateway key"
+			writeOpenAIError(w, http.StatusTooManyRequests, msg, "insufficient_quota", "daily_quota_exceeded")
+			g.recordFree(tok, requestID, model, stream, "error", http.StatusTooManyRequests, msg, started)
+			return nil, false
+		}
+	}
+
+	requestLease, lerr := g.limits.Admit(admission{
+		TokenID:          tok.ID,
+		RequestID:        requestID,
+		RPMLimit:         tok.RPMLimit,
+		TPMLimit:         tok.TPMLimit,
+		MaxConcurrency:   tok.MaxConcurrency,
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+	})
+	if lerr != nil {
+		writeLimitError(w, lerr)
+		g.recordFree(tok, requestID, model, stream, "error", http.StatusTooManyRequests, lerr.Error(), started)
+		return nil, false
+	}
+	writeRateLimitHeaders(w, requestLease.Snapshot())
+	return requestLease, true
+}
+
+// startOfDayUnix returns local midnight for the day containing t.
+func startOfDayUnix(t time.Time) int64 {
+	year, month, day := t.Date()
+	return time.Date(year, month, day, 0, 0, 0, 0, t.Location()).Unix()
 }
 
 func (g *Gateway) serverError(w http.ResponseWriter, tok *store.Token, requestID, model string, stream bool, started time.Time, err error) {
