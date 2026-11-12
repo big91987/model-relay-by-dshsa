@@ -29,7 +29,7 @@ type Gateway struct {
 	store   *store.Store
 	secrets *secretbox.Cipher
 	client  *http.Client
-	limiter *rateLimiter
+	limits  *limitState
 	logger  *slog.Logger
 
 	// videoPollInterval controls how often asynchronous video tasks are polled.
@@ -62,7 +62,7 @@ func New(cfg *config.Config, st *store.Store, secrets *secretbox.Cipher, logger 
 		store:             st,
 		secrets:           secrets,
 		client:            &http.Client{Transport: transport},
-		limiter:           newRateLimiter(),
+		limits:            newLimitState(),
 		logger:            logger,
 		videoPollInterval: pollInterval,
 	}
@@ -118,12 +118,13 @@ func (g *Gateway) ChatCompletions(w http.ResponseWriter, r *http.Request, tok *s
 		g.record(tok, nil, requestID, model, "", payload.Stream, "error", code, msg, 0, 0, started)
 		return
 	}
-	if !g.limiter.Allow(tok.ID, tok.RPMLimit) {
-		msg := fmt.Sprintf("rate limit exceeded (%d requests per minute)", tok.RPMLimit)
-		writeOpenAIError(w, http.StatusTooManyRequests, msg, "rate_limit_exceeded", "rate_limit_exceeded")
-		g.record(tok, nil, requestID, model, "", payload.Stream, "error", http.StatusTooManyRequests, msg, 0, 0, started)
+
+	promptTokens := estimateChatPrompt(payload)
+	requestLease, ok := g.admit(w, tok, requestID, model, payload.Stream, promptTokens, completionTokenUpper(raw), started)
+	if !ok {
 		return
 	}
+	defer requestLease.Release()
 
 	channels, err := g.store.ListChannels()
 	if err != nil {
@@ -138,7 +139,6 @@ func (g *Gateway) ChatCompletions(w http.ResponseWriter, r *http.Request, tok *s
 		return
 	}
 
-	promptTokens := estimateChatPrompt(payload)
 	var lastErr string
 	var lastStatus int
 	var lastChannel *store.Channel
@@ -227,11 +227,13 @@ func (g *Gateway) Embeddings(w http.ResponseWriter, r *http.Request, tok *store.
 		g.record(tok, nil, requestID, model, "", false, "error", code, msg, 0, 0, started)
 		return
 	}
-	if !g.limiter.Allow(tok.ID, tok.RPMLimit) {
-		msg := fmt.Sprintf("rate limit exceeded (%d requests per minute)", tok.RPMLimit)
-		writeOpenAIError(w, http.StatusTooManyRequests, msg, "rate_limit_exceeded", "rate_limit_exceeded")
+	promptEstimate := estimateTokens(string(body))
+	requestLease, ok := g.admit(w, tok, requestID, model, false, promptEstimate, 0, started)
+	if !ok {
 		return
 	}
+	defer requestLease.Release()
+
 	channels, err := g.store.ListChannels()
 	if err != nil {
 		g.serverError(w, tok, requestID, model, false, started, err)
@@ -290,7 +292,7 @@ func (g *Gateway) Embeddings(w http.ResponseWriter, r *http.Request, tok *store.
 		_ = json.Unmarshal(data, &parsed)
 		prompt := parsed.Usage.PromptTokens
 		if prompt == 0 {
-			prompt = estimateTokens(string(body))
+			prompt = promptEstimate
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
@@ -548,6 +550,9 @@ func (g *Gateway) upstreamRequest(ctx context.Context, ch *store.Channel, method
 }
 
 func (g *Gateway) record(tok *store.Token, ch *store.Channel, requestID, model, upstream string, stream bool, status string, code int, errMsg string, prompt, completion int64, started time.Time) {
+	// Replace the prompt reservation made at admission with the real usage so
+	// the TPM window reflects what upstream actually consumed.
+	g.limits.Settle(tok.ID, requestID, prompt, completion)
 	total := prompt + completion
 	cost := 0.0
 	if ch != nil {
@@ -585,6 +590,48 @@ func (g *Gateway) record(tok *store.Token, ch *store.Channel, requestID, model, 
 	if err := g.store.MarkTokenUsed(tok.ID); err != nil {
 		g.logger.Error("failed to update key last-used time", "error", err)
 	}
+}
+
+// admit enforces the key's daily spending budget and per-key rate limits
+// before a request reaches an upstream. It writes the rejection itself and
+// reports false when the caller must stop.
+func (g *Gateway) admit(w http.ResponseWriter, tok *store.Token, requestID, model string, stream bool, promptTokens, completionTokens int64, started time.Time) (*lease, bool) {
+	if tok.DailyQuota > 0 {
+		spent, err := g.store.TokenSpendSince(tok.ID, startOfDayUnix(time.Now()))
+		if err != nil {
+			g.serverError(w, tok, requestID, model, stream, started, err)
+			return nil, false
+		}
+		if spent >= tok.DailyQuota {
+			msg := "daily spending limit reached for this gateway key"
+			writeOpenAIError(w, http.StatusTooManyRequests, msg, "insufficient_quota", "daily_quota_exceeded")
+			g.record(tok, nil, requestID, model, "", stream, "error", http.StatusTooManyRequests, msg, 0, 0, started)
+			return nil, false
+		}
+	}
+
+	requestLease, lerr := g.limits.Admit(admission{
+		TokenID:          tok.ID,
+		RequestID:        requestID,
+		RPMLimit:         tok.RPMLimit,
+		TPMLimit:         tok.TPMLimit,
+		MaxConcurrency:   tok.MaxConcurrency,
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+	})
+	if lerr != nil {
+		writeLimitError(w, lerr)
+		g.record(tok, nil, requestID, model, "", stream, "error", http.StatusTooManyRequests, lerr.Error(), 0, 0, started)
+		return nil, false
+	}
+	writeRateLimitHeaders(w, requestLease.Snapshot())
+	return requestLease, true
+}
+
+// startOfDayUnix returns local midnight for the day containing t.
+func startOfDayUnix(t time.Time) int64 {
+	year, month, day := t.Date()
+	return time.Date(year, month, day, 0, 0, 0, 0, t.Location()).Unix()
 }
 
 func (g *Gateway) serverError(w http.ResponseWriter, tok *store.Token, requestID, model string, stream bool, started time.Time, err error) {

@@ -11,7 +11,7 @@ A self-hosted model gateway written in Go, with a React admin console. It expose
 - **MiniMax-H3 video generation** — text-to-video and first-frame image-to-video from the console, with asynchronous tasks, live status, video preview and MP4 download.
 - **Channel routing** — priority first, weighted load balancing inside a priority, public-to-upstream model aliases, and automatic failover on connection errors, `401`, `403`, `404`, `429` and `5xx`.
 - **Upstream model discovery** — fetch the provider's model list in the channel form, tick the models to import, and keep manual entries and public aliases.
-- **Gateway keys** — per-key USD quota, model allowlists, requests-per-minute limit, expiry, enable/disable, and a one-time plaintext reveal at creation.
+- **Gateway keys** — per-key USD balance, daily spending budget, model allowlists, requests-per-minute, tokens-per-minute and concurrency limits, expiry, enable/disable, and a one-time plaintext reveal at creation.
 - **Usage accounting** — prompt/completion tokens and cost from per-channel input/output prices, request logs with status, upstream model, latency and error detail.
 - **Admin console** — dashboard with 7-day traffic, top models and recent requests; channel, model, API key and log pages.
 - **Playground** — select an existing gateway key and try any model it can access: multi-turn chat, editable system prompt, temperature and max output, streaming, stop, and request IDs that link to the request log.
@@ -48,6 +48,35 @@ curl http://localhost:8080/v1/chat/completions \
 ```
 
 Streaming works with the usual OpenAI `"stream": true` flag. `GET /v1/models` lists the models exposed by enabled channels, filtered by the key's allowlist.
+
+### Rate limits and budgets
+
+Every gateway key can enforce several independent limits. A value of `0` means unlimited for the rate limits and the daily budget; the total balance uses `-1` for unlimited.
+
+| Setting | Scope |
+| --- | --- |
+| **Quota (USD)** | Total balance for the key. Requests are rejected once recorded spend reaches it. |
+| **Daily spend limit (USD)** | Spend on successful requests since local midnight, shown as “Today” in the API key list. |
+| **Requests per minute (RPM)** | Sliding 60-second window. |
+| **Tokens per minute (TPM)** | Sliding 60-second window over prompt and completion tokens. When a request is admitted, its estimated prompt plus the client's `max_tokens`/`max_completion_tokens` output limit (when declared) is reserved; the reservation is replaced by the upstream's actual usage when the request finishes. Requests without an output limit reserve their prompt and count completion tokens on settlement. |
+| **Max concurrency** | Number of requests the key may have in flight at once. |
+
+Additional key restrictions are the model allowlist and the expiry date. All of these apply to `/v1/chat/completions` and `/v1/embeddings`; `/v1/models` is free of rate-limit accounting.
+
+A rejected request returns `429 Too Many Requests` with an OpenAI-compatible error: `rate_limit_exceeded` when a per-minute or concurrency limit is hit, and `insufficient_quota` when the balance or daily budget is exhausted. Rate-limit rejections also carry `Retry-After` and the current window in standard headers:
+
+```text
+X-RateLimit-Limit-Requests: 60
+X-RateLimit-Remaining-Requests: 12
+X-RateLimit-Reset-Requests: 31s
+X-RateLimit-Limit-Tokens: 100000
+X-RateLimit-Remaining-Tokens: 4200
+X-RateLimit-Reset-Tokens: 12s
+X-RateLimit-Limit-Concurrency: 4
+X-RateLimit-Remaining-Concurrency: 3
+```
+
+Rate-limit windows are kept in memory by the running gateway. Restarting the process resets them (daily spend and the total balance are read from the request log and SQLite, so they survive restarts), and multiple gateway replicas do not share counters.
 
 ### Anthropic channels
 

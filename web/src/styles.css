@@ -1632,6 +1632,19 @@ select.input {
   background: var(--meter-fill);
 }
 
+.quota-daily {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.limits-label {
+  display: block;
+  max-width: 190px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+}
+
 .token-models {
   margin-top: 6px;
 }

@@ -85,6 +85,9 @@ func (s *Store) migrate() error {
 			used_quota REAL NOT NULL DEFAULT 0,
 			allowed_models TEXT NOT NULL DEFAULT '[]',
 			rpm_limit INTEGER NOT NULL DEFAULT 0,
+			tpm_limit INTEGER NOT NULL DEFAULT 0,
+			max_concurrency INTEGER NOT NULL DEFAULT 0,
+			daily_quota REAL NOT NULL DEFAULT 0,
 			expires_at INTEGER,
 			last_used_at INTEGER,
 			created_at INTEGER NOT NULL
@@ -113,6 +116,7 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_logs_created_at ON logs(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_token_id ON logs(token_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_model ON logs(model)`,
+		`CREATE INDEX IF NOT EXISTS idx_logs_token_created_at ON logs(token_id, created_at)`,
 		`CREATE TABLE IF NOT EXISTS video_tasks (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			upstream_task_id TEXT NOT NULL DEFAULT '',
@@ -141,7 +145,48 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migrate database: %w", err)
 		}
 	}
+	// Columns added after the first release. SQLite has no
+	// "ADD COLUMN IF NOT EXISTS", so inspect the schema first.
+	for _, column := range []struct{ name, definition string }{
+		{"tpm_limit", `INTEGER NOT NULL DEFAULT 0`},
+		{"max_concurrency", `INTEGER NOT NULL DEFAULT 0`},
+		{"daily_quota", `REAL NOT NULL DEFAULT 0`},
+	} {
+		if err := s.ensureColumn("tokens", column.name, column.definition); err != nil {
+			return fmt.Errorf("migrate database: %w", err)
+		}
+	}
 	return nil
+}
+
+// ensureColumn adds a column to an existing table when it is missing.
+func (s *Store) ensureColumn(table, column, definition string) error {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, primaryKey int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == column {
+			found = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	_, err = s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + definition)
+	return err
 }
 
 // User is an admin account.
@@ -294,24 +339,28 @@ func (s *Store) DeleteChannel(id int64) error {
 
 // Token is a gateway API key bound to a user.
 type Token struct {
-	ID            int64    `json:"id"`
-	UserID        int64    `json:"user_id"`
-	Name          string   `json:"name"`
-	KeyHash       string   `json:"-"`
-	KeyPrefix     string   `json:"key_prefix"`
-	Status        string   `json:"status"`
-	Quota         float64  `json:"quota"`
-	UsedQuota     float64  `json:"used_quota"`
-	AllowedModels []string `json:"allowed_models"`
-	RPMLimit      int      `json:"rpm_limit"`
-	ExpiresAt     *int64   `json:"expires_at"`
-	LastUsedAt    *int64   `json:"last_used_at"`
-	CreatedAt     int64    `json:"created_at"`
+	ID             int64    `json:"id"`
+	UserID         int64    `json:"user_id"`
+	Name           string   `json:"name"`
+	KeyHash        string   `json:"-"`
+	KeyPrefix      string   `json:"key_prefix"`
+	Status         string   `json:"status"`
+	Quota          float64  `json:"quota"`
+	UsedQuota      float64  `json:"used_quota"`
+	DailyQuota     float64  `json:"daily_quota"`
+	DailyUsedQuota float64  `json:"daily_used_quota"`
+	AllowedModels  []string `json:"allowed_models"`
+	RPMLimit       int      `json:"rpm_limit"`
+	TPMLimit       int      `json:"tpm_limit"`
+	MaxConcurrency int      `json:"max_concurrency"`
+	ExpiresAt      *int64   `json:"expires_at"`
+	LastUsedAt     *int64   `json:"last_used_at"`
+	CreatedAt      int64    `json:"created_at"`
 }
 
-const tokenColumns = `id, user_id, name, key_hash, key_prefix, status, quota, used_quota, allowed_models, rpm_limit, expires_at, last_used_at, created_at`
+const tokenColumns = `id, user_id, name, key_hash, key_prefix, status, quota, used_quota, daily_quota, allowed_models, rpm_limit, tpm_limit, max_concurrency, expires_at, last_used_at, created_at`
 
-// ListTokens returns every gateway key.
+// ListTokens returns every gateway key with today's spend attached.
 func (s *Store) ListTokens() ([]Token, error) {
 	rows, err := s.db.Query(`SELECT ` + tokenColumns + ` FROM tokens ORDER BY id DESC`)
 	if err != nil {
@@ -326,7 +375,52 @@ func (s *Store) ListTokens() ([]Token, error) {
 		}
 		out = append(out, *t)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	daily, err := s.tokenDailySpend(startOfDay(now()))
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].DailyUsedQuota = daily[out[i].ID]
+	}
+	return out, nil
+}
+
+// tokenDailySpend returns today's spend per key since the given unix timestamp.
+func (s *Store) tokenDailySpend(since int64) (map[int64]float64, error) {
+	rows, err := s.db.Query(`SELECT token_id, COALESCE(SUM(cost), 0) FROM logs
+		WHERE status = 'success' AND created_at >= ? GROUP BY token_id`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]float64{}
+	for rows.Next() {
+		var id int64
+		var total float64
+		if err := rows.Scan(&id, &total); err != nil {
+			return nil, err
+		}
+		out[id] = total
+	}
 	return out, rows.Err()
+}
+
+// TokenSpendSince sums the cost of successful requests for a key since a unix
+// timestamp. It backs the per-key daily spending limit.
+func (s *Store) TokenSpendSince(id int64, since int64) (float64, error) {
+	var total float64
+	err := s.db.QueryRow(`SELECT COALESCE(SUM(cost), 0) FROM logs
+		WHERE token_id = ? AND status = 'success' AND created_at >= ?`, id, since).Scan(&total)
+	return total, err
+}
+
+// startOfDay returns the unix timestamp of local midnight for t.
+func startOfDay(t int64) int64 {
+	tm := time.Unix(t, 0)
+	return time.Date(tm.Year(), tm.Month(), tm.Day(), 0, 0, 0, 0, tm.Location()).Unix()
 }
 
 // GetTokenByID returns a key by id.
@@ -351,8 +445,8 @@ func scanToken(row interface{ Scan(dest ...any) error }) (*Token, error) {
 	var t Token
 	var allowed string
 	var expires, lastUsed sql.NullInt64
-	err := row.Scan(&t.ID, &t.UserID, &t.Name, &t.KeyHash, &t.KeyPrefix, &t.Status, &t.Quota, &t.UsedQuota,
-		&allowed, &t.RPMLimit, &expires, &lastUsed, &t.CreatedAt)
+	err := row.Scan(&t.ID, &t.UserID, &t.Name, &t.KeyHash, &t.KeyPrefix, &t.Status, &t.Quota, &t.UsedQuota, &t.DailyQuota,
+		&allowed, &t.RPMLimit, &t.TPMLimit, &t.MaxConcurrency, &expires, &lastUsed, &t.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -371,9 +465,9 @@ func scanToken(row interface{ Scan(dest ...any) error }) (*Token, error) {
 // CreateToken inserts a key.
 func (s *Store) CreateToken(t *Token) error {
 	t.CreatedAt = now()
-	res, err := s.db.Exec(`INSERT INTO tokens (user_id, name, key_hash, key_prefix, status, quota, used_quota, allowed_models, rpm_limit, expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.UserID, t.Name, t.KeyHash, t.KeyPrefix, t.Status, t.Quota, t.UsedQuota, encodeStrings(t.AllowedModels), t.RPMLimit, t.ExpiresAt, t.CreatedAt)
+	res, err := s.db.Exec(`INSERT INTO tokens (user_id, name, key_hash, key_prefix, status, quota, used_quota, daily_quota, allowed_models, rpm_limit, tpm_limit, max_concurrency, expires_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.UserID, t.Name, t.KeyHash, t.KeyPrefix, t.Status, t.Quota, t.UsedQuota, t.DailyQuota, encodeStrings(t.AllowedModels), t.RPMLimit, t.TPMLimit, t.MaxConcurrency, t.ExpiresAt, t.CreatedAt)
 	if err != nil {
 		return err
 	}
@@ -383,8 +477,8 @@ func (s *Store) CreateToken(t *Token) error {
 
 // UpdateToken persists mutable key fields.
 func (s *Store) UpdateToken(t *Token) error {
-	_, err := s.db.Exec(`UPDATE tokens SET name=?, status=?, quota=?, allowed_models=?, rpm_limit=?, expires_at=? WHERE id=?`,
-		t.Name, t.Status, t.Quota, encodeStrings(t.AllowedModels), t.RPMLimit, t.ExpiresAt, t.ID)
+	_, err := s.db.Exec(`UPDATE tokens SET name=?, status=?, quota=?, daily_quota=?, allowed_models=?, rpm_limit=?, tpm_limit=?, max_concurrency=?, expires_at=? WHERE id=?`,
+		t.Name, t.Status, t.Quota, t.DailyQuota, encodeStrings(t.AllowedModels), t.RPMLimit, t.TPMLimit, t.MaxConcurrency, t.ExpiresAt, t.ID)
 	return err
 }
 
