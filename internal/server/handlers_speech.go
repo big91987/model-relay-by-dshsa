@@ -14,7 +14,7 @@ import (
 )
 
 // maxSpeechBody bounds a synthesis request: the text itself is capped at
-// 10,000 characters, so a couple of MiB leaves room for metadata.
+// 50,000 characters, so a couple of MiB leaves room for metadata.
 const maxSpeechBody = 2 << 20
 
 type speechInput struct {
