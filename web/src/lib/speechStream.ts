@@ -62,22 +62,22 @@ export class SpeechStreamPlayer {
   async start(input: SpeechInput, handlers: SpeechStreamHandlers): Promise<void> {
     this.handlers = handlers
     this.controller = new AbortController()
-    const context = new AudioContext()
-    this.context = context
-    this.gain = context.createGain()
-    this.gain.connect(context.destination)
-    // The caller opens the player from the submit gesture; resuming here keeps
-    // autoplay policies satisfied in browsers that start suspended.
-    if (context.state === 'suspended') {
-      try {
-        await context.resume()
-      } catch {
-        // The first chunk retries the resume call.
-      }
-    }
-    this.timer = window.setInterval(() => this.tick(), PROGRESS_INTERVAL_MS)
-
     try {
+      const context = new AudioContext()
+      this.context = context
+      this.gain = context.createGain()
+      this.gain.connect(context.destination)
+      // The caller opens the player from the submit gesture; resuming here keeps
+      // autoplay policies satisfied in browsers that start suspended.
+      if (context.state === 'suspended') {
+        try {
+          await context.resume()
+        } catch {
+          // The first chunk retries the resume call.
+        }
+      }
+      this.timer = window.setInterval(() => this.tick(), PROGRESS_INTERVAL_MS)
+
       const response = await fetch('/api/speech/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -165,6 +165,9 @@ export class SpeechStreamPlayer {
     switch (block.event) {
       case 'meta': {
         const meta = payload as StreamMeta | null
+        if (meta?.format && meta.format !== 'pcm') {
+          throw new Error(`Unsupported speech audio format: ${meta.format}`)
+        }
         if (meta && typeof meta.sample_rate === 'number' && meta.sample_rate > 0) {
           this.sampleRate = meta.sample_rate
         }
