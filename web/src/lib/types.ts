@@ -141,11 +141,26 @@ export interface LedgerResponse {
   pending_cost: number
 }
 
+export interface ModelCost {
+  model: string
+  requests: number
+  cost: number
+  unverified_cost: number
+}
+
+export interface LogSummary {
+  requests: number
+  cost: number
+  unverified_cost: number
+  by_model: ModelCost[]
+}
+
 export interface LogsResponse {
   items: LogItem[]
   total: number
   page: number
   page_size: number
+  summary: LogSummary
 }
 
 export interface Totals {
