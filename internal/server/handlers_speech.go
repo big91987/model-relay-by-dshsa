@@ -156,6 +156,8 @@ func speechContentType(format string) string {
 		return "audio/flac"
 	case "wav":
 		return "audio/wav"
+	case "m4a":
+		return "audio/mp4"
 	default:
 		return "audio/mpeg"
 	}

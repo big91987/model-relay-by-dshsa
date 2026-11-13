@@ -2066,6 +2066,108 @@ select.input {
   background: var(--danger-bg);
   color: var(--danger-text);
 }
+.speech-side {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+.speech-clones .panel-head {
+  margin-bottom: 14px;
+}
+.voice-clone-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  gap: 14px;
+}
+.voice-clone-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 13px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card-bg);
+}
+.voice-clone-card-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.voice-clone-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.voice-clone-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+.selected-clone {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--input-bg);
+}
+.selected-clone-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.link-button {
+  margin-left: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 550;
+  cursor: pointer;
+}
+.link-button:hover {
+  text-decoration: underline;
+}
+.link-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.file-input {
+  height: auto;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+.clone-consent {
+  align-items: flex-start;
+  white-space: normal;
+  line-height: 1.5;
+}
+.clone-consent input {
+  flex: none;
+  margin-top: 1px;
+}
+.voice-clone-meta {
+  line-height: 1.45;
+}
+.voice-clone-card .video-actions {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+.file-input::file-selector-button {
+  margin-right: 10px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-2);
+  border-radius: 7px;
+  background: var(--card-bg);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
 
 /* ---------- empty, error, spinner ---------- */
 
@@ -3093,6 +3195,9 @@ select.input {
     grid-template-columns: 1fr;
   }
   .speech-list {
+    grid-template-columns: 1fr;
+  }
+  .voice-clone-list {
     grid-template-columns: 1fr;
   }
   .video-form-row {

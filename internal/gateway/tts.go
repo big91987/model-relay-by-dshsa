@@ -227,17 +227,30 @@ func (g *Gateway) CreateSpeech(ctx context.Context, req SpeechRequest) (*store.S
 	if err != nil {
 		return nil, err
 	}
+	// A cloned voice only exists on the channel that cloned it, so pin
+	// synthesis there instead of letting routing pick another MiniMax account.
+	var cloneChannelID int64
+	if clone, cloneErr := g.store.GetVoiceCloneByVoiceID(req.VoiceID); cloneErr == nil {
+		cloneChannelID = clone.ChannelID
+	} else if !errors.Is(cloneErr, store.ErrNotFound) {
+		return nil, cloneErr
+	}
 	candidates := make([]candidate, 0)
 	for _, cand := range orderCandidates(channels, req.Model) {
-		if cand.channel.Type == "minimax" {
-			candidates = append(candidates, cand)
+		if cand.channel.Type != "minimax" {
+			continue
 		}
+		if cloneChannelID != 0 && cand.channel.ID != cloneChannelID {
+			continue
+		}
+		candidates = append(candidates, cand)
 	}
 	if len(candidates) == 0 {
-		return nil, &SpeechError{
-			Status:  http.StatusNotFound,
-			Message: fmt.Sprintf("model %q is not available on any enabled MiniMax channel", req.Model),
+		message := fmt.Sprintf("model %q is not available on any enabled MiniMax channel", req.Model)
+		if cloneChannelID != 0 {
+			message = fmt.Sprintf("the channel that owns cloned voice %q does not serve model %q", req.VoiceID, req.Model)
 		}
+		return nil, &SpeechError{Status: http.StatusNotFound, Message: message}
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, speechRequestTimeout)

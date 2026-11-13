@@ -297,3 +297,37 @@ export interface SpeechClipsResponse {
   page: number
   page_size: number
 }
+
+export interface VoiceClone {
+  id: number
+  voice_id: string
+  name: string
+  channel_id: number
+  channel_name: string
+  model: string
+  upstream_model: string
+  sample_format: string
+  sample_bytes: number
+  source_filename: string
+  preview_text: string
+  preview_format: string
+  preview_duration_ms: number
+  preview_characters: number
+  authorized: boolean
+  created_at: number
+  preview_ready: boolean
+  preview_url?: string
+  preview_warning?: string
+}
+
+export interface VoiceClonesResponse {
+  items: VoiceClone[]
+}
+
+export interface VoiceCloneInput {
+  name: string
+  model: string
+  preview_text: string
+  authorized: boolean
+  file: File
+}
