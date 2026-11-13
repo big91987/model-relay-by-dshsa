@@ -14,7 +14,7 @@ A self-hosted model gateway written in Go, with a React admin console. It expose
 - **Gateway keys** — per-key USD balance, daily spending budget, model allowlists, requests-per-minute, tokens-per-minute and concurrency limits, expiry, enable/disable, and a one-time plaintext reveal at creation.
 - **Usage accounting** — prompt/completion tokens and cost from per-channel input/output prices, request logs with status, upstream model, latency and error detail.
 - **Admin console** — dashboard with 7-day traffic, top models and recent requests; channel, model, API key and log pages.
-- **Playground** — select an existing gateway key and try any model it can access: multi-turn chat, editable system prompt, temperature and max output, streaming, stop, and request IDs that link to the request log.
+- **Playground** — select an existing gateway key and try any model it can access: multi-turn chat, editable system prompt, temperature and max output, streaming, stop, Markdown conversation export, and request IDs that link to the request log.
 - **Simple to operate** — one Go binary with the console embedded, SQLite storage, no Redis or Postgres, graceful shutdown.
 - **Ship-ready basics** — Dockerfile, docker-compose example, Makefile and GitHub Actions CI.
 
@@ -178,6 +178,7 @@ Open **Playground** in the console after signing in and choose one of the gatewa
 3. Optionally edit the system prompt, temperature and maximum output tokens, then send a message. Multi-turn history, including earlier assistant replies, is sent as context on the next request.
 4. Responses stream into the conversation. **Stop generating** aborts the browser read and cancels the upstream request through the relay's request context; content already generated may still be billed. **Regenerate** asks for confirmation first because it creates a new request. **Clear conversation** removes the page's messages but not existing request logs or charges.
 5. Each completed reply shows the relay request ID, round-trip latency and token usage. Usage reported by the upstream is labeled as reported; if the upstream omits it, the gateway's final SSE usage chunk is marked `x_usage_source: "estimated"` and the page labels the value as an estimate instead of presenting it as exact. **View log** opens **Logs** filtered by that request ID.
+6. **Export Markdown** downloads the user messages and model replies currently on the page, in order, as a `.md` file. Each assistant reply is labelled with the model that produced it, and stopped or failed replies include a short status note. The export runs in the browser and does not include the system prompt or the page's parameter settings.
 
 The page uses the console theme tokens and works in light, dark and follow-system themes, including the request log and confirmation dialogs.
 
