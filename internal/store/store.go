@@ -186,6 +186,43 @@ func (s *Store) migrate() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_video_tasks_created_at ON video_tasks(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_video_tasks_status ON video_tasks(status)`,
+		`CREATE TABLE IF NOT EXISTS speech_clips (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			channel_id INTEGER NOT NULL DEFAULT 0,
+			channel_name TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			upstream_model TEXT NOT NULL DEFAULT '',
+			voice_id TEXT NOT NULL DEFAULT '',
+			voice_name TEXT NOT NULL DEFAULT '',
+			text TEXT NOT NULL DEFAULT '',
+			format TEXT NOT NULL DEFAULT 'mp3',
+			audio_path TEXT NOT NULL DEFAULT '',
+			duration_ms INTEGER NOT NULL DEFAULT 0,
+			characters INTEGER NOT NULL DEFAULT 0,
+			size_bytes INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_speech_clips_created_at ON speech_clips(created_at)`,
+		`CREATE TABLE IF NOT EXISTS voice_clones (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			voice_id TEXT NOT NULL UNIQUE,
+			name TEXT NOT NULL DEFAULT '',
+			channel_id INTEGER NOT NULL DEFAULT 0,
+			channel_name TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			upstream_model TEXT NOT NULL DEFAULT '',
+			sample_format TEXT NOT NULL DEFAULT '',
+			sample_bytes INTEGER NOT NULL DEFAULT 0,
+			source_filename TEXT NOT NULL DEFAULT '',
+			preview_text TEXT NOT NULL DEFAULT '',
+			preview_path TEXT NOT NULL DEFAULT '',
+			preview_format TEXT NOT NULL DEFAULT '',
+			preview_duration_ms INTEGER NOT NULL DEFAULT 0,
+			preview_characters INTEGER NOT NULL DEFAULT 0,
+			authorized INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_voice_clones_created_at ON voice_clones(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_request_id ON logs(request_id)`,
 	}
 	for _, stmt := range stmts {
@@ -810,6 +847,193 @@ func scanVideoTask(row interface{ Scan(dest ...any) error }) (*VideoTask, error)
 		return nil, err
 	}
 	return &v, nil
+}
+
+// SpeechClip is one completed MiniMax text-to-speech synthesis.
+type SpeechClip struct {
+	ID            int64  `json:"id"`
+	ChannelID     int64  `json:"channel_id"`
+	ChannelName   string `json:"channel_name"`
+	Model         string `json:"model"`
+	UpstreamModel string `json:"upstream_model"`
+	VoiceID       string `json:"voice_id"`
+	VoiceName     string `json:"voice_name"`
+	Text          string `json:"text"`
+	Format        string `json:"format"`
+	AudioPath     string `json:"-"`
+	DurationMS    int64  `json:"duration_ms"`
+	Characters    int64  `json:"characters"`
+	SizeBytes     int64  `json:"size_bytes"`
+	CreatedAt     int64  `json:"created_at"`
+}
+
+const speechClipColumns = `id, channel_id, channel_name, model, upstream_model, voice_id, voice_name, text, format, audio_path, duration_ms, characters, size_bytes, created_at`
+
+// CreateSpeechClip inserts a generated speech clip and sets its id.
+func (s *Store) CreateSpeechClip(c *SpeechClip) error {
+	c.CreatedAt = now()
+	res, err := s.db.Exec(`INSERT INTO speech_clips (channel_id, channel_name, model, upstream_model, voice_id, voice_name,
+		text, format, audio_path, duration_ms, characters, size_bytes, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		c.ChannelID, c.ChannelName, c.Model, c.UpstreamModel, c.VoiceID, c.VoiceName,
+		c.Text, c.Format, c.AudioPath, c.DurationMS, c.Characters, c.SizeBytes, c.CreatedAt)
+	if err != nil {
+		return err
+	}
+	c.ID, err = res.LastInsertId()
+	return err
+}
+
+// GetSpeechClip returns a speech clip by id.
+func (s *Store) GetSpeechClip(id int64) (*SpeechClip, error) {
+	row := s.db.QueryRow(`SELECT `+speechClipColumns+` FROM speech_clips WHERE id = ?`, id)
+	c, err := scanSpeechClip(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return c, err
+}
+
+// ListSpeechClips returns one page of speech clips, newest first, with the total count.
+func (s *Store) ListSpeechClips(page, pageSize int) ([]SpeechClip, int64, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	var total int64
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM speech_clips`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.Query(`SELECT `+speechClipColumns+` FROM speech_clips ORDER BY id DESC LIMIT ? OFFSET ?`,
+		pageSize, (page-1)*pageSize)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := make([]SpeechClip, 0)
+	for rows.Next() {
+		c, err := scanSpeechClip(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, *c)
+	}
+	return out, total, rows.Err()
+}
+
+func scanSpeechClip(row interface{ Scan(dest ...any) error }) (*SpeechClip, error) {
+	var c SpeechClip
+	err := row.Scan(&c.ID, &c.ChannelID, &c.ChannelName, &c.Model, &c.UpstreamModel, &c.VoiceID, &c.VoiceName,
+		&c.Text, &c.Format, &c.AudioPath, &c.DurationMS, &c.Characters, &c.SizeBytes, &c.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// VoiceClone is one custom voice cloned from an authorized sample recording.
+// The provider owns the voice; the relay keeps the metadata and a locally
+// stored preview so the console can replay it after the temporary provider URL
+// expires.
+type VoiceClone struct {
+	ID                int64  `json:"id"`
+	VoiceID           string `json:"voice_id"`
+	Name              string `json:"name"`
+	ChannelID         int64  `json:"channel_id"`
+	ChannelName       string `json:"channel_name"`
+	Model             string `json:"model"`
+	UpstreamModel     string `json:"upstream_model"`
+	SampleFormat      string `json:"sample_format"`
+	SampleBytes       int64  `json:"sample_bytes"`
+	SourceFilename    string `json:"source_filename"`
+	PreviewText       string `json:"preview_text"`
+	PreviewPath       string `json:"-"`
+	PreviewFormat     string `json:"preview_format"`
+	PreviewDurationMS int64  `json:"preview_duration_ms"`
+	PreviewCharacters int64  `json:"preview_characters"`
+	Authorized        bool   `json:"authorized"`
+	CreatedAt         int64  `json:"created_at"`
+}
+
+const voiceCloneColumns = `id, voice_id, name, channel_id, channel_name, model, upstream_model,
+	sample_format, sample_bytes, source_filename, preview_text, preview_path, preview_format,
+	preview_duration_ms, preview_characters, authorized, created_at`
+
+// CreateVoiceClone inserts a cloned voice and sets its id.
+func (s *Store) CreateVoiceClone(c *VoiceClone) error {
+	c.CreatedAt = now()
+	res, err := s.db.Exec(`INSERT INTO voice_clones (voice_id, name, channel_id, channel_name, model,
+		upstream_model, sample_format, sample_bytes, source_filename, preview_text, preview_path,
+		preview_format, preview_duration_ms, preview_characters, authorized, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		c.VoiceID, c.Name, c.ChannelID, c.ChannelName, c.Model, c.UpstreamModel, c.SampleFormat,
+		c.SampleBytes, c.SourceFilename, c.PreviewText, c.PreviewPath, c.PreviewFormat,
+		c.PreviewDurationMS, c.PreviewCharacters, c.Authorized, c.CreatedAt)
+	if err != nil {
+		return err
+	}
+	c.ID, err = res.LastInsertId()
+	return err
+}
+
+// GetVoiceClone returns a cloned voice by id.
+func (s *Store) GetVoiceClone(id int64) (*VoiceClone, error) {
+	row := s.db.QueryRow(`SELECT `+voiceCloneColumns+` FROM voice_clones WHERE id = ?`, id)
+	c, err := scanVoiceClone(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return c, err
+}
+
+// GetVoiceCloneByVoiceID returns a cloned voice by its provider voice id.
+func (s *Store) GetVoiceCloneByVoiceID(voiceID string) (*VoiceClone, error) {
+	row := s.db.QueryRow(`SELECT `+voiceCloneColumns+` FROM voice_clones WHERE voice_id = ?`, voiceID)
+	c, err := scanVoiceClone(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return c, err
+}
+
+// ListVoiceClones returns every cloned voice, newest first.
+func (s *Store) ListVoiceClones() ([]VoiceClone, error) {
+	rows, err := s.db.Query(`SELECT ` + voiceCloneColumns + ` FROM voice_clones ORDER BY id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]VoiceClone, 0)
+	for rows.Next() {
+		c, err := scanVoiceClone(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *c)
+	}
+	return out, rows.Err()
+}
+
+// UpdateVoiceClonePreview stores the regenerated preview metadata.
+func (s *Store) UpdateVoiceClonePreview(c *VoiceClone) error {
+	_, err := s.db.Exec(`UPDATE voice_clones SET preview_text = ?, preview_path = ?, preview_format = ?,
+		preview_duration_ms = ?, preview_characters = ? WHERE id = ?`,
+		c.PreviewText, c.PreviewPath, c.PreviewFormat, c.PreviewDurationMS, c.PreviewCharacters, c.ID)
+	return err
+}
+
+func scanVoiceClone(row interface{ Scan(dest ...any) error }) (*VoiceClone, error) {
+	var c VoiceClone
+	err := row.Scan(&c.ID, &c.VoiceID, &c.Name, &c.ChannelID, &c.ChannelName, &c.Model,
+		&c.UpstreamModel, &c.SampleFormat, &c.SampleBytes, &c.SourceFilename, &c.PreviewText,
+		&c.PreviewPath, &c.PreviewFormat, &c.PreviewDurationMS, &c.PreviewCharacters,
+		&c.Authorized, &c.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
 }
 
 // Totals aggregates request counts, token usage and spend.

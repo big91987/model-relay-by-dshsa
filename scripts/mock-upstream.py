@@ -2,9 +2,31 @@ import json, os, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 19090
-MEDIA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media", "demo.mp4")
+MEDIA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
 VIDEO_TASKS = {}
 VIDEO_LOCK = threading.Lock()
+UPLOADED_FILES = {}
+UPLOAD_LOCK = threading.Lock()
+VOICE_CLONES = {}
+
+SYSTEM_VOICES = [
+    {"voice_id": "English_expressive_narrator", "voice_name": "Expressive Narrator",
+     "description": ["A clear, expressive English narrator."]},
+    {"voice_id": "English_Graceful_Lady", "voice_name": "Graceful Lady",
+     "description": ["A calm and graceful English voice."]},
+    {"voice_id": "English_magnetic_voiced_man", "voice_name": "Magnetic-voiced Male",
+     "description": ["A deep, magnetic English voice."]},
+    {"voice_id": "Chinese (Mandarin)_Reliable_Executive", "voice_name": "Reliable Executive",
+     "description": ["A steady Mandarin executive voice."]},
+    {"voice_id": "Chinese (Mandarin)_News_Anchor", "voice_name": "News Anchor",
+     "description": ["A broadcast-style Mandarin news anchor."]},
+    {"voice_id": "Japanese_IntellectualSenior", "voice_name": "Intellectual Senior",
+     "description": ["A thoughtful Japanese voice."]},
+    {"voice_id": "Korean_CalmGentleman", "voice_name": "Calm Gentleman",
+     "description": ["A calm Korean voice."]},
+    {"voice_id": "Cantonese_GentleLady", "voice_name": "Gentle Lady",
+     "description": ["A gentle Cantonese voice."]},
+]
 
 CONTENT = {
     "gpt-4o": "Model Relay routes your request through the highest-priority healthy channel and records token usage for every call. You can inspect traffic, spend and latency in the console.",
@@ -33,7 +55,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.query_video(self.path.rsplit("/", 1)[-1])
         if self.path.startswith("/api/v3/contents/generations/tasks/"):
             return self.query_seedance(self.path.rsplit("/", 1)[-1])
-        if self.path.startswith("/media/") and self.path.endswith(".mp4"):
+        if self.path.startswith("/media/") and (self.path.endswith(".mp4") or self.path.endswith(".mp3")):
             return self.media()
         if self.path.endswith("/models"):
             return self.models()
@@ -70,6 +92,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.create_video(body)
         if self.path.endswith("/contents/generations/tasks"):
             return self.create_seedance(body)
+        if self.path.endswith("/v1/get_voice"):
+            return self.get_voice()
+        if self.path.endswith("/v1/t2a_v2"):
+            return self.text_to_speech(body)
+        if self.path.endswith("/v1/files/upload"):
+            return self.upload_file(raw)
+        if self.path.endswith("/v1/voice_clone"):
+            return self.voice_clone(body)
         self.send_json(404, {"error": {"message": "not found"}})
 
     def create_video(self, body):
@@ -177,14 +207,111 @@ class Handler(BaseHTTPRequestHandler):
                                 "message": "the generated video was blocked by the safety filter"}
         self.send_json(200, payload)
 
-    def media(self):
+    def get_voice(self):
+        if self.headers.get("Authorization") != "Bearer upstream-key":
+            return self.send_json(401, {"base_resp": {"status_code": 1004, "status_msg": "login fail"}})
+        self.send_json(200, {
+            "system_voice": SYSTEM_VOICES,
+            "base_resp": {"status_code": 0, "status_msg": "success"},
+        })
+
+    def upload_file(self, raw):
+        if self.headers.get("Authorization") != "Bearer upstream-key":
+            return self.send_json(401, {"base_resp": {"status_code": 1004, "status_msg": "login fail"}})
+        content_type = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in content_type:
+            return self.send_json(200, {"base_resp": {"status_code": 2013, "status_msg": "expected a multipart upload"}})
         try:
-            with open(MEDIA_PATH, "rb") as handle:
+            parts = parse_multipart(raw, content_type)
+        except Exception as exc:
+            return self.send_json(200, {"base_resp": {"status_code": 2013, "status_msg": "invalid multipart body: %s" % exc}})
+        purpose = (parts.get("purpose") or (None, b""))[1].decode(errors="replace")
+        filename, payload = parts.get("file") or (None, b"")
+        if purpose != "voice_clone" or not payload:
+            return self.send_json(200, {"base_resp": {"status_code": 2013, "status_msg": "purpose and file are required"}})
+        with UPLOAD_LOCK:
+            file_id = 900000 + len(UPLOADED_FILES) + 1
+            UPLOADED_FILES[file_id] = {"purpose": purpose, "filename": filename or "sample.mp3", "bytes": payload}
+        sys.stderr.write("mock voice upload file=%s bytes=%d purpose=%s\n" % (filename, len(payload), purpose))
+        self.send_json(200, {
+            "file": {"file_id": file_id, "bytes": len(payload), "created_at": int(time.time()),
+                     "filename": filename or "sample.mp3", "purpose": purpose},
+            "base_resp": {"status_code": 0, "status_msg": "success"},
+        })
+
+    def voice_clone(self, body):
+        if self.headers.get("Authorization") != "Bearer upstream-key":
+            return self.send_json(401, {"base_resp": {"status_code": 1004, "status_msg": "login fail"}})
+        file_id = body.get("file_id")
+        voice_id = str(body.get("voice_id") or "")
+        text = str(body.get("text") or "")
+        with UPLOAD_LOCK:
+            uploaded = UPLOADED_FILES.get(file_id)
+        if uploaded is None or uploaded.get("purpose") != "voice_clone":
+            return self.send_json(200, {"base_resp": {"status_code": 2013, "status_msg": "file_id does not refer to a voice_clone upload"}})
+        if not voice_id or not voice_id[0].isalpha():
+            return self.send_json(200, {"base_resp": {"status_code": 2013, "status_msg": "invalid voice_id"}})
+        demo_audio = ""
+        if text.strip():
+            demo_audio = "http://127.0.0.1:%d/media/demo.mp3" % PORT
+            VOICE_CLONES[voice_id] = {"model": body.get("model", ""), "created_at": int(time.time())}
+        sys.stderr.write("mock voice_clone voice=%s file_id=%s text=%d demo=%s\n" % (voice_id, file_id, len(text), bool(demo_audio)))
+        self.send_json(200, {
+            "input_sensitive": False,
+            "input_sensitive_type": 0,
+            "demo_audio": demo_audio,
+            "extra_info": {
+                "audio_length": 7440,
+                "audio_sample_rate": 32000,
+                "audio_size": 0,
+                "bitrate": 128000,
+                "word_count": len(text),
+                "usage_characters": len(text),
+            },
+            "base_resp": {"status_code": 0, "status_msg": "success"},
+        })
+
+    def text_to_speech(self, body):
+        if self.headers.get("Authorization") != "Bearer upstream-key":
+            return self.send_json(401, {"base_resp": {"status_code": 1004, "status_msg": "login fail"}})
+        text = str(body.get("text", ""))
+        if not text.strip():
+            return self.send_json(200, {"data": None, "base_resp": {"status_code": 2013, "status_msg": "text is required"}})
+        if "error" in text.lower():
+            return self.send_json(200, {"data": None, "base_resp": {"status_code": 2013, "status_msg": "the text was rejected by the mock upstream"}})
+        with open(os.path.join(MEDIA_DIR, "demo.mp3"), "rb") as handle:
+            audio = handle.read()
+        # scripts/media/demo.mp3 is a seven-second sample reused for every mock
+        # synthesis, so report its real play length.
+        duration = 7440
+        sys.stderr.write("mock t2a_v2 voice=%s chars=%d\n" % (
+            body.get("voice_setting", {}).get("voice_id"), len(text)))
+        self.send_json(200, {
+            "data": {"audio": audio.hex(), "status": 2},
+            "extra_info": {
+                "audio_length": duration,
+                "audio_sample_rate": 32000,
+                "audio_size": len(audio),
+                "bitrate": 64000,
+                "word_count": len(text),
+                "usage_characters": len(text),
+                "audio_format": "mp3",
+                "audio_channel": 1,
+            },
+            "trace_id": "mock-t2a",
+            "base_resp": {"status_code": 0, "status_msg": "success"},
+        })
+
+    def media(self):
+        name = "demo.mp3" if self.path.endswith(".mp3") else "demo.mp4"
+        path = os.path.join(MEDIA_DIR, name)
+        try:
+            with open(path, "rb") as handle:
                 data = handle.read()
         except OSError:
-            return self.send_json(404, {"error": {"message": "demo video is missing"}})
+            return self.send_json(404, {"error": {"message": "demo media is missing"}})
         self.send_response(200)
-        self.send_header("Content-Type", "video/mp4")
+        self.send_header("Content-Type", "audio/mpeg" if name.endswith(".mp3") else "video/mp4")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -271,5 +398,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+def parse_multipart(raw, content_type):
+    from email import message_from_bytes
+    from email.policy import default as email_policy
+    message = message_from_bytes(
+        b"Content-Type: " + content_type.encode() + b"\r\nMIME-Version: 1.0\r\n\r\n" + raw,
+        policy=email_policy,
+    )
+    parts = {}
+    for part in message.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        if not name:
+            continue
+        parts[name] = (part.get_filename(), part.get_payload(decode=True) or b"")
+    return parts
 
 ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

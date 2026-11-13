@@ -251,3 +251,83 @@ export interface VideosResponse {
   page: number
   page_size: number
 }
+
+export interface SpeechVoice {
+  voice_id: string
+  name: string
+  language: string
+  description: string
+}
+
+export interface SpeechVoiceCatalog {
+  voices: SpeechVoice[]
+  source: 'provider' | 'builtin'
+  warning?: string
+}
+
+export interface SpeechClip {
+  id: number
+  channel_id: number
+  channel_name: string
+  model: string
+  upstream_model: string
+  voice_id: string
+  voice_name: string
+  text: string
+  format: string
+  duration_ms: number
+  characters: number
+  size_bytes: number
+  audio_ready: boolean
+  content_url?: string
+  created_at: number
+}
+
+export interface SpeechInput {
+  model: string
+  text: string
+  voice_id: string
+  voice_name: string
+  speed: number
+}
+
+export interface SpeechClipsResponse {
+  items: SpeechClip[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface VoiceClone {
+  id: number
+  voice_id: string
+  name: string
+  channel_id: number
+  channel_name: string
+  model: string
+  upstream_model: string
+  sample_format: string
+  sample_bytes: number
+  source_filename: string
+  preview_text: string
+  preview_format: string
+  preview_duration_ms: number
+  preview_characters: number
+  authorized: boolean
+  created_at: number
+  preview_ready: boolean
+  preview_url?: string
+  preview_warning?: string
+}
+
+export interface VoiceClonesResponse {
+  items: VoiceClone[]
+}
+
+export interface VoiceCloneInput {
+  name: string
+  model: string
+  preview_text: string
+  authorized: boolean
+  file: File
+}

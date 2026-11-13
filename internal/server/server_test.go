@@ -642,6 +642,140 @@ func TestSeedanceVideoFlow(t *testing.T) {
 	}
 }
 
+func TestMinimaxSpeechFlow(t *testing.T) {
+	ts, _ := newTestServer(t)
+	speechAudio := []byte("ID3\x03\x00\x00\x00server-speech-audio")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer upstream-key" {
+			t.Errorf("unexpected upstream auth: %q", r.Header.Get("Authorization"))
+		}
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/get_voice":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"system_voice":[
+				{"voice_id":"English_expressive_narrator","voice_name":"Expressive Narrator","description":["Clear English narrator."]},
+				{"voice_id":"Chinese (Mandarin)_News_Anchor","voice_name":"News Anchor","description":[]}
+			],"base_resp":{"status_code":0,"status_msg":"success"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/t2a_v2":
+			var body struct {
+				Model        string `json:"model"`
+				Text         string `json:"text"`
+				Stream       bool   `json:"stream"`
+				OutputFormat string `json:"output_format"`
+				VoiceSetting struct {
+					VoiceID string  `json:"voice_id"`
+					Speed   float64 `json:"speed"`
+				} `json:"voice_setting"`
+				AudioSetting struct {
+					Format string `json:"format"`
+				} `json:"audio_setting"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode speech request: %v", err)
+			}
+			if body.Model != "speech-2.8-hd" || body.Text != "Hello from the console." || body.Stream || body.OutputFormat != "hex" {
+				t.Errorf("unexpected speech request: %+v", body)
+			}
+			if body.VoiceSetting.VoiceID != "English_expressive_narrator" || body.VoiceSetting.Speed != 1.1 || body.AudioSetting.Format != "mp3" {
+				t.Errorf("unexpected speech settings: %+v", body)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"audio": fmt.Sprintf("%x", speechAudio), "status": 2},
+				"extra_info": map[string]any{
+					"audio_length":     2100,
+					"audio_format":     "mp3",
+					"audio_size":       len(speechAudio),
+					"usage_characters": 23,
+				},
+				"base_resp": map[string]any{"status_code": 0, "status_msg": "success"},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	client := newClient(t)
+	if resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/auth/login", map[string]any{
+		"username": "admin", "password": "admin-pass",
+	}, nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status %d: %s", resp.StatusCode, body)
+	}
+	resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/channels", map[string]any{
+		"name": "minimax-speech", "type": "minimax", "base_url": upstream.URL, "api_key": "upstream-key",
+		"models": []string{"speech-2.8-hd"}, "priority": 0, "weight": 1, "status": "enabled",
+	}, nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create channel status %d: %s", resp.StatusCode, body)
+	}
+
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+"/api/speech/voices?model=speech-2.8-hd", nil, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"source":"provider"`) ||
+		!strings.Contains(string(body), "English_expressive_narrator") {
+		t.Fatalf("voices status %d: %s", resp.StatusCode, body)
+	}
+
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/speech", map[string]any{
+		"model": "speech-2.8-hd", "text": "Hello from the console.",
+		"voice_id": "English_expressive_narrator", "voice_name": "Expressive Narrator", "speed": 1.1,
+	}, nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create speech status %d: %s", resp.StatusCode, body)
+	}
+	var created struct {
+		ID         int64  `json:"id"`
+		VoiceName  string `json:"voice_name"`
+		Format     string `json:"format"`
+		DurationMS int64  `json:"duration_ms"`
+		AudioReady bool   `json:"audio_ready"`
+		ContentURL string `json:"content_url"`
+	}
+	if err := json.Unmarshal(body, &created); err != nil {
+		t.Fatalf("decode created speech: %v", err)
+	}
+	if created.ID == 0 || !created.AudioReady || created.ContentURL != fmt.Sprintf("/api/speech/%d/content", created.ID) {
+		t.Fatalf("unexpected created speech: %s", body)
+	}
+	if created.VoiceName != "Expressive Narrator" || created.Format != "mp3" || created.DurationMS != 2100 {
+		t.Fatalf("unexpected speech metadata: %s", body)
+	}
+
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+created.ContentURL, nil, nil)
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(body, speechAudio) {
+		t.Fatalf("content status %d body %q", resp.StatusCode, body)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "audio/mpeg" {
+		t.Fatalf("content type = %q", got)
+	}
+	resp, _ = doJSON(t, client, http.MethodGet, ts.URL+created.ContentURL+"?download=1", nil, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Disposition"), "attachment") {
+		t.Fatalf("download status %d disposition %q", resp.StatusCode, resp.Header.Get("Content-Disposition"))
+	}
+
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+"/api/speech", nil, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "Expressive Narrator") {
+		t.Fatalf("list speech status %d: %s", resp.StatusCode, body)
+	}
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+fmt.Sprintf("/api/speech/%d", created.ID), nil, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"audio_ready":true`) {
+		t.Fatalf("get speech status %d: %s", resp.StatusCode, body)
+	}
+
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/speech", map[string]any{
+		"model": "speech-2.8-hd", "text": "", "voice_id": "English_expressive_narrator",
+	}, nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("empty text status %d: %s", resp.StatusCode, body)
+	}
+
+	anonymous := newClient(t)
+	resp, _ = doJSON(t, anonymous, http.MethodGet, ts.URL+"/api/speech", nil, nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous speech access status %d", resp.StatusCode)
+	}
+}
+
 func TestPlaygroundAdminProxy(t *testing.T) {
 	ts, st := newTestServer(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
