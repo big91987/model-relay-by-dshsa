@@ -5,7 +5,14 @@ import { Icon } from '../components/Icon'
 import { Modal } from '../components/Modal'
 import { CostStatusBadge, EmptyState, ErrorBanner, PageHeader, Spinner, StatusBadge } from '../components/ui'
 import { api } from '../lib/api'
-import { formatCost, formatDateTime, formatDuration, formatNumber, formatTime } from '../lib/format'
+import {
+  formatCost,
+  formatDateTime,
+  formatDuration,
+  formatNumber,
+  formatTime,
+  parseLocalDateTime,
+} from '../lib/format'
 import { useToast } from '../lib/toast'
 import type { LogItem, LogsResponse, Token } from '../lib/types'
 
@@ -14,10 +21,21 @@ interface Filters {
   status: string
   request_id: string
   token_id: string
+  start: string
+  end: string
 }
 
-const emptyFilters: Filters = { model: '', status: '', request_id: '', token_id: '' }
+const emptyFilters: Filters = { model: '', status: '', request_id: '', token_id: '', start: '', end: '' }
 const pageSize = 25
+
+function describePeriod(filters: Filters): string {
+  const start = filters.start ? parseLocalDateTime(filters.start) : null
+  const end = filters.end ? parseLocalDateTime(filters.end) : null
+  if (start !== null && end !== null) return `${formatDateTime(start)} – ${formatDateTime(end)}`
+  if (start !== null) return `From ${formatDateTime(start)}`
+  if (end !== null) return `Until ${formatDateTime(end)}`
+  return 'All time'
+}
 
 export default function Logs() {
   const toast = useToast()
@@ -35,6 +53,8 @@ export default function Logs() {
   const load = useCallback(async () => {
     setLoading(true)
     try {
+      const start = filters.start ? parseLocalDateTime(filters.start) : null
+      const end = filters.end ? parseLocalDateTime(filters.end) : null
       const response = await api.logs({
         page,
         page_size: pageSize,
@@ -42,6 +62,9 @@ export default function Logs() {
         status: filters.status || undefined,
         request_id: filters.request_id.trim() || undefined,
         token_id: filters.token_id ? Number(filters.token_id) : undefined,
+        start: start ?? undefined,
+        // The picker has minute precision: include the whole selected end minute.
+        end: end !== null ? end + 59 : undefined,
       })
       setData(response)
       setError('')
@@ -141,6 +164,24 @@ export default function Logs() {
               </option>
             ))}
           </select>
+          <label className="filter-date">
+            <span>Period from</span>
+            <input
+              className="input"
+              type="datetime-local"
+              value={draft.start}
+              onChange={(event) => setDraft({ ...draft, start: event.target.value })}
+            />
+          </label>
+          <label className="filter-date">
+            <span>Period to</span>
+            <input
+              className="input"
+              type="datetime-local"
+              value={draft.end}
+              onChange={(event) => setDraft({ ...draft, end: event.target.value })}
+            />
+          </label>
           <button className="btn btn-primary btn-sm" type="submit">
             <Icon name="search" size={15} /> Apply
           </button>
@@ -149,6 +190,24 @@ export default function Logs() {
           </button>
         </form>
       </section>
+
+      {!loading && data ? (
+        <section className="panel cost-summary" aria-label="Cost total for the selected period">
+          <div className="cost-summary-main">
+            <span className="cost-summary-label">Total cost</span>
+            <strong className="cost-summary-value">{formatCost(data.summary.cost)}</strong>
+          </div>
+          <div className="cost-summary-meta">
+            <span>{formatNumber(data.summary.requests)} requests</span>
+            <span>{describePeriod(filters)}</span>
+            {data.summary.unverified_cost > 0 ? (
+              <span className="cost-summary-unverified">
+                {formatCost(data.summary.unverified_cost)} unverified
+              </span>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
 
       {loading ? (
         <div className="page-loading">

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"math"
 	"path/filepath"
 	"testing"
 	"time"
@@ -117,6 +118,56 @@ func TestLogsAndDashboard(t *testing.T) {
 	}
 	if len(dashboard.TopModels) != 1 || dashboard.TopModels[0].Requests != 2 {
 		t.Fatalf("unexpected top models: %+v", dashboard.TopModels)
+	}
+}
+
+func TestListLogsPageSummarizesAllMatchingLogs(t *testing.T) {
+	s := testStore(t)
+	now := time.Now().Unix()
+	for i, cost := range []float64{0.5, 1.25, 2} {
+		costStatus := "actual"
+		if i == 2 {
+			costStatus = "unverified"
+		}
+		if err := s.InsertLog(&Log{
+			RequestID: "req", Model: "m", Status: "success", Cost: cost,
+			CostStatus: costStatus, CreatedAt: now - int64(i)*3600,
+		}); err != nil {
+			t.Fatalf("InsertLog: %v", err)
+		}
+	}
+
+	first, err := s.ListLogsPage(LogFilter{Page: 1, PageSize: 2})
+	if err != nil {
+		t.Fatalf("ListLogsPage: %v", err)
+	}
+	if len(first.Items) != 2 {
+		t.Fatalf("expected 2 items on the first page, got %d", len(first.Items))
+	}
+	if first.Summary.Requests != 3 || math.Abs(first.Summary.Cost-3.75) > 1e-9 {
+		t.Fatalf("unexpected summary: %+v", first.Summary)
+	}
+	if math.Abs(first.Summary.UnverifiedCost-2) > 1e-9 {
+		t.Fatalf("unexpected unverified cost: %+v", first.Summary)
+	}
+
+	second, err := s.ListLogsPage(LogFilter{Page: 2, PageSize: 2})
+	if err != nil {
+		t.Fatalf("ListLogsPage page 2: %v", err)
+	}
+	if len(second.Items) != 1 {
+		t.Fatalf("expected 1 item on the second page, got %d", len(second.Items))
+	}
+	if second.Summary != first.Summary {
+		t.Fatalf("summary must cover every match, not one page: page1=%+v page2=%+v", first.Summary, second.Summary)
+	}
+
+	filtered, err := s.ListLogsPage(LogFilter{Page: 1, PageSize: 10, Start: now - 3600, End: now})
+	if err != nil {
+		t.Fatalf("ListLogsPage with range: %v", err)
+	}
+	if filtered.Summary.Requests != 2 || math.Abs(filtered.Summary.Cost-1.75) > 1e-9 || filtered.Summary.UnverifiedCost != 0 {
+		t.Fatalf("start/end filter must narrow the summary: %+v", filtered.Summary)
 	}
 }
 

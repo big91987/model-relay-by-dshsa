@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -710,5 +711,55 @@ func TestPlaygroundAdminProxy(t *testing.T) {
 	resp, _ = doJSON(t, client, http.MethodGet, ts.URL+"/api/playground/models?token_id=9999", nil, nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown playground key status %d", resp.StatusCode)
+	}
+}
+
+func TestLogsSummaryStableAcrossPages(t *testing.T) {
+	ts, st := newTestServer(t)
+	now := time.Now().Unix()
+	for i, cost := range []float64{0.25, 0.5, 0.75} {
+		if err := st.InsertLog(&store.Log{
+			RequestID: fmt.Sprintf("summary-req-%d", i), Model: "m", Status: "success",
+			Cost: cost, CostStatus: "actual", CreatedAt: now - int64(i),
+		}); err != nil {
+			t.Fatalf("seed log: %v", err)
+		}
+	}
+	client := newClient(t)
+	resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/auth/login", map[string]any{
+		"username": "admin", "password": "admin-pass",
+	}, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status %d: %s", resp.StatusCode, body)
+	}
+
+	type logsPage struct {
+		Total   int              `json:"total"`
+		Summary store.LogSummary `json:"summary"`
+	}
+	fetch := func(query string) logsPage {
+		t.Helper()
+		resp, body := doJSON(t, client, http.MethodGet, ts.URL+"/api/logs?"+query, nil, nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("logs %s status %d: %s", query, resp.StatusCode, body)
+		}
+		var page logsPage
+		if err := json.Unmarshal(body, &page); err != nil {
+			t.Fatalf("decode logs %s: %v", query, err)
+		}
+		return page
+	}
+
+	first := fetch("page=1&page_size=1")
+	if first.Total != 3 || first.Summary.Requests != 3 || math.Abs(first.Summary.Cost-1.5) > 1e-9 {
+		t.Fatalf("unexpected first-page summary: %+v", first)
+	}
+	second := fetch("page=2&page_size=1")
+	if second.Total != 3 || second.Summary != first.Summary {
+		t.Fatalf("summary must stay constant while paging: first=%+v second=%+v", first, second)
+	}
+	filtered := fetch(fmt.Sprintf("start=%d&end=%d", now-1, now))
+	if filtered.Summary.Requests != 2 || math.Abs(filtered.Summary.Cost-0.75) > 1e-9 {
+		t.Fatalf("period filter must narrow the summary: %+v", filtered.Summary)
 	}
 }

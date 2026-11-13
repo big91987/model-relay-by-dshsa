@@ -500,15 +500,16 @@ func (s *Server) handleListLogs(w http.ResponseWriter, r *http.Request) {
 			filter.End = n
 		}
 	}
-	logs, total, err := s.store.ListLogs(filter)
+	page, err := s.store.ListLogsPage(filter)
 	if err != nil {
 		s.logger.Error("list logs failed", "error", err)
 		writeErr(w, http.StatusInternalServerError, "failed to load logs")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"items":     logs,
-		"total":     total,
+		"items":     page.Items,
+		"total":     page.Summary.Requests,
+		"summary":   page.Summary,
 		"page":      filter.Page,
 		"page_size": filter.PageSize,
 	})
