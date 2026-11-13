@@ -624,14 +624,21 @@ type LogFilter struct {
 	End       int64
 }
 
-// ListLogs returns one page of logs and the total number of matches.
-func (s *Store) ListLogs(f LogFilter) ([]Log, int64, error) {
-	if f.Page < 1 {
-		f.Page = 1
-	}
-	if f.PageSize < 1 || f.PageSize > 200 {
-		f.PageSize = 50
-	}
+// LogSummary aggregates every log that matches a filter, not just one page.
+type LogSummary struct {
+	Requests       int64   `json:"requests"`
+	Cost           float64 `json:"cost"`
+	UnverifiedCost float64 `json:"unverified_cost"`
+}
+
+// LogPage is one page of logs plus aggregate totals across every match.
+type LogPage struct {
+	Items   []Log
+	Summary LogSummary
+}
+
+// logWhere builds the WHERE clause shared by log listing and aggregation.
+func logWhere(f LogFilter) (string, []any) {
 	var clauses []string
 	var args []any
 	if f.Model != "" {
@@ -658,31 +665,58 @@ func (s *Store) ListLogs(f LogFilter) ([]Log, int64, error) {
 		clauses = append(clauses, `created_at <= ?`)
 		args = append(args, f.End)
 	}
-	where := ""
-	if len(clauses) > 0 {
-		where = " WHERE " + joinAnd(clauses)
+	if len(clauses) == 0 {
+		return "", args
 	}
-	var total int64
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM logs`+where, args...).Scan(&total); err != nil {
+	return " WHERE " + joinAnd(clauses), args
+}
+
+// ListLogs returns one page of logs and the total number of matches.
+func (s *Store) ListLogs(f LogFilter) ([]Log, int64, error) {
+	page, err := s.ListLogsPage(f)
+	if err != nil {
 		return nil, 0, err
+	}
+	return page.Items, page.Summary.Requests, nil
+}
+
+// ListLogsPage returns one page of logs plus the totals across every log
+// matching the filter, so totals stay stable while paging.
+func (s *Store) ListLogsPage(f LogFilter) (*LogPage, error) {
+	if f.Page < 1 {
+		f.Page = 1
+	}
+	if f.PageSize < 1 || f.PageSize > 200 {
+		f.PageSize = 50
+	}
+	where, args := logWhere(f)
+	var summary LogSummary
+	if err := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(cost), 0),
+		COALESCE(SUM(CASE WHEN cost_status = 'unverified' THEN cost ELSE 0 END), 0)
+		FROM logs`+where, args...).
+		Scan(&summary.Requests, &summary.Cost, &summary.UnverifiedCost); err != nil {
+		return nil, err
 	}
 	queryArgs := append(append([]any{}, args...), f.PageSize, (f.Page-1)*f.PageSize)
 	rows, err := s.db.Query(`SELECT id, request_id, reservation_id, user_id, token_id, channel_id, token_name, channel_name, model, upstream_model,
 		prompt_tokens, completion_tokens, total_tokens, cost, reserved_cost, cost_status, status, status_code, error, latency_ms, stream, created_at
 		FROM logs`+where+` ORDER BY id DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	defer rows.Close()
 	out := make([]Log, 0)
 	for rows.Next() {
 		l, err := scanLog(rows)
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		out = append(out, *l)
 	}
-	return out, total, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return &LogPage{Items: out, Summary: summary}, nil
 }
 
 func scanLog(row interface{ Scan(dest ...any) error }) (*Log, error) {

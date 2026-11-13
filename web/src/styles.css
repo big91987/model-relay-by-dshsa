@@ -1041,6 +1041,21 @@ select.input {
   padding: 14px 16px;
 }
 
+.filter-date {
+  display: flex;
+  flex: 0 1 190px;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted-2);
+  font-size: 11px;
+}
+
+.filters .filter-date .input {
+  flex: none;
+  width: 100%;
+  min-width: 0;
+}
+
 /* ---------- panels, cards ---------- */
 
 .panel {
@@ -1434,6 +1449,48 @@ select.input {
   gap: 10px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.cost-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 24px;
+  padding: 16px 20px;
+}
+
+.cost-summary-main {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.cost-summary-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.cost-summary-value {
+  color: var(--text);
+  font-size: 26px;
+  font-weight: 680;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+
+.cost-summary-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  color: var(--muted-2);
+  font-size: 12px;
+}
+
+.cost-summary-unverified {
+  color: var(--danger-text);
 }
 
 /* ---------- chips, badges, switches ---------- */
@@ -2908,6 +2965,9 @@ select.input {
   .filters .input {
     flex: 1 1 100%;
     width: 100%;
+  }
+  .filters .filter-date {
+    flex: 1 1 100%;
   }
   .model-picker-list {
     grid-template-columns: 1fr;
