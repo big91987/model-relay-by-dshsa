@@ -6,7 +6,7 @@ export interface User {
   created_at: number
 }
 
-export type ChannelType = 'openai' | 'anthropic' | 'minimax' | 'seedance'
+export type ChannelType = 'openai' | 'anthropic' | 'minimax' | 'seedance' | 'minimax-music'
 export type ChannelStatus = 'enabled' | 'disabled'
 
 export interface Channel {
@@ -386,4 +386,40 @@ export interface VoiceCloneInput {
   preview_text: string
   authorized: boolean
   file: File
+}
+
+export type MusicTaskStatus = 'queued' | 'generating' | 'succeeded' | 'failed'
+
+export interface MusicTask {
+  id: number
+  channel_id: number
+  channel_name: string
+  model: string
+  upstream_model: string
+  prompt: string
+  lyrics: string
+  instrumental: boolean
+  format: 'mp3' | 'wav'
+  status: MusicTaskStatus
+  error: string
+  duration_ms: number
+  audio_ready: boolean
+  content_url?: string
+  created_at: number
+  updated_at: number
+}
+
+export interface MusicInput {
+  model: string
+  prompt: string
+  lyrics?: string
+  instrumental?: boolean
+  format?: string
+}
+
+export interface MusicResponse {
+  items: MusicTask[]
+  total: number
+  page: number
+  page_size: number
 }

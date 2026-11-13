@@ -10,6 +10,7 @@ A self-hosted model gateway written in Go, with a React admin console. It expose
 - **Two chat upstream protocols** — OpenAI-compatible channels (OpenAI, DeepSeek, Moonshot, Qwen, vLLM, Ollama, …) and Anthropic Messages channels, translated to and from the OpenAI format.
 - **MiniMax-H3 and Seedance video generation** — text-to-video and first-frame image-to-video from the console, with asynchronous tasks, live status, video preview and MP4 download. Supports MiniMax-H3 and ByteDance Seedance on Volcano Ark.
 - **MiniMax text to speech, voice cloning and voice design** — choose a system voice, clone a custom one from an authorized sample recording (uploaded or recorded in the browser), or design one from a text description, then synthesize up to 50,000 characters of speech and replay or download the audio. Long text runs as a background task with live progress that survives a page refresh or a gateway restart. Voice selection, cloning, design, generation and history are console-only.
+- **MiniMax Music generation** — write a style description and lyrics, optionally generate an instrumental, then preview the song in the console and download it as MP3 or WAV. Songs render in the background while the console polls live status.
 - **Channel routing** — priority first, weighted load balancing inside a priority, public-to-upstream model aliases, and automatic failover on connection errors, `401`, `403`, `404`, `429` and `5xx`.
 - **Upstream model discovery** — fetch the provider's model list in the channel form, tick the models to import, and keep manual entries and public aliases.
 - **Gateway keys** — per-key USD balance, daily spending budget, model allowlists, requests-per-minute, tokens-per-minute and concurrency limits, expiry, enable/disable, and a one-time plaintext reveal at creation.
@@ -143,6 +144,21 @@ The **Voice design** page creates custom MiniMax voices from text. Enter a descr
 
 Selecting a designed voice lets you play its sample and read another text with it. Short text uses the normal `/v1/t2a_v2` flow; text over 2,000 characters becomes a background task like the Speech page. Both paths are pinned to the channel that created the voice, because MiniMax custom voices belong to the provider account that created them. The resulting clip appears in the Voice design page and in the Speech history. Voice design is console-only and is not metered per gateway key.
 
+### Music generation (MiniMax Music)
+
+Add a channel with protocol **MiniMax Music (audio)**, base URL `https://api.minimax.io` (or `https://api.minimaxi.com` for the China platform) and one or more text-to-music models such as `music-3.0`, `music-2.6`, `music-3.0-free` or `music-2.6-free`. **Fetch models** adds the Music family even though the provider's OpenAI-compatible model list does not advertise it; it filters out the language models returned by that list. The key is sent as `Authorization: Bearer …` to `POST /v1/music_generation`.
+
+Open **Music** in the console to:
+
+1. describe the style, mood, instruments and setting in the **Style description** field;
+2. paste the lyrics, using optional structure tags such as `[verse]`, `[pre chorus]`, `[chorus]` and `[bridge]`;
+3. switch on **Instrumental (no vocals)** if the song should have no lyrics;
+4. choose MP3 or WAV and select **Generate music**.
+
+The gateway creates a music task and calls the provider in the background. The console polls it, shows **Composing** while the provider works, then plays the result inline with an audio player and offers **Download MP3** or **Download WAV**. Audio is stored under `DATA_DIR/music/`; a provider URL is kept as a temporary fallback if the local download fails. A generation that was still running when the gateway restarted is marked failed instead of being retried, so the provider is not charged twice.
+
+Music generation is console-only for now: like video generation, it is not metered per gateway key and does not appear in request logs. `MUSIC_TIMEOUT_SECONDS` bounds how long the gateway waits for the provider.
+
 ### Docker
 
 ```bash
@@ -161,7 +177,7 @@ For Compose, create a `.env` file containing `SECRET_KEY` and `ADMIN_PASSWORD` (
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PORT` | `8080` | HTTP listen port. |
-| `DATA_DIR` | `./data` | Directory for `gateway.db`, downloaded videos, generated speech, cloned-voice previews and voice-design previews (created automatically). |
+| `DATA_DIR` | `./data` | Directory for `gateway.db`, downloaded videos, generated speech, music, cloned-voice previews and voice-design previews (created automatically). |
 | `SECRET_KEY` | `dev-secret-change-me` | Signs admin sessions and encrypts upstream API keys with AES-256-GCM. Use a stable secret. |
 | `ADMIN_USERNAME` | `admin` | Admin username created on first boot. |
 | `ADMIN_PASSWORD` | `admin123` | Admin password created on first boot (minimum 6 characters). |
@@ -170,6 +186,7 @@ For Compose, create a `.env` file containing `SECRET_KEY` and `ADMIN_PASSWORD` (
 | `STREAM_TIMEOUT_SECONDS` | `1800` | Hard overall limit for a streaming request. It bounds how long a stream can hold a quota reservation. Set to `0` to disable the cap. |
 | `QUOTA_DEFAULT_OUTPUT_TOKENS` | `4096` | Output-token cap used for finite-quota keys when a chat request omits `max_tokens`/`max_completion_tokens`. The gateway sends this cap upstream so the quota reservation is a real upper bound. |
 | `VIDEO_POLL_SECONDS` | `8` | How often asynchronous video tasks are polled. |
+| `MUSIC_TIMEOUT_SECONDS` | `600` | Timeout for a synchronous MiniMax Music generation call. |
 
 Changing `SECRET_KEY` invalidates admin sessions and makes existing channel keys undecryptable — re-enter the upstream keys after rotating it.
 
@@ -207,7 +224,11 @@ Changing `SECRET_KEY` invalidates admin sessions and makes existing channel keys
 | --- | --- |
 | ![Recording a sample in the browser](docs/screenshots/voice-clone-recording.png) | ![Cloned voices in light theme](docs/screenshots/voice-clone-after-light.png) |
 
-The **Models** page shows the public catalog, serving channels and the lowest configured price per model. Star the models you use most to keep them in a favorites list, then use **Favorites only** to narrow the catalog; favorites are stored in the browser and survive reloads. The **Playground** page selects an existing gateway key, sends real relay requests, and shows streaming output, latency, token usage and the request ID. Most screenshots use the local mock upstream in `scripts/mock-upstream.py` (`python3 scripts/mock-upstream.py 19090`), so `127.0.0.1` URLs are demo data rather than real providers; the mock also answers MiniMax and Seedance video create/query calls, the MiniMax voice list, T2A calls, the voice-clone upload/clone calls and voice-design calls, and serves `scripts/media/demo.mp4` and `scripts/media/demo.mp3` for local previews. The MiniMax and Seedance video screenshots additionally include one real generation each (`MiniMax-H3` and `doubao-seedance-2-0-260128`), and the Playground uses a public Pollinations GPT-OSS endpoint.
+| Music generation | MiniMax Music channel |
+| --- | --- |
+| ![Music generation](docs/screenshots/music-generation.png) | ![MiniMax Music channel](docs/screenshots/music-channel.png) |
+
+The **Models** page shows the public catalog, serving channels and the lowest configured price per model. Star the models you use most to keep them in a favorites list, then use **Favorites only** to narrow the catalog; favorites are stored in the browser and survive reloads. The **Playground** page selects an existing gateway key, sends real relay requests, and shows streaming output, latency, token usage and the request ID. Most screenshots use the local mock upstream in `scripts/mock-upstream.py` (`python3 scripts/mock-upstream.py 19090`), so `127.0.0.1` URLs are demo data rather than real providers; the mock also answers MiniMax and Seedance video create/query calls, the MiniMax voice list, T2A calls, the voice-clone upload/clone calls, voice-design calls and MiniMax Music generation, and serves `scripts/media/demo.mp4`, `scripts/media/demo.mp3` and `scripts/media/demo-music.mp3` for local previews. The MiniMax and Seedance video screenshots additionally include one real generation each (`MiniMax-H3` and `doubao-seedance-2-0-260128`), and the Playground uses a public Pollinations GPT-OSS endpoint.
 
 Use the theme control in the top bar, or on the sign-in screen, to switch between light, dark and follow-system themes. The console remembers the selection in the browser.
 
@@ -376,6 +397,7 @@ docs/screenshots/      console screenshots used in this README
 - The Anthropic adapter translates text, image data URLs, tool calls and tool results. Remote image URLs are not converted. OpenAI's Responses API, audio, rerank and native Anthropic endpoints are out of scope.
 - MiniMax-H3 video tasks are managed from the admin console; there is no gateway-key video API and video generation is not charged against key quotas. Task history and downloaded MP4 files stay in `DATA_DIR` until removed manually.
 - MiniMax speech synthesis, voice cloning and voice design are also console-only: there is no gateway-key speech, cloning or design API and they are not charged against key quotas. Generated audio and partial background-job parts stay in `DATA_DIR` until the clip finishes; finished audio, cloned-voice previews and voice-design previews stay until removed manually. A cloned voice lives on the MiniMax account; the gateway cannot recreate it and MiniMax may delete it after seven days without use.
+- MiniMax music generation is console-only too: there is no gateway-key music API and it is not charged against key quotas. Generated songs stay in `DATA_DIR/music/` until removed manually, and a generation interrupted by a restart is marked failed rather than retried.
 - Cost accounting trusts the configured prices and upstream token counts; it is an operational estimate, not an invoice. `estimated` and `unverified` charges are marked explicitly and should be reviewed before using the numbers for billing.
 - Playground uses the selected gateway key through an admin-authenticated server endpoint; the browser never receives the key secret. An admin session can therefore spend any key's quota, so restrict admin access accordingly.
 - Playground parameter ranges are protocol-level. Model-specific limits are enforced by the upstream and surfaced as errors; the page does not maintain a per-model capability database.
