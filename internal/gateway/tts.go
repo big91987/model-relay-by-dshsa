@@ -23,9 +23,10 @@ const (
 	maxSpeechVoiceID  = 200
 	maxSpeechResponse = 96 << 20
 	maxSpeechAudio    = 48 << 20
-	// speechRequestTimeout bounds one synchronous synthesis. The relay's
-	// generic request timeout is shorter than some long-form speech requests.
-	speechRequestTimeout = 5 * time.Minute
+	// speechRequestTimeout bounds one synchronous synthesis. Long-form speech
+	// is generated before the response starts, so it needs more time than a
+	// normal chat request.
+	speechRequestTimeout = 10 * time.Minute
 )
 
 // SpeechError is a client-visible failure while synthesizing speech.
@@ -276,7 +277,7 @@ func (g *Gateway) CreateSpeech(ctx context.Context, req SpeechRequest) (*store.S
 			lastErr = err.Error()
 			continue
 		}
-		resp, err := g.client.Do(upreq)
+		resp, err := g.speechClient.Do(upreq)
 		if err != nil {
 			lastErr = fmt.Sprintf("channel %q: %v", ch.Name, err)
 			continue

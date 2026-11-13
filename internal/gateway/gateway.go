@@ -30,8 +30,11 @@ type Gateway struct {
 	store   *store.Store
 	secrets *secretbox.Cipher
 	client  *http.Client
-	limits  *limitState
-	logger  *slog.Logger
+	// speechClient has a longer response-header timeout because synchronous
+	// speech synthesis of long text can take longer than a chat request.
+	speechClient *http.Client
+	limits       *limitState
+	logger       *slog.Logger
 
 	// videoPollInterval controls how often asynchronous video tasks are polled.
 	// Tests shorten it; production uses MiniMax's recommended polling cadence.
@@ -54,6 +57,8 @@ func New(cfg *config.Config, st *store.Store, secrets *secretbox.Cipher, logger 
 		ExpectContinueTimeout: time.Second,
 		ResponseHeaderTimeout: 120 * time.Second,
 	}
+	speechTransport := transport.Clone()
+	speechTransport.ResponseHeaderTimeout = 10 * time.Minute
 	pollInterval := cfg.VideoPollInterval
 	if pollInterval <= 0 {
 		pollInterval = 8 * time.Second
@@ -63,6 +68,7 @@ func New(cfg *config.Config, st *store.Store, secrets *secretbox.Cipher, logger 
 		store:             st,
 		secrets:           secrets,
 		client:            &http.Client{Transport: transport},
+		speechClient:      &http.Client{Transport: speechTransport},
 		limits:            newLimitState(),
 		logger:            logger,
 		videoPollInterval: pollInterval,
