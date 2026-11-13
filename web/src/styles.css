@@ -1953,6 +1953,120 @@ select.input {
   margin-top: 0;
 }
 
+/* ---------- text to speech ---------- */
+
+.speech-layout {
+  display: grid;
+  grid-template-columns: minmax(360px, 420px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.speech-create,
+.speech-history {
+  min-width: 0;
+}
+
+.speech-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.speech-history .panel-head {
+  margin-bottom: 14px;
+}
+
+.speech-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+  gap: 14px;
+}
+
+.speech-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 13px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card-bg);
+}
+
+.speech-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.speech-voice {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.speech-text {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.speech-audio {
+  width: 100%;
+  height: 38px;
+}
+
+.speech-audio-missing {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 10px;
+  border: 1px dashed var(--border-2);
+  border-radius: 8px;
+  background: var(--danger-bg);
+  color: var(--danger-text);
+  font-size: 11.5px;
+}
+
+.speech-voice-id {
+  overflow: hidden;
+  color: var(--muted-2);
+  font-size: 10.5px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.speech-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 8px 10px;
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  background: var(--warning-bg);
+  color: var(--warning-text);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.speech-note svg {
+  flex: none;
+  margin-top: 1px;
+}
+
+.speech-note-error {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
 /* ---------- empty, error, spinner ---------- */
 
 .empty-state {
@@ -2918,6 +3032,9 @@ select.input {
   .video-layout {
     grid-template-columns: 1fr;
   }
+  .speech-layout {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 900px) {
@@ -2973,6 +3090,9 @@ select.input {
     grid-column: auto;
   }
   .video-list {
+    grid-template-columns: 1fr;
+  }
+  .speech-list {
     grid-template-columns: 1fr;
   }
   .video-form-row {

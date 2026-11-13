@@ -471,7 +471,7 @@ export default function Channels() {
             >
               <option value="openai">OpenAI-compatible</option>
               <option value="anthropic">Anthropic Messages</option>
-              <option value="minimax">MiniMax H3 (video)</option>
+              <option value="minimax">MiniMax (video and speech)</option>
               <option value="seedance">Seedance (Volcano Ark, video)</option>
             </select>
           </FormField>
@@ -522,7 +522,7 @@ export default function Channels() {
             htmlFor="channel-models"
             hint={
               form.type === 'minimax'
-                ? 'MiniMax models, e.g. MiniMax-H3. Fetch the live list and keep your manual entries.'
+                ? 'MiniMax models, e.g. MiniMax-H3 or speech-2.8-hd. Fetch the live list and keep your manual entries.'
                 : form.type === 'seedance'
                   ? 'Seedance model IDs, e.g. doubao-seedance-1-0-pro-250528. Fetch the live list and keep your manual entries.'
                   : 'Upstream model names, separated by commas or new lines. Importing keeps your manual entries.'
@@ -552,7 +552,7 @@ export default function Channels() {
               onChange={(event) => setField('models', event.target.value)}
               placeholder={
                 form.type === 'minimax'
-                  ? 'MiniMax-H3'
+                  ? 'MiniMax-H3, speech-2.8-hd'
                   : form.type === 'seedance'
                     ? 'doubao-seedance-1-0-pro-250528'
                     : 'gpt-4o, gpt-4o-mini'
