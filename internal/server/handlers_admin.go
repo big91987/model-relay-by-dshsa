@@ -45,8 +45,8 @@ func (in *channelInput) normalize(requireKey bool) error {
 	if in.Type == "" {
 		in.Type = "openai"
 	}
-	if in.Type != "openai" && in.Type != "anthropic" && in.Type != "minimax" && in.Type != "seedance" {
-		return errors.New("type must be openai, anthropic, minimax or seedance")
+	if in.Type != "openai" && in.Type != "anthropic" && in.Type != "minimax" && in.Type != "seedance" && in.Type != "minimax-music" {
+		return errors.New("type must be openai, anthropic, minimax, seedance or minimax-music")
 	}
 	baseURL, err := normalizeBaseURL(in.BaseURL)
 	if err != nil {
@@ -130,8 +130,8 @@ func (s *Server) handleFetchUpstreamModels(w http.ResponseWriter, r *http.Reques
 	if in.Type == "" {
 		in.Type = "openai"
 	}
-	if in.Type != "openai" && in.Type != "anthropic" && in.Type != "minimax" && in.Type != "seedance" {
-		writeErr(w, http.StatusBadRequest, "type must be openai, anthropic, minimax or seedance")
+	if in.Type != "openai" && in.Type != "anthropic" && in.Type != "minimax" && in.Type != "seedance" && in.Type != "minimax-music" {
+		writeErr(w, http.StatusBadRequest, "type must be openai, anthropic, minimax, seedance or minimax-music")
 		return
 	}
 	baseURL, err := normalizeBaseURL(in.BaseURL)

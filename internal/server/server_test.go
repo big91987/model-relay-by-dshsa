@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -515,6 +516,129 @@ func TestMinimaxVideoFlow(t *testing.T) {
 	resp, body = doJSON(t, client, http.MethodGet, ts.URL+"/api/videos", nil, nil)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"MiniMax-H3"`) {
 		t.Fatalf("list videos status %d: %s", resp.StatusCode, body)
+	}
+}
+
+func TestMinimaxMusicFlow(t *testing.T) {
+	ts, _ := newTestServer(t)
+	audioBytes := []byte("ID3\x04\x00\x00\x00\x00\x00\x00server-test-music")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"data":[{"id":"music-3.0"},{"id":"gpt-4o"}]}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/music_generation":
+			if r.Header.Get("Authorization") != "Bearer upstream-key" {
+				t.Errorf("unexpected upstream auth: %q", r.Header.Get("Authorization"))
+			}
+			var body struct {
+				Model  string `json:"model"`
+				Prompt string `json:"prompt"`
+				Lyrics string `json:"lyrics"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body.Model != "music-3.0" || body.Prompt != "Indie folk, rainy night" || body.Lyrics != "[verse]\nStreetlights flicker" {
+				t.Errorf("unexpected upstream body: %+v", body)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data":       map[string]any{"audio": hex.EncodeToString(audioBytes), "status": 2},
+				"extra_info": map[string]any{"music_duration": 25364},
+				"base_resp":  map[string]any{"status_code": 0, "status_msg": "success"},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	client := newClient(t)
+	if resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/auth/login", map[string]any{"username": "admin", "password": "admin-pass"}, nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status %d: %s", resp.StatusCode, body)
+	}
+	resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/channels", map[string]any{
+		"name": "minimax-music", "type": "minimax-music", "base_url": upstream.URL, "api_key": "upstream-key",
+		"models": []string{"music-3.0"}, "priority": 0, "weight": 1, "status": "enabled",
+	}, nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create channel status %d: %s", resp.StatusCode, body)
+	}
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+"/api/models", nil, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"minimax-music"`) || !strings.Contains(string(body), `"music-3.0"`) {
+		t.Fatalf("models response %d: %s", resp.StatusCode, body)
+	}
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/channels/1/test", nil, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"ok":true`) {
+		t.Fatalf("test channel status %d: %s", resp.StatusCode, body)
+	}
+
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/music", map[string]any{
+		"model": "music-3.0", "prompt": "Indie folk, rainy night", "lyrics": "[verse]\nStreetlights flicker", "format": "mp3",
+	}, nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create music status %d: %s", resp.StatusCode, body)
+	}
+	var created struct {
+		ID         int64  `json:"id"`
+		Status     string `json:"status"`
+		AudioReady bool   `json:"audio_ready"`
+	}
+	if err := json.Unmarshal(body, &created); err != nil {
+		t.Fatalf("decode created music: %v", err)
+	}
+	if created.ID == 0 || created.AudioReady || (created.Status != "queued" && created.Status != "generating") {
+		t.Fatalf("unexpected created task: %s", body)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	ready := false
+	for time.Now().Before(deadline) {
+		resp, body = doJSON(t, client, http.MethodGet, ts.URL+fmt.Sprintf("/api/music/%d", created.ID), nil, nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("get music status %d: %s", resp.StatusCode, body)
+		}
+		var task struct {
+			Status     string `json:"status"`
+			AudioReady bool   `json:"audio_ready"`
+			ContentURL string `json:"content_url"`
+			DurationMS int64  `json:"duration_ms"`
+		}
+		_ = json.Unmarshal(body, &task)
+		if task.Status == "succeeded" && task.AudioReady {
+			ready = true
+			if task.ContentURL != fmt.Sprintf("/api/music/%d/content", created.ID) || task.DurationMS != 25364 {
+				t.Fatalf("unexpected ready task: %s", body)
+			}
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatal("music task did not become ready")
+	}
+
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+fmt.Sprintf("/api/music/%d/content", created.ID), nil, nil)
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(body, audioBytes) {
+		t.Fatalf("content status %d body %q", resp.StatusCode, body)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "audio/mpeg" {
+		t.Fatalf("content type = %q", got)
+	}
+	resp, _ = doJSON(t, client, http.MethodGet, ts.URL+fmt.Sprintf("/api/music/%d/content?download=1", created.ID), nil, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Disposition"), "attachment") {
+		t.Fatalf("download response status %d disposition %q", resp.StatusCode, resp.Header.Get("Content-Disposition"))
+	}
+
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+"/api/music", nil, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"music-3.0"`) || !strings.Contains(string(body), `"lyrics"`) {
+		t.Fatalf("list music status %d: %s", resp.StatusCode, body)
+	}
+
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/music", map[string]any{
+		"model": "music-3.0", "prompt": "x",
+	}, nil)
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "lyrics") {
+		t.Fatalf("missing lyrics status %d: %s", resp.StatusCode, body)
 	}
 }
 

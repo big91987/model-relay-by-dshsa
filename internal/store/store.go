@@ -186,6 +186,26 @@ func (s *Store) migrate() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_video_tasks_created_at ON video_tasks(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_video_tasks_status ON video_tasks(status)`,
+		`CREATE TABLE IF NOT EXISTS music_tasks (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			channel_id INTEGER NOT NULL DEFAULT 0,
+			channel_name TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			upstream_model TEXT NOT NULL DEFAULT '',
+			prompt TEXT NOT NULL DEFAULT '',
+			lyrics TEXT NOT NULL DEFAULT '',
+			instrumental INTEGER NOT NULL DEFAULT 0,
+			format TEXT NOT NULL DEFAULT 'mp3',
+			status TEXT NOT NULL DEFAULT 'queued',
+			error TEXT NOT NULL DEFAULT '',
+			audio_path TEXT NOT NULL DEFAULT '',
+			remote_url TEXT NOT NULL DEFAULT '',
+			duration_ms INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_music_tasks_created_at ON music_tasks(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_music_tasks_status ON music_tasks(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_request_id ON logs(request_id)`,
 	}
 	for _, stmt := range stmts {
@@ -810,6 +830,134 @@ func scanVideoTask(row interface{ Scan(dest ...any) error }) (*VideoTask, error)
 		return nil, err
 	}
 	return &v, nil
+}
+
+// MusicTask is one music generation task. Unlike video tasks, MiniMax Music
+// generation is synchronous, so the gateway keeps the state itself and runs the
+// upstream call in the background.
+type MusicTask struct {
+	ID            int64  `json:"id"`
+	ChannelID     int64  `json:"channel_id"`
+	ChannelName   string `json:"channel_name"`
+	Model         string `json:"model"`
+	UpstreamModel string `json:"upstream_model"`
+	Prompt        string `json:"prompt"`
+	Lyrics        string `json:"lyrics"`
+	Instrumental  bool   `json:"instrumental"`
+	Format        string `json:"format"`
+	Status        string `json:"status"`
+	Error         string `json:"error"`
+	AudioPath     string `json:"-"`
+	RemoteURL     string `json:"-"`
+	DurationMS    int64  `json:"duration_ms"`
+	CreatedAt     int64  `json:"created_at"`
+	UpdatedAt     int64  `json:"updated_at"`
+}
+
+const musicTaskColumns = `id, channel_id, channel_name, model, upstream_model, prompt, lyrics, instrumental, format,
+	status, error, audio_path, remote_url, duration_ms, created_at, updated_at`
+
+// CreateMusicTask inserts a music task and sets its id.
+func (s *Store) CreateMusicTask(m *MusicTask) error {
+	now := now()
+	m.CreatedAt, m.UpdatedAt = now, now
+	res, err := s.db.Exec(`INSERT INTO music_tasks (channel_id, channel_name, model, upstream_model, prompt, lyrics,
+		instrumental, format, status, error, audio_path, remote_url, duration_ms, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		m.ChannelID, m.ChannelName, m.Model, m.UpstreamModel, m.Prompt, m.Lyrics,
+		boolInt(m.Instrumental), m.Format, m.Status, m.Error, m.AudioPath, m.RemoteURL, m.DurationMS, m.CreatedAt, m.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	m.ID, err = res.LastInsertId()
+	return err
+}
+
+// UpdateMusicTask persists the mutable state of a music task.
+func (s *Store) UpdateMusicTask(m *MusicTask) error {
+	m.UpdatedAt = now()
+	_, err := s.db.Exec(`UPDATE music_tasks SET status=?, error=?, audio_path=?, remote_url=?, duration_ms=?, updated_at=? WHERE id=?`,
+		m.Status, m.Error, m.AudioPath, m.RemoteURL, m.DurationMS, m.UpdatedAt, m.ID)
+	return err
+}
+
+// GetMusicTask returns a music task by id.
+func (s *Store) GetMusicTask(id int64) (*MusicTask, error) {
+	row := s.db.QueryRow(`SELECT `+musicTaskColumns+` FROM music_tasks WHERE id = ?`, id)
+	m, err := scanMusicTask(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return m, err
+}
+
+// ListMusicTasks returns one page of music tasks, newest first, with the total count.
+func (s *Store) ListMusicTasks(page, pageSize int) ([]MusicTask, int64, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	var total int64
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM music_tasks`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.Query(`SELECT `+musicTaskColumns+` FROM music_tasks ORDER BY id DESC LIMIT ? OFFSET ?`,
+		pageSize, (page-1)*pageSize)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := make([]MusicTask, 0)
+	for rows.Next() {
+		m, err := scanMusicTask(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, *m)
+	}
+	return out, total, rows.Err()
+}
+
+// ListInterruptedMusicTasks returns generation tasks that were still running
+// when the process stopped. Their synchronous upstream call cannot be resumed,
+// so startup marks them failed instead of leaving the console polling forever.
+func (s *Store) ListInterruptedMusicTasks() ([]MusicTask, error) {
+	rows, err := s.db.Query(`SELECT ` + musicTaskColumns + ` FROM music_tasks
+		WHERE status IN ('queued', 'generating') ORDER BY id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]MusicTask, 0)
+	for rows.Next() {
+		m, err := scanMusicTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *m)
+	}
+	return out, rows.Err()
+}
+
+func scanMusicTask(row interface{ Scan(dest ...any) error }) (*MusicTask, error) {
+	var m MusicTask
+	var instrumental int64
+	err := row.Scan(&m.ID, &m.ChannelID, &m.ChannelName, &m.Model, &m.UpstreamModel, &m.Prompt, &m.Lyrics,
+		&instrumental, &m.Format, &m.Status, &m.Error, &m.AudioPath, &m.RemoteURL, &m.DurationMS, &m.CreatedAt, &m.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	m.Instrumental = instrumental != 0
+	return &m, nil
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 // Totals aggregates request counts, token usage and spend.

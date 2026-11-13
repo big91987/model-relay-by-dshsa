@@ -6,6 +6,7 @@ import Channels from './pages/Channels'
 import Dashboard from './pages/Dashboard'
 import Login from './pages/Login'
 import Logs from './pages/Logs'
+import Music from './pages/Music'
 import Models from './pages/Models'
 import Playground from './pages/Playground'
 import Tokens from './pages/Tokens'
@@ -37,6 +38,7 @@ export default function App() {
         <Route path="/channels" element={<Channels />} />
         <Route path="/models" element={<Models />} />
         <Route path="/videos" element={<Videos />} />
+        <Route path="/music" element={<Music />} />
         <Route path="/tokens" element={<Tokens />} />
         <Route path="/logs" element={<Logs />} />
       </Route>

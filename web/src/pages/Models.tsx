@@ -38,8 +38,8 @@ function writeFavorites(favorites: Set<string>) {
   }
 }
 
-function isVideoModel(model: ModelInfo): boolean {
-  return model.types.includes('minimax') || model.types.includes('seedance')
+function isMediaModel(model: ModelInfo): boolean {
+  return model.types.includes('minimax') || model.types.includes('seedance') || model.types.includes('minimax-music')
 }
 
 export default function Models() {
@@ -226,10 +226,10 @@ export default function Models() {
                         </div>
                       </td>
                       <td className="num">
-                        {isVideoModel(model) ? <span className="muted">Not metered</span> : formatPrice(model.input_price)}
+                        {isMediaModel(model) ? <span className="muted">Not metered</span> : formatPrice(model.input_price)}
                       </td>
                       <td className="num">
-                        {isVideoModel(model) ? <span className="muted">Not metered</span> : formatPrice(model.output_price)}
+                        {isMediaModel(model) ? <span className="muted">Not metered</span> : formatPrice(model.output_price)}
                       </td>
                     </tr>
                   )

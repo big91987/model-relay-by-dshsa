@@ -35,8 +35,8 @@ const emptyForm: ChannelFormState = {
   output_price: '0',
 }
 
-function isVideoProtocol(type: ChannelType): boolean {
-  return type === 'minimax' || type === 'seedance'
+function isMediaProtocol(type: ChannelType): boolean {
+  return type === 'minimax' || type === 'seedance' || type === 'minimax-music'
 }
 
 function toForm(channel: Channel): ChannelFormState {
@@ -381,7 +381,7 @@ export default function Channels() {
                         P{channel.priority} · W{channel.weight}
                       </td>
                       <td>
-                        {isVideoProtocol(channel.type) ? (
+                        {isMediaProtocol(channel.type) ? (
                           <span className="muted">Not metered</span>
                         ) : (
                           <div className="price-cell">
@@ -473,6 +473,7 @@ export default function Channels() {
               <option value="anthropic">Anthropic Messages</option>
               <option value="minimax">MiniMax H3 (video)</option>
               <option value="seedance">Seedance (Volcano Ark, video)</option>
+              <option value="minimax-music">MiniMax Music (audio)</option>
             </select>
           </FormField>
           <FormField
@@ -482,9 +483,11 @@ export default function Channels() {
             hint={
               form.type === 'minimax'
                 ? 'MiniMax API root, e.g. https://api.minimax.io or https://api.minimaxi.com'
-                : form.type === 'seedance'
-                  ? 'Volcano Ark API root including the version path, e.g. https://ark.cn-beijing.volces.com/api/v3'
-                  : 'Include the API version path, e.g. https://api.openai.com/v1'
+                : form.type === 'minimax-music'
+                  ? 'MiniMax API root, e.g. https://api.minimax.io or https://api.minimaxi.com'
+                  : form.type === 'seedance'
+                    ? 'Volcano Ark API root including the version path, e.g. https://ark.cn-beijing.volces.com/api/v3'
+                    : 'Include the API version path, e.g. https://api.openai.com/v1'
             }
           >
             <input
@@ -495,9 +498,11 @@ export default function Channels() {
               placeholder={
                 form.type === 'minimax'
                   ? 'https://api.minimax.io'
-                  : form.type === 'seedance'
-                    ? 'https://ark.cn-beijing.volces.com/api/v3'
-                    : 'https://api.openai.com/v1'
+                  : form.type === 'minimax-music'
+                    ? 'https://api.minimax.io'
+                    : form.type === 'seedance'
+                      ? 'https://ark.cn-beijing.volces.com/api/v3'
+                      : 'https://api.openai.com/v1'
               }
             />
           </FormField>
@@ -523,9 +528,11 @@ export default function Channels() {
             hint={
               form.type === 'minimax'
                 ? 'MiniMax models, e.g. MiniMax-H3. Fetch the live list and keep your manual entries.'
-                : form.type === 'seedance'
-                  ? 'Seedance model IDs, e.g. doubao-seedance-1-0-pro-250528. Fetch the live list and keep your manual entries.'
-                  : 'Upstream model names, separated by commas or new lines. Importing keeps your manual entries.'
+                : form.type === 'minimax-music'
+                  ? 'MiniMax Music models, e.g. music-3.0. Fetch the live list and keep your manual entries.'
+                  : form.type === 'seedance'
+                    ? 'Seedance model IDs, e.g. doubao-seedance-1-0-pro-250528. Fetch the live list and keep your manual entries.'
+                    : 'Upstream model names, separated by commas or new lines. Importing keeps your manual entries.'
             }
             action={
               <button
@@ -553,9 +560,11 @@ export default function Channels() {
               placeholder={
                 form.type === 'minimax'
                   ? 'MiniMax-H3'
-                  : form.type === 'seedance'
-                    ? 'doubao-seedance-1-0-pro-250528'
-                    : 'gpt-4o, gpt-4o-mini'
+                  : form.type === 'minimax-music'
+                    ? 'music-3.0'
+                    : form.type === 'seedance'
+                      ? 'doubao-seedance-1-0-pro-250528'
+                      : 'gpt-4o, gpt-4o-mini'
               }
             />
           </FormField>
@@ -573,9 +582,11 @@ export default function Channels() {
               placeholder={
                 form.type === 'minimax'
                   ? 'my-video=MiniMax-H3'
-                  : form.type === 'seedance'
-                    ? 'my-video=doubao-seedance-1-0-pro-250528'
-                    : 'claude-sonnet=claude-3-7-sonnet-latest'
+                  : form.type === 'minimax-music'
+                    ? 'my-song=music-3.0'
+                    : form.type === 'seedance'
+                      ? 'my-video=doubao-seedance-1-0-pro-250528'
+                      : 'claude-sonnet=claude-3-7-sonnet-latest'
               }
             />
           </FormField>
@@ -666,7 +677,7 @@ export default function Channels() {
               onChange={(event) => setField('weight', event.target.value)}
             />
           </FormField>
-          {!isVideoProtocol(form.type) ? (
+          {!isMediaProtocol(form.type) ? (
             <>
               <FormField label="Input price" htmlFor="channel-input-price" hint="USD per 1M prompt tokens.">
                 <input

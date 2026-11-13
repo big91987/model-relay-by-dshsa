@@ -30,8 +30,11 @@ type Gateway struct {
 	store   *store.Store
 	secrets *secretbox.Cipher
 	client  *http.Client
-	limits  *limitState
-	logger  *slog.Logger
+	// mediaClient waits much longer for response headers than client because
+	// MiniMax Music generates the whole song before replying.
+	mediaClient *http.Client
+	limits      *limitState
+	logger      *slog.Logger
 
 	// videoPollInterval controls how often asynchronous video tasks are polled.
 	// Tests shorten it; production uses MiniMax's recommended polling cadence.
@@ -58,11 +61,18 @@ func New(cfg *config.Config, st *store.Store, secrets *secretbox.Cipher, logger 
 	if pollInterval <= 0 {
 		pollInterval = 8 * time.Second
 	}
+	musicTimeout := cfg.MusicTimeout
+	if musicTimeout <= 0 {
+		musicTimeout = 10 * time.Minute
+	}
+	mediaTransport := transport.Clone()
+	mediaTransport.ResponseHeaderTimeout = musicTimeout
 	return &Gateway{
 		cfg:               cfg,
 		store:             st,
 		secrets:           secrets,
 		client:            &http.Client{Transport: transport},
+		mediaClient:       &http.Client{Transport: mediaTransport},
 		limits:            newLimitState(),
 		logger:            logger,
 		videoPollInterval: pollInterval,
@@ -444,6 +454,14 @@ func (g *Gateway) TestChannel(ctx context.Context, ch *store.Channel, model stri
 		// A query for an unknown task verifies reachability and credentials
 		// without creating a billable video generation task.
 		req, err = g.upstreamRequest(ctx, ch, http.MethodGet, "/v2/query/video_generation/connectivity-probe", nil, apiKey, false, true)
+	case "minimax-music":
+		// The music endpoint has no free probe; the model list proves that the
+		// base URL and API key work without starting a billable generation.
+		path := "/v1/models"
+		if strings.HasSuffix(strings.TrimRight(ch.BaseURL, "/"), "/v1") {
+			path = "/models"
+		}
+		req, err = g.upstreamRequest(ctx, ch, http.MethodGet, path, nil, apiKey, false, true)
 	case "seedance":
 		// As with MiniMax, querying a task that does not exist checks the
 		// endpoint and credentials without creating a billable task.
