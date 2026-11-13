@@ -61,6 +61,51 @@ function toApiMessages(history: ChatMessage[], systemPrompt: string) {
   return messages
 }
 
+function padDatePart(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
+function exportFileStem(date: Date): string {
+  return `${date.getFullYear()}${padDatePart(date.getMonth() + 1)}${padDatePart(date.getDate())}-${padDatePart(date.getHours())}${padDatePart(date.getMinutes())}`
+}
+
+function exportTimestamp(date: Date): string {
+  return `${date.getFullYear()}-${padDatePart(date.getMonth() + 1)}-${padDatePart(date.getDate())} ${padDatePart(date.getHours())}:${padDatePart(date.getMinutes())}`
+}
+
+function conversationMarkdown(messages: ChatMessage[], exportedAt: Date): string {
+  const sections: string[] = [
+    '# Playground conversation',
+    '',
+    `_Exported ${exportTimestamp(exportedAt)} (local time)._`,
+  ]
+  for (const message of messages) {
+    const content = message.content.trim()
+    if (!content) continue
+    const role = message.role === 'user' ? 'User' : message.request ? `Assistant (${message.request.model})` : 'Assistant'
+    sections.push('', `## ${role}`, '', content)
+    if (message.status === 'stopped') {
+      sections.push('', '> _Generation stopped before completion._')
+    } else if (message.status === 'error') {
+      const detail = message.error ? `: ${message.error.replace(/\s+/g, ' ').trim()}` : ''
+      sections.push('', `> _Request failed${detail}._`)
+    }
+  }
+  return `${sections.join('\n')}\n`
+}
+
+function downloadMarkdown(filename: string, content: string) {
+  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.append(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
 export default function Playground() {
   const toast = useToast()
   const [catalog, setCatalog] = useState<ModelInfo[]>([])
@@ -203,6 +248,7 @@ export default function Playground() {
   const canType = modelReady && !sending
   const canSend = canType && input.trim() !== '' && !maxTokensInvalid
   const canRetry = modelReady && !maxTokensInvalid && !sending
+  const canExport = !sending && messages.some((message) => message.content.trim() !== '')
   const turns = messages.filter((message) => message.role === 'user').length
 
   const temperatureHint = useMemo(() => {
@@ -417,6 +463,14 @@ export default function Playground() {
     toast.success('Conversation cleared')
   }
 
+  const exportConversation = () => {
+    if (!canExport) return
+    const exportedAt = new Date()
+    const filename = `playground-conversation-${exportFileStem(exportedAt)}.md`
+    downloadMarkdown(filename, conversationMarkdown(messages, exportedAt))
+    toast.success('Conversation exported as Markdown')
+  }
+
   const keyBadge = keysLoading ? (
     <span className="badge badge-muted"><span className="badge-dot badge-dot-muted" />Loading</span>
   ) : !selectedKey ? (
@@ -435,13 +489,23 @@ export default function Playground() {
         title="Playground"
         subtitle="Pick an existing gateway key, choose a model and chat. The relay applies that key's model access, quota, rate limit and logs; the key secret never reaches the browser."
         actions={
-          <button
-            className="btn btn-ghost"
-            onClick={() => setConfirm({ kind: 'clear' })}
-            disabled={messages.length === 0 || sending}
-          >
-            <Icon name="trash" size={15} /> Clear conversation
-          </button>
+          <>
+            <button
+              className="btn btn-ghost"
+              onClick={exportConversation}
+              disabled={!canExport}
+              title="Download this conversation as a Markdown file"
+            >
+              <Icon name="download" size={15} /> Export Markdown
+            </button>
+            <button
+              className="btn btn-ghost"
+              onClick={() => setConfirm({ kind: 'clear' })}
+              disabled={messages.length === 0 || sending}
+            >
+              <Icon name="trash" size={15} /> Clear conversation
+            </button>
+          </>
         }
       />
 

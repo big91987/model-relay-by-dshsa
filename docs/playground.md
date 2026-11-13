@@ -11,6 +11,7 @@ The Playground is the **Playground** page in the admin console. After the admin 
 5. **Regenerate** asks for confirmation before replacing the last assistant reply. It creates a new request using the parameters currently shown in the page. The page never retries automatically.
 6. Each completed reply shows the relay request ID, round-trip latency and token usage. **View log** opens **Logs** filtered by that request ID. If the upstream omits usage, the relay marks its synthesized final usage chunk with `x_usage_source: "estimated"` and the page labels the number as estimated.
 7. **Clear conversation** removes the messages on this page; it does not delete request logs or charges.
+8. **Export Markdown** downloads the current transcript as a `.md` file: user messages and model replies in order, with each assistant reply labelled by the model that produced it. Stopped or failed replies include a short status note. The export is generated in the browser from the messages on the page; it sends nothing to the server and does not include the system prompt or the page's current parameter values.
 
 ## Key and privacy behavior
 
@@ -114,6 +115,47 @@ curl -b cookies.txt 'http://127.0.0.1:8080/api/logs?request_id=2c0cf2569ad55d5fb
 
 The page has no secret-key input; it selects a key by id. A browser evaluation after selecting a key reported `localStorage` containing only `mr-theme` (the theme preference), empty `sessionStorage`, and URL `http://127.0.0.1:8080/playground`. Network inspection of both Playground chat requests shows `POST /api/playground/chat?token_id=1`; the request headers contain no `Authorization` header and the request body contains no key material. The gateway key is used server-side, and the rendered HTML does not contain it.
 
+### 8. Markdown export
+
+Screenshots: [baseline header without the export action](screenshots/playground-export-before.png) and [export action after a two-turn conversation](screenshots/playground-export-after.png).
+
+**Export Markdown** downloads a file named `playground-conversation-<local date-time>.md`. The two-turn conversation in the screenshots produced this file:
+
+```markdown
+# Playground conversation
+
+_Exported 2026-11-13 20:23 (local time)._
+
+## User
+
+这个网关能做什么？用要点说明。
+
+## Assistant (gpt-4o)
+
+Model Relay 是一个自托管的多模型网关，主要能力：
+
+- 通过 OpenAI 兼容接口统一转发聊天与向量请求
+- 在多个上游渠道之间按优先级和权重路由，并在失败时自动切换
+- 按 API Key 统计 token、费用和延迟，并执行配额与限流
+- 在管理台里试用模型、查看请求日志和生成视频
+
+## User
+
+给我一个最短的使用步骤。
+
+## Assistant (gpt-4o)
+
+三步即可开始：
+
+1. 在 **Channels** 添加一个可用的上游渠道。
+2. 在 **API keys** 创建一个网关 Key。
+3. 用 `Authorization: Bearer sk-...` 调用 `/v1/chat/completions`。
+
+> 提示：生产环境请更换 `SECRET_KEY` 和管理员密码。
+```
+
+Message order, role labels, the serving model and the replies' Markdown formatting are preserved. The download is generated in the browser from the in-memory transcript; the export action made no server request. Both captures use a 1440×1000 viewport, the dark console theme, the same mock upstream (`gpt-4o`) and the same two prompts.
+
 ## Before/after UI evidence
 
 - **Before** (`88d42a6`, main): the sidebar had no Playground entry; `/playground` redirected to Dashboard. [Baseline screenshot](screenshots/playground-before.png)
@@ -126,5 +168,5 @@ Both pairs use a 1440×1000 browser viewport, the dark console theme, the same c
 - A stopped generation is not guaranteed to be free; upstreams may bill tokens produced before cancellation. The UI says so explicitly.
 - Estimated usage is approximate. The page labels it, but the estimate can differ from provider billing.
 - Model-specific parameter limits are enforced by the upstream. The page constrains protocol-level ranges and displays the upstream error; it does not maintain a model capability catalogue.
-- The Playground is an admin convenience page, not a multi-user chat product. It has no server-side conversation history and no sharing.
+- The Playground is an admin convenience page, not a multi-user chat product. It has no server-side conversation history and no sharing. The Markdown export covers only the messages currently on the page; reloading or clearing removes them.
 - The external verification used a free public inference endpoint, so its latency is provider-dependent; the relay still records the real upstream request and response metadata.
