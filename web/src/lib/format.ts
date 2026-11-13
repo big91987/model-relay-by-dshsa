@@ -24,6 +24,7 @@ export function channelTypeLabel(type: string): string {
   if (type === 'anthropic') return 'Anthropic'
   if (type === 'minimax') return 'MiniMax H3'
   if (type === 'seedance') return 'Seedance'
+  if (type === 'minimax-music') return 'MiniMax Music'
   return 'OpenAI'
 }
 

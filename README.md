@@ -9,6 +9,7 @@ A self-hosted model gateway written in Go, with a React admin console. It expose
 - **OpenAI-compatible relay** — `POST /v1/chat/completions` (streaming and non-streaming), `POST /v1/embeddings`, `GET /v1/models`.
 - **Two chat upstream protocols** — OpenAI-compatible channels (OpenAI, DeepSeek, Moonshot, Qwen, vLLM, Ollama, …) and Anthropic Messages channels, translated to and from the OpenAI format.
 - **MiniMax-H3 and Seedance video generation** — text-to-video and first-frame image-to-video from the console, with asynchronous tasks, live status, video preview and MP4 download. Supports MiniMax-H3 and ByteDance Seedance on Volcano Ark.
+- **MiniMax Music generation** — write a style description and lyrics, optionally generate an instrumental, then preview the song in the console and download it as MP3 or WAV. Songs render in the background while the console polls live status.
 - **Channel routing** — priority first, weighted load balancing inside a priority, public-to-upstream model aliases, and automatic failover on connection errors, `401`, `403`, `404`, `429` and `5xx`.
 - **Upstream model discovery** — fetch the provider's model list in the channel form, tick the models to import, and keep manual entries and public aliases.
 - **Gateway keys** — per-key USD balance, daily spending budget, model allowlists, requests-per-minute, tokens-per-minute and concurrency limits, expiry, enable/disable, and a one-time plaintext reveal at creation.
@@ -109,6 +110,21 @@ Then open **Video** in the console to:
 
 The gateway submits the asynchronous task, polls it in the background, and stores the finished MP4 under `DATA_DIR/videos/`. Finished videos can be previewed in the browser and downloaded with the **Download MP4** action. Tasks left in flight are resumed after a restart. Video generation is console-only for now: it is not metered per gateway key and does not appear in request logs.
 
+### Music generation (MiniMax Music)
+
+Add a channel with protocol **MiniMax Music (audio)**, base URL `https://api.minimax.io` (or `https://api.minimaxi.com` for the China platform) and one or more text-to-music models such as `music-3.0`, `music-2.6`, `music-3.0-free` or `music-2.6-free`. **Fetch models** adds the Music family even though the provider's OpenAI-compatible model list does not advertise it; it filters out the language models returned by that list. The key is sent as `Authorization: Bearer …` to `POST /v1/music_generation`.
+
+Open **Music** in the console to:
+
+1. describe the style, mood, instruments and setting in the **Style description** field;
+2. paste the lyrics, using optional structure tags such as `[verse]`, `[pre chorus]`, `[chorus]` and `[bridge]`;
+3. switch on **Instrumental (no vocals)** if the song should have no lyrics;
+4. choose MP3 or WAV and select **Generate music**.
+
+The gateway creates a music task and calls the provider in the background. The console polls it, shows **Composing** while the provider works, then plays the result inline with an audio player and offers **Download MP3** or **Download WAV**. Audio is stored under `DATA_DIR/music/`; a provider URL is kept as a temporary fallback if the local download fails. A generation that was still running when the gateway restarted is marked failed instead of being retried, so the provider is not charged twice.
+
+Music generation is console-only for now: like video generation, it is not metered per gateway key and does not appear in request logs. `MUSIC_TIMEOUT_SECONDS` bounds how long the gateway waits for the provider.
+
 ### Docker
 
 ```bash
@@ -127,7 +143,7 @@ For Compose, create a `.env` file containing `SECRET_KEY` and `ADMIN_PASSWORD` (
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PORT` | `8080` | HTTP listen port. |
-| `DATA_DIR` | `./data` | Directory for `gateway.db` and downloaded videos (created automatically). |
+| `DATA_DIR` | `./data` | Directory for `gateway.db` and downloaded videos and music (created automatically). |
 | `SECRET_KEY` | `dev-secret-change-me` | Signs admin sessions and encrypts upstream API keys with AES-256-GCM. Use a stable secret. |
 | `ADMIN_USERNAME` | `admin` | Admin username created on first boot. |
 | `ADMIN_PASSWORD` | `admin123` | Admin password created on first boot (minimum 6 characters). |
@@ -136,6 +152,7 @@ For Compose, create a `.env` file containing `SECRET_KEY` and `ADMIN_PASSWORD` (
 | `STREAM_TIMEOUT_SECONDS` | `1800` | Hard overall limit for a streaming request. It bounds how long a stream can hold a quota reservation. Set to `0` to disable the cap. |
 | `QUOTA_DEFAULT_OUTPUT_TOKENS` | `4096` | Output-token cap used for finite-quota keys when a chat request omits `max_tokens`/`max_completion_tokens`. The gateway sends this cap upstream so the quota reservation is a real upper bound. |
 | `VIDEO_POLL_SECONDS` | `8` | How often asynchronous video tasks are polled. |
+| `MUSIC_TIMEOUT_SECONDS` | `600` | Timeout for a synchronous MiniMax Music generation call. |
 
 Changing `SECRET_KEY` invalidates admin sessions and makes existing channel keys undecryptable — re-enter the upstream keys after rotating it.
 
@@ -161,7 +178,11 @@ Changing `SECRET_KEY` invalidates admin sessions and makes existing channel keys
 | --- | --- |
 | ![Seedance video generation](docs/screenshots/video-seedance-live.png) | ![Seedance channel](docs/screenshots/channel-seedance-after.png) |
 
-The **Models** page shows the public catalog, serving channels and the lowest configured price per model. Star the models you use most to keep them in a favorites list, then use **Favorites only** to narrow the catalog; favorites are stored in the browser and survive reloads. The **Playground** page selects an existing gateway key, sends real relay requests, and shows streaming output, latency, token usage and the request ID. Most screenshots use the local mock upstream in `scripts/mock-upstream.py` (`python3 scripts/mock-upstream.py 19090`), so `127.0.0.1` URLs are demo data rather than real providers; the mock also answers MiniMax and Seedance video create/query calls and serves `scripts/media/demo.mp4` for local previews. The MiniMax and Seedance video screenshots additionally include one real generation each (`MiniMax-H3` and `doubao-seedance-2-0-260128`), and the Playground uses a public Pollinations GPT-OSS endpoint.
+| Music generation | MiniMax Music channel |
+| --- | --- |
+| ![Music generation](docs/screenshots/music-generation.png) | ![MiniMax Music channel](docs/screenshots/music-channel.png) |
+
+The **Models** page shows the public catalog, serving channels and the lowest configured price per model. Star the models you use most to keep them in a favorites list, then use **Favorites only** to narrow the catalog; favorites are stored in the browser and survive reloads. The **Playground** page selects an existing gateway key, sends real relay requests, and shows streaming output, latency, token usage and the request ID. Most screenshots use the local mock upstream in `scripts/mock-upstream.py` (`python3 scripts/mock-upstream.py 19090`), so `127.0.0.1` URLs are demo data rather than real providers; the mock also answers MiniMax and Seedance video create/query calls, serves `scripts/media/demo.mp4` for local previews, and answers MiniMax Music calls with `scripts/media/demo.mp3`. The MiniMax and Seedance video screenshots additionally include one real generation each (`MiniMax-H3` and `doubao-seedance-2-0-260128`), and the Playground uses a public Pollinations GPT-OSS endpoint.
 
 Use the theme control in the top bar, or on the sign-in screen, to switch between light, dark and follow-system themes. The console remembers the selection in the browser.
 

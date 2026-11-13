@@ -70,6 +70,10 @@ func isChatChannel(typ string) bool { return typ == "openai" || typ == "anthropi
 // workflow instead of chat completions.
 func isVideoChannel(typ string) bool { return typ == "minimax" || typ == "seedance" }
 
+// isMusicChannel reports whether a channel type serves the synchronous music
+// generation workflow.
+func isMusicChannel(typ string) bool { return typ == "minimax-music" }
+
 // chatCandidates keeps only channels that speak a chat-capable protocol.
 // MiniMax and Seedance video channels are served by the separate video task
 // flow.

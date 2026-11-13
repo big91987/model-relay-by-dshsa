@@ -97,6 +97,11 @@ func (s *Server) routes() {
 	mux.Handle("GET /api/videos/{id}", s.withAdmin(http.HandlerFunc(s.handleGetVideo)))
 	mux.Handle("GET /api/videos/{id}/content", s.withAdmin(http.HandlerFunc(s.handleVideoContent)))
 
+	mux.Handle("GET /api/music", s.withAdmin(http.HandlerFunc(s.handleListMusic)))
+	mux.Handle("POST /api/music", s.withAdmin(http.HandlerFunc(s.handleCreateMusic)))
+	mux.Handle("GET /api/music/{id}", s.withAdmin(http.HandlerFunc(s.handleGetMusic)))
+	mux.Handle("GET /api/music/{id}/content", s.withAdmin(http.HandlerFunc(s.handleMusicContent)))
+
 	mux.Handle("GET /api/playground/models", s.withAdmin(http.HandlerFunc(s.handlePlaygroundModels)))
 	mux.Handle("POST /api/playground/chat", s.withAdmin(http.HandlerFunc(s.handlePlaygroundChat)))
 

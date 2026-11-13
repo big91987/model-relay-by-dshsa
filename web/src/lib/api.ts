@@ -11,6 +11,9 @@ import type {
   Token,
   TokenInput,
   UpstreamModelsInput,
+  MusicInput,
+  MusicResponse,
+  MusicTask,
   User,
   VideoInput,
   VideosResponse,
@@ -138,6 +141,12 @@ export const api = {
   },
   createVideo(input: VideoInput) {
     return request<VideoTask>('/api/videos', { method: 'POST', ...jsonBody(input) })
+  },
+  music() {
+    return request<MusicResponse>('/api/music?page_size=50')
+  },
+  createMusic(input: MusicInput) {
+    return request<MusicTask>('/api/music', { method: 'POST', ...jsonBody(input) })
   },
   playgroundModels(tokenId: number) {
     return request<{ data: { id: string }[] }>(`/api/playground/models?token_id=${tokenId}`)

@@ -27,7 +27,10 @@ type Config struct {
 	// the reservation a trustworthy upper bound.
 	QuotaDefaultOutputTokens int
 	VideoPollInterval        time.Duration
-	Version                  string
+	// MusicTimeout bounds a synchronous MiniMax Music generation call. Songs
+	// can take several minutes, so it is much longer than RequestTimeout.
+	MusicTimeout time.Duration
+	Version      string
 
 	// UsingDefaults reports settings still on insecure development defaults.
 	UsingDefaultSecret   bool
@@ -47,6 +50,7 @@ func Load(version string) (*Config, error) {
 		StreamTimeout:            time.Duration(envInt("STREAM_TIMEOUT_SECONDS", 1800)) * time.Second,
 		QuotaDefaultOutputTokens: envInt("QUOTA_DEFAULT_OUTPUT_TOKENS", 4096),
 		VideoPollInterval:        time.Duration(envInt("VIDEO_POLL_SECONDS", 8)) * time.Second,
+		MusicTimeout:             time.Duration(envInt("MUSIC_TIMEOUT_SECONDS", 600)) * time.Second,
 		Version:                  version,
 	}
 	if cfg.Port <= 0 || cfg.Port > 65535 {
@@ -54,6 +58,9 @@ func Load(version string) (*Config, error) {
 	}
 	if cfg.QuotaDefaultOutputTokens < 1 {
 		return nil, fmt.Errorf("QUOTA_DEFAULT_OUTPUT_TOKENS must be greater than zero")
+	}
+	if cfg.MusicTimeout <= 0 {
+		return nil, fmt.Errorf("MUSIC_TIMEOUT_SECONDS must be greater than zero")
 	}
 	if cfg.UsingDefaultSecret = cfg.SecretKey == ""; cfg.UsingDefaultSecret {
 		cfg.SecretKey = "dev-secret-change-me"

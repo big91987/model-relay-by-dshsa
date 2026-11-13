@@ -56,6 +56,29 @@ func TestFetchModelsMinimax(t *testing.T) {
 	}
 }
 
+func TestFetchModelsMinimaxMusic(t *testing.T) {
+	env := newTestEnv(t)
+	var gotPath, gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotAuth = r.URL.Path, r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"MiniMax-M3"},{"id":"music-2.6"},{"id":"gpt-4o"}]}`)
+	}))
+	defer upstream.Close()
+
+	models, err := env.gw.FetchModels(context.Background(), "minimax-music", upstream.URL, "sk-mini")
+	if err != nil {
+		t.Fatalf("fetch models: %v", err)
+	}
+	if gotPath != "/v1/models" || gotAuth != "Bearer sk-mini" {
+		t.Fatalf("upstream request path=%q auth=%q", gotPath, gotAuth)
+	}
+	want := []string{"music-2.6", "music-2.6-free", "music-3.0", "music-3.0-free"}
+	if !reflect.DeepEqual(models, want) {
+		t.Fatalf("models = %v, want %v", models, want)
+	}
+}
+
 func TestFetchModelsSeedance(t *testing.T) {
 	env := newTestEnv(t)
 	var gotPath, gotAuth string

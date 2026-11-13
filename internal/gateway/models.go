@@ -29,6 +29,15 @@ var minimaxVideoModels = []string{
 	"MiniMax-H3-Max",
 }
 
+// MiniMax's OpenAI-compatible model list does not advertise Music models
+// either, so the music channel offers the text-to-music family as a fallback.
+var minimaxMusicModels = []string{
+	"music-3.0",
+	"music-2.6",
+	"music-3.0-free",
+	"music-2.6-free",
+}
+
 // Ark's /api/v3/models endpoint lists the models an account can call. Seedance
 // is newer than most listings, so keep a small fallback catalog to make the
 // video page usable right after a fetch.
@@ -58,7 +67,7 @@ func (g *Gateway) FetchModels(ctx context.Context, channelType, baseURL, apiKey 
 	afterID := ""
 	for page := 0; page < maxModelsPages; page++ {
 		endpoint := base + "/models"
-		if channelType == "minimax" {
+		if channelType == "minimax" || channelType == "minimax-music" {
 			// MiniMax exposes its OpenAI-compatible model list below /v1 while
 			// its video tasks live at the API root.
 			endpoint = base + "/v1/models"
@@ -118,6 +127,27 @@ func (g *Gateway) FetchModels(ctx context.Context, channelType, baseURL, apiKey 
 			seen[id] = true
 			models = append(models, id)
 		}
+	}
+	if channelType == "minimax-music" {
+		// The upstream list also contains language models that this channel
+		// cannot use, so keep only the Music family before adding fallbacks.
+		music := make([]string, 0, len(models)+len(minimaxMusicModels))
+		seen = map[string]bool{}
+		for _, id := range models {
+			if !strings.HasPrefix(strings.ToLower(id), "music-") {
+				continue
+			}
+			seen[id] = true
+			music = append(music, id)
+		}
+		for _, id := range minimaxMusicModels {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			music = append(music, id)
+		}
+		models = music
 	}
 	if channelType == "seedance" {
 		for _, id := range seedanceVideoModels {
