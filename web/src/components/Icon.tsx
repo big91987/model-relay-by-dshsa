@@ -5,6 +5,7 @@ export type IconName =
   | 'channels'
   | 'models'
   | 'video'
+  | 'speech'
   | 'key'
   | 'logs'
   | 'plus'
@@ -64,6 +65,11 @@ const icons: Record<IconName, ReactNode> = {
     <>
       <rect x="2.5" y="5" width="19" height="14" rx="2.5" />
       <path d="m10 9 5 3-5 3V9Z" />
+    </>
+  ),
+  speech: (
+    <>
+      <path d="M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4" />
     </>
   ),
   key: (
