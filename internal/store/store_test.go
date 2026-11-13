@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -130,5 +131,95 @@ func TestListLogsByRequestID(t *testing.T) {
 	logs, total, err := s.ListLogs(LogFilter{Page: 1, PageSize: 10, RequestID: "req-b"})
 	if err != nil || total != 1 || len(logs) != 1 || logs[0].RequestID != "req-b" {
 		t.Fatalf("ListLogs by request id: total=%d logs=%+v err=%v", total, logs, err)
+	}
+}
+
+func TestExportLogs(t *testing.T) {
+	s := testStore(t)
+	base := time.Now().Unix()
+	entries := []struct {
+		requestID string
+		status    string
+		createdAt int64
+	}{
+		{"old-success", "success", base - 30},
+		{"new-success", "success", base - 10},
+		{"mid-error", "error", base - 20},
+		{"outside-range", "success", base - 100},
+	}
+	for _, entry := range entries {
+		log := &Log{RequestID: entry.requestID, Model: "m", Status: entry.status, CreatedAt: entry.createdAt}
+		if err := s.InsertLog(log); err != nil {
+			t.Fatalf("InsertLog: %v", err)
+		}
+	}
+
+	var got []string
+	err := s.ExportLogs(LogFilter{Status: "success", Start: base - 40, End: base}, func(l *Log) error {
+		got = append(got, l.RequestID)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ExportLogs: %v", err)
+	}
+	if len(got) != 2 || got[0] != "old-success" || got[1] != "new-success" {
+		t.Fatalf("unexpected export order: %v", got)
+	}
+
+	stop := errors.New("stop")
+	if err := s.ExportLogs(LogFilter{}, func(*Log) error { return stop }); !errors.Is(err, stop) {
+		t.Fatalf("callback error not returned: %v", err)
+	}
+}
+
+func TestExportLogsBatchesEveryRow(t *testing.T) {
+	s := testStore(t)
+	const count = 501
+	for i := 0; i < count; i++ {
+		if err := s.InsertLog(&Log{RequestID: "req", Model: "m", Status: "success"}); err != nil {
+			t.Fatalf("InsertLog: %v", err)
+		}
+	}
+	seen := 0
+	var lastID int64
+	if err := s.ExportLogs(LogFilter{}, func(l *Log) error {
+		if l.ID <= lastID {
+			t.Fatalf("export is not ordered by id: %d after %d", l.ID, lastID)
+		}
+		lastID = l.ID
+		seen++
+		return nil
+	}); err != nil {
+		t.Fatalf("ExportLogs: %v", err)
+	}
+	if seen != count {
+		t.Fatalf("exported %d rows, want %d", seen, count)
+	}
+}
+
+func TestExportLogsIgnoresRowsWrittenDuringExport(t *testing.T) {
+	s := testStore(t)
+	for i := 0; i < 500; i++ {
+		if err := s.InsertLog(&Log{RequestID: "initial", Model: "m", Status: "success"}); err != nil {
+			t.Fatalf("InsertLog: %v", err)
+		}
+	}
+	seen := 0
+	err := s.ExportLogs(LogFilter{}, func(*Log) error {
+		seen++
+		if seen == 1 {
+			return s.InsertLog(&Log{RequestID: "late-arrival", Model: "m", Status: "success"})
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ExportLogs: %v", err)
+	}
+	if seen != 500 {
+		t.Fatalf("export included rows written after it started: exported %d, want 500", seen)
+	}
+	_, total, err := s.ListLogs(LogFilter{Page: 1, PageSize: 10, RequestID: "late-arrival"})
+	if err != nil || total != 1 {
+		t.Fatalf("late row should still be stored: total=%d err=%v", total, err)
 	}
 }

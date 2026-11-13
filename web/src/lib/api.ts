@@ -68,6 +68,41 @@ function jsonBody(value: unknown): RequestInit {
   return { body: JSON.stringify(value) }
 }
 
+function queryString(query: object): string {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === null || value === '') continue
+    params.set(key, String(value))
+  }
+  const suffix = params.toString()
+  return suffix ? `?${suffix}` : ''
+}
+
+async function download(path: string): Promise<{ blob: Blob; filename: string }> {
+  const response = await fetch(path, { credentials: 'same-origin' })
+  if (!response.ok) {
+    if (response.status === 401) {
+      window.dispatchEvent(new Event('mr:unauthorized'))
+    }
+    let message = `Request failed with status ${response.status}`
+    const text = await response.text()
+    try {
+      const data = JSON.parse(text) as { error?: unknown }
+      if (typeof data.error === 'string') {
+        message = data.error
+      } else if (data.error && typeof data.error === 'object' && 'message' in data.error) {
+        message = String((data.error as { message: unknown }).message)
+      }
+    } catch {
+      // Keep the generic status message when the body is not JSON.
+    }
+    throw new ApiError(message, response.status)
+  }
+  const disposition = response.headers.get('Content-Disposition') ?? ''
+  const match = /filename="?([^";]+)"?/.exec(disposition)
+  return { blob: await response.blob(), filename: match?.[1] ?? 'export.csv' }
+}
+
 export const api = {
   login(username: string, password: string) {
     return request<{ user: User }>('/api/auth/login', {
@@ -119,13 +154,10 @@ export const api = {
     return request<null>(`/api/tokens/${id}`, { method: 'DELETE' })
   },
   logs(query: LogQuery) {
-    const params = new URLSearchParams()
-    for (const [key, value] of Object.entries(query)) {
-      if (value === undefined || value === null || value === '') continue
-      params.set(key, String(value))
-    }
-    const suffix = params.toString()
-    return request<LogsResponse>(`/api/logs${suffix ? `?${suffix}` : ''}`)
+    return request<LogsResponse>(`/api/logs${queryString(query)}`)
+  },
+  exportLogs(query: LogQuery) {
+    return download(`/api/logs/export${queryString(query)}`)
   },
   models() {
     return request<{ data: ModelInfo[] }>('/api/models')

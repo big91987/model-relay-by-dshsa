@@ -94,7 +94,7 @@ func doJSON(t *testing.T, client *http.Client, method, url string, body any, hea
 }
 
 func TestAdminAndRelayFlow(t *testing.T) {
-	ts, _ := newTestServer(t)
+	ts, st := newTestServer(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer upstream-key" {
 			t.Errorf("unexpected upstream auth: %q", r.Header.Get("Authorization"))
@@ -249,6 +249,68 @@ func TestAdminAndRelayFlow(t *testing.T) {
 		t.Fatalf("unknown request id must match nothing: %s", body)
 	}
 
+	now := time.Now().Unix()
+	for _, seeded := range []*store.Log{
+		{RequestID: "old-export-log", Model: "public-model", Status: "success", CreatedAt: now - 72*3600},
+		{RequestID: "error-export-log", Model: "public-model", Status: "error", CreatedAt: now},
+		{RequestID: "unknown-cost-log", Model: "public-model", Status: "error", Cost: 0.003, CostStatus: store.CostUnverified, CreatedAt: now},
+	} {
+		if err := st.InsertLog(seeded); err != nil {
+			t.Fatalf("seed log: %v", err)
+		}
+	}
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+"/api/logs/export", nil, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("export status %d: %s", resp.StatusCode, body)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/csv") {
+		t.Fatalf("unexpected export content type %q", ct)
+	}
+	if cd := resp.Header.Get("Content-Disposition"); !strings.Contains(cd, "attachment; filename=\"model-relay-logs-") {
+		t.Fatalf("unexpected export disposition %q", cd)
+	}
+	csvText := string(body)
+	for _, want := range []string{"time,request_id,api_key,channel,model,upstream_model", relayRequestID, "old-export-log", "error-export-log", "unknown-cost-log"} {
+		if !strings.Contains(csvText, want) {
+			t.Fatalf("export is missing %q: %s", want, csvText)
+		}
+	}
+	if !strings.Contains(csvText, ",0,0,0,unknown,unverified,error,") {
+		t.Fatalf("unverified cost was not marked unknown: %s", csvText)
+	}
+
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+"/api/logs/export?start="+strconv.FormatInt(now-3600, 10), nil, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("filtered export status %d: %s", resp.StatusCode, body)
+	}
+	csvText = string(body)
+	if strings.Contains(csvText, "old-export-log") {
+		t.Fatalf("start filter did not exclude the older row: %s", csvText)
+	}
+	if !strings.Contains(csvText, "error-export-log") || !strings.Contains(csvText, relayRequestID) {
+		t.Fatalf("start filter dropped rows inside the range: %s", csvText)
+	}
+
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+"/api/logs/export?status=success&start="+strconv.FormatInt(now-3600, 10), nil, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status-filtered export status %d: %s", resp.StatusCode, body)
+	}
+	csvText = string(body)
+	if strings.Contains(csvText, "error-export-log") {
+		t.Fatalf("status filter did not exclude the error row: %s", csvText)
+	}
+	if !strings.Contains(csvText, relayRequestID) {
+		t.Fatalf("status filter dropped the successful row: %s", csvText)
+	}
+
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+"/api/logs/export?token_id=999999", nil, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("empty export status %d: %s", resp.StatusCode, body)
+	}
+	if lines := strings.Split(strings.TrimSpace(string(body)), "\n"); len(lines) != 1 || !strings.Contains(lines[0], "request_id") {
+		t.Fatalf("empty export should contain only the header: %q", body)
+	}
+
 	resp, body = doJSON(t, client, http.MethodGet, ts.URL+"/", nil, nil)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "admin console was not built") {
 		t.Fatalf("placeholder status %d body %s", resp.StatusCode, body)
@@ -261,6 +323,10 @@ func TestAdminAndRelayFlow(t *testing.T) {
 	resp, _ = doJSON(t, client, http.MethodGet, ts.URL+"/api/auth/me", nil, nil)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected 401 after logout, got %d", resp.StatusCode)
+	}
+	resp, _ = doJSON(t, client, http.MethodGet, ts.URL+"/api/logs/export", nil, nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for export after logout, got %d", resp.StatusCode)
 	}
 }
 

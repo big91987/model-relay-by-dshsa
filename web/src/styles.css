@@ -1094,6 +1094,20 @@ select.input {
   min-width: 150px;
 }
 
+.filters .date-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.filters .date-field .input {
+  flex: 0 0 auto;
+  min-width: 132px;
+}
+
 .filter-panel {
   padding: 14px 16px;
 }
@@ -3003,6 +3017,12 @@ select.input {
   .filters .input {
     flex: 1 1 100%;
     width: 100%;
+  }
+  .filters .date-field {
+    flex: 1 1 100%;
+  }
+  .filters .date-field .input {
+    flex: 1 1 auto;
   }
   .model-picker-list {
     grid-template-columns: 1fr;

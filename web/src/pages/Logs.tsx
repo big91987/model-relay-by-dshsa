@@ -5,19 +5,32 @@ import { Icon } from '../components/Icon'
 import { Modal } from '../components/Modal'
 import { CostStatusBadge, EmptyState, ErrorBanner, PageHeader, Spinner, StatusBadge } from '../components/ui'
 import { api } from '../lib/api'
-import { formatCost, formatDateTime, formatDuration, formatNumber, formatTime } from '../lib/format'
+import { formatCost, formatDateTime, formatDuration, formatNumber, formatTime, parseLocalDate } from '../lib/format'
 import { useToast } from '../lib/toast'
-import type { LogItem, LogsResponse, Token } from '../lib/types'
+import type { LogItem, LogQuery, LogsResponse, Token } from '../lib/types'
 
 interface Filters {
   model: string
   status: string
   request_id: string
   token_id: string
+  start: string
+  end: string
 }
 
-const emptyFilters: Filters = { model: '', status: '', request_id: '', token_id: '' }
+const emptyFilters: Filters = { model: '', status: '', request_id: '', token_id: '', start: '', end: '' }
 const pageSize = 25
+
+function logQuery(filters: Filters): LogQuery {
+  return {
+    model: filters.model.trim() || undefined,
+    status: filters.status || undefined,
+    request_id: filters.request_id.trim() || undefined,
+    token_id: filters.token_id ? Number(filters.token_id) : undefined,
+    start: parseLocalDate(filters.start),
+    end: parseLocalDate(filters.end, true),
+  }
+}
 
 export default function Logs() {
   const toast = useToast()
@@ -31,18 +44,12 @@ export default function Logs() {
   const [error, setError] = useState('')
   const [tokens, setTokens] = useState<Token[]>([])
   const [selected, setSelected] = useState<LogItem | null>(null)
+  const [exporting, setExporting] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const response = await api.logs({
-        page,
-        page_size: pageSize,
-        model: filters.model.trim() || undefined,
-        status: filters.status || undefined,
-        request_id: filters.request_id.trim() || undefined,
-        token_id: filters.token_id ? Number(filters.token_id) : undefined,
-      })
+      const response = await api.logs({ page, page_size: pageSize, ...logQuery(filters) })
       setData(response)
       setError('')
     } catch (err) {
@@ -71,9 +78,21 @@ export default function Logs() {
     setPage(1)
   }, [searchParams, filters.request_id])
 
+  const validateDraft = (): Filters | null => {
+    const next = { ...draft, request_id: draft.request_id.trim() }
+    const start = parseLocalDate(next.start)
+    const end = parseLocalDate(next.end, true)
+    if (start !== undefined && end !== undefined && start > end) {
+      toast.error('The From date must not be after the To date')
+      return null
+    }
+    return next
+  }
+
   const applyFilters = (event: FormEvent) => {
     event.preventDefault()
-    const next = { ...draft, request_id: draft.request_id.trim() }
+    const next = validateDraft()
+    if (!next) return
     setPage(1)
     setFilters(next)
     setSearchParams(next.request_id ? { request_id: next.request_id } : {}, { replace: true })
@@ -95,11 +114,44 @@ export default function Logs() {
     }
   }
 
+  const exportCsv = async () => {
+    const next = validateDraft()
+    if (!next) return
+    setPage(1)
+    setFilters(next)
+    setSearchParams(next.request_id ? { request_id: next.request_id } : {}, { replace: true })
+    setExporting(true)
+    try {
+      const { blob, filename } = await api.exportLogs(logQuery(next))
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+      toast.success(`Exported ${filename}`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to export request logs')
+    } finally {
+      setExporting(false)
+    }
+  }
+
   const totalPages = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1
 
   return (
     <div className="page">
-      <PageHeader title="Request logs" subtitle="Every relayed call with tokens, cost, latency and upstream routing." />
+      <PageHeader
+        title="Request logs"
+        subtitle="Every relayed call with tokens, cost, latency and upstream routing. Export the filtered detail as CSV for finance reconciliation."
+        actions={
+          <button className="btn btn-ghost" type="button" onClick={() => void exportCsv()} disabled={exporting}>
+            <Icon name="download" size={16} /> {exporting ? 'Exporting…' : 'Export CSV'}
+          </button>
+        }
+      />
       {error ? <ErrorBanner message={error} /> : null}
 
       <section className="panel filter-panel">
@@ -141,6 +193,28 @@ export default function Logs() {
               </option>
             ))}
           </select>
+          <label className="date-field">
+            <span>From</span>
+            <input
+              className="input"
+              type="date"
+              value={draft.start}
+              max={draft.end || undefined}
+              onChange={(event) => setDraft({ ...draft, start: event.target.value })}
+              aria-label="Filter from date"
+            />
+          </label>
+          <label className="date-field">
+            <span>To</span>
+            <input
+              className="input"
+              type="date"
+              value={draft.end}
+              min={draft.start || undefined}
+              onChange={(event) => setDraft({ ...draft, end: event.target.value })}
+              aria-label="Filter to date"
+            />
+          </label>
           <button className="btn btn-primary btn-sm" type="submit">
             <Icon name="search" size={15} /> Apply
           </button>
