@@ -170,3 +170,178 @@ func (s *Server) handleListSpeechVoices(w http.ResponseWriter, r *http.Request) 
 	}
 	writeJSON(w, http.StatusOK, catalog)
 }
+
+type voiceDesignInput struct {
+	Model       string `json:"model"`
+	Prompt      string `json:"prompt"`
+	PreviewText string `json:"preview_text"`
+	VoiceID     string `json:"voice_id"`
+}
+
+// voiceDesignView adds console-facing fields to a stored designed voice.
+type voiceDesignView struct {
+	store.VoiceDesign
+	PreviewReady bool   `json:"preview_ready"`
+	PreviewURL   string `json:"preview_url,omitempty"`
+}
+
+func (s *Server) voiceDesignView(design *store.VoiceDesign) voiceDesignView {
+	view := voiceDesignView{VoiceDesign: *design}
+	if design.PreviewPath == "" {
+		return view
+	}
+	path := filepath.Join(s.cfg.DataDir, design.PreviewPath)
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		view.PreviewReady = true
+		view.PreviewURL = fmt.Sprintf("/api/voice-designs/%d/preview", design.ID)
+	}
+	return view
+}
+
+func (s *Server) handleListVoiceDesigns(w http.ResponseWriter, r *http.Request) {
+	designs, err := s.store.ListVoiceDesigns(queryInt(r, "limit", 50))
+	if err != nil {
+		s.logger.Error("list designed voices failed", "error", err)
+		writeErr(w, http.StatusInternalServerError, "failed to load designed voices")
+		return
+	}
+	items := make([]voiceDesignView, 0, len(designs))
+	for i := range designs {
+		items = append(items, s.voiceDesignView(&designs[i]))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleCreateVoiceDesign(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxSpeechBody)
+	var in voiceDesignInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	design, err := s.gw.CreateVoiceDesign(r.Context(), gateway.VoiceDesignRequest{
+		Model:       in.Model,
+		Prompt:      in.Prompt,
+		PreviewText: in.PreviewText,
+		VoiceID:     in.VoiceID,
+	})
+	if err != nil {
+		var speechErr *gateway.SpeechError
+		if errors.As(err, &speechErr) {
+			writeErr(w, speechErr.Status, speechErr.Message)
+			return
+		}
+		s.logger.Error("design voice failed", "error", err)
+		writeErr(w, http.StatusInternalServerError, "failed to design the voice")
+		return
+	}
+	writeJSON(w, http.StatusCreated, s.voiceDesignView(design))
+}
+
+func (s *Server) handleGetVoiceDesign(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid voice design id")
+		return
+	}
+	design, err := s.store.GetVoiceDesign(id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "designed voice not found")
+		return
+	}
+	if err != nil {
+		s.logger.Error("load designed voice failed", "error", err)
+		writeErr(w, http.StatusInternalServerError, "failed to load the designed voice")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.voiceDesignView(design))
+}
+
+func (s *Server) handleVoiceDesignPreview(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid voice design id")
+		return
+	}
+	design, err := s.store.GetVoiceDesign(id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "designed voice not found")
+		return
+	}
+	if err != nil {
+		s.logger.Error("load designed voice failed", "error", err)
+		writeErr(w, http.StatusInternalServerError, "failed to load the designed voice")
+		return
+	}
+	if design.PreviewPath == "" {
+		writeErr(w, http.StatusNotFound, "the preview audio is not available")
+		return
+	}
+	path := filepath.Join(s.cfg.DataDir, design.PreviewPath)
+	if info, statErr := os.Stat(path); statErr != nil || info.IsDir() {
+		writeErr(w, http.StatusNotFound, "the stored preview audio file is missing")
+		return
+	}
+	format := strings.ToLower(strings.TrimSpace(design.PreviewFormat))
+	if format == "" {
+		format = "mp3"
+	}
+	w.Header().Set("Content-Type", speechContentType(format))
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	if r.URL.Query().Get("download") != "" {
+		filename := fmt.Sprintf("minimax-voice-design-%d.%s", design.ID, format)
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	}
+	http.ServeFile(w, r, path)
+}
+
+type voiceDesignSpeechInput struct {
+	Text  string  `json:"text"`
+	Speed float64 `json:"speed"`
+}
+
+// handleVoiceDesignSpeech reads a new text with the designed voice. Synthesis is
+// pinned to the channel that created the voice because MiniMax custom voices
+// belong to the account that designed them.
+func (s *Server) handleVoiceDesignSpeech(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(r)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid voice design id")
+		return
+	}
+	design, err := s.store.GetVoiceDesign(id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "designed voice not found")
+		return
+	}
+	if err != nil {
+		s.logger.Error("load designed voice failed", "error", err)
+		writeErr(w, http.StatusInternalServerError, "failed to load the designed voice")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxSpeechBody)
+	var in voiceDesignSpeechInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	clip, err := s.gw.CreateSpeech(r.Context(), gateway.SpeechRequest{
+		Model:     design.Model,
+		Text:      in.Text,
+		VoiceID:   design.VoiceID,
+		VoiceName: design.Name,
+		Speed:     in.Speed,
+		ChannelID: design.ChannelID,
+	})
+	if err != nil {
+		var speechErr *gateway.SpeechError
+		if errors.As(err, &speechErr) {
+			writeErr(w, speechErr.Status, speechErr.Message)
+			return
+		}
+		s.logger.Error("synthesize designed voice failed", "error", err)
+		writeErr(w, http.StatusInternalServerError, "failed to generate speech")
+		return
+	}
+	writeJSON(w, http.StatusCreated, s.speechClipView(clip))
+}

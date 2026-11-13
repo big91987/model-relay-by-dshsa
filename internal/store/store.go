@@ -203,6 +203,24 @@ func (s *Store) migrate() error {
 			created_at INTEGER NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_speech_clips_created_at ON speech_clips(created_at)`,
+		`CREATE TABLE IF NOT EXISTS voice_designs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			channel_id INTEGER NOT NULL DEFAULT 0,
+			channel_name TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			upstream_model TEXT NOT NULL DEFAULT '',
+			voice_id TEXT NOT NULL DEFAULT '',
+			name TEXT NOT NULL DEFAULT '',
+			prompt TEXT NOT NULL DEFAULT '',
+			preview_text TEXT NOT NULL DEFAULT '',
+			preview_path TEXT NOT NULL DEFAULT '',
+			preview_format TEXT NOT NULL DEFAULT 'mp3',
+			preview_duration_ms INTEGER NOT NULL DEFAULT 0,
+			preview_characters INTEGER NOT NULL DEFAULT 0,
+			preview_size_bytes INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_voice_designs_created_at ON voice_designs(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_request_id ON logs(request_id)`,
 	}
 	for _, stmt := range stmts {
@@ -911,6 +929,85 @@ func scanSpeechClip(row interface{ Scan(dest ...any) error }) (*SpeechClip, erro
 		return nil, err
 	}
 	return &c, nil
+}
+
+// VoiceDesign is one custom voice generated from a text description by the
+// MiniMax voice-design API. PreviewPath points at the generated preview audio.
+type VoiceDesign struct {
+	ID                int64  `json:"id"`
+	ChannelID         int64  `json:"channel_id"`
+	ChannelName       string `json:"channel_name"`
+	Model             string `json:"model"`
+	UpstreamModel     string `json:"upstream_model"`
+	VoiceID           string `json:"voice_id"`
+	Name              string `json:"name"`
+	Prompt            string `json:"prompt"`
+	PreviewText       string `json:"preview_text"`
+	PreviewPath       string `json:"-"`
+	PreviewFormat     string `json:"preview_format"`
+	PreviewDurationMS int64  `json:"preview_duration_ms"`
+	PreviewCharacters int64  `json:"preview_characters"`
+	PreviewSizeBytes  int64  `json:"preview_size_bytes"`
+	CreatedAt         int64  `json:"created_at"`
+}
+
+const voiceDesignColumns = `id, channel_id, channel_name, model, upstream_model, voice_id, name, prompt,
+	preview_text, preview_path, preview_format, preview_duration_ms, preview_characters, preview_size_bytes, created_at`
+
+// CreateVoiceDesign inserts a designed voice and sets its id.
+func (s *Store) CreateVoiceDesign(v *VoiceDesign) error {
+	v.CreatedAt = now()
+	res, err := s.db.Exec(`INSERT INTO voice_designs (channel_id, channel_name, model, upstream_model, voice_id, name,
+		prompt, preview_text, preview_path, preview_format, preview_duration_ms, preview_characters, preview_size_bytes, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		v.ChannelID, v.ChannelName, v.Model, v.UpstreamModel, v.VoiceID, v.Name,
+		v.Prompt, v.PreviewText, v.PreviewPath, v.PreviewFormat, v.PreviewDurationMS, v.PreviewCharacters, v.PreviewSizeBytes, v.CreatedAt)
+	if err != nil {
+		return err
+	}
+	v.ID, err = res.LastInsertId()
+	return err
+}
+
+// GetVoiceDesign returns a designed voice by id.
+func (s *Store) GetVoiceDesign(id int64) (*VoiceDesign, error) {
+	row := s.db.QueryRow(`SELECT `+voiceDesignColumns+` FROM voice_designs WHERE id = ?`, id)
+	v, err := scanVoiceDesign(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return v, err
+}
+
+// ListVoiceDesigns returns up to limit designed voices, newest first.
+func (s *Store) ListVoiceDesigns(limit int) ([]VoiceDesign, error) {
+	if limit < 1 || limit > 100 {
+		limit = 50
+	}
+	rows, err := s.db.Query(`SELECT `+voiceDesignColumns+` FROM voice_designs ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]VoiceDesign, 0)
+	for rows.Next() {
+		v, err := scanVoiceDesign(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *v)
+	}
+	return out, rows.Err()
+}
+
+func scanVoiceDesign(row interface{ Scan(dest ...any) error }) (*VoiceDesign, error) {
+	var v VoiceDesign
+	err := row.Scan(&v.ID, &v.ChannelID, &v.ChannelName, &v.Model, &v.UpstreamModel, &v.VoiceID, &v.Name, &v.Prompt,
+		&v.PreviewText, &v.PreviewPath, &v.PreviewFormat, &v.PreviewDurationMS, &v.PreviewCharacters, &v.PreviewSizeBytes, &v.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &v, nil
 }
 
 // Totals aggregates request counts, token usage and spend.

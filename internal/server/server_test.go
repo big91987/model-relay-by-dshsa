@@ -776,6 +776,168 @@ func TestMinimaxSpeechFlow(t *testing.T) {
 	}
 }
 
+func TestMinimaxVoiceDesignFlow(t *testing.T) {
+	ts, _ := newTestServer(t)
+	previewAudio := []byte("ID3\x03\x00\x00\x00server-voice-design-preview")
+	voiceID := "ttv-voice-2026010100000000-server"
+	var speechVoiceID string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer upstream-key" {
+			t.Errorf("unexpected upstream auth: %q", r.Header.Get("Authorization"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/voice_design":
+			var body struct {
+				Prompt      string `json:"prompt"`
+				PreviewText string `json:"preview_text"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode design request: %v", err)
+			}
+			if body.Prompt != "A calm Mandarin narrator." || body.PreviewText != "你好，这是试听。" {
+				t.Errorf("unexpected design request: %+v", body)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"voice_id":    voiceID,
+				"trial_audio": fmt.Sprintf("%x", previewAudio),
+				"base_resp":   map[string]any{"status_code": 0, "status_msg": "success"},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/t2a_v2":
+			var body struct {
+				Text         string `json:"text"`
+				VoiceSetting struct {
+					VoiceID string `json:"voice_id"`
+				} `json:"voice_setting"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode speech request: %v", err)
+			}
+			if body.Text != "用这个音色朗读另一段文案。" {
+				t.Errorf("unexpected speech text: %q", body.Text)
+			}
+			speechVoiceID = body.VoiceSetting.VoiceID
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"audio": fmt.Sprintf("%x", previewAudio), "status": 2},
+				"extra_info": map[string]any{
+					"audio_length":     2200,
+					"audio_format":     "mp3",
+					"audio_size":       len(previewAudio),
+					"usage_characters": 13,
+				},
+				"base_resp": map[string]any{"status_code": 0, "status_msg": "success"},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	client := newClient(t)
+	if resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/auth/login", map[string]any{
+		"username": "admin", "password": "admin-pass",
+	}, nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status %d: %s", resp.StatusCode, body)
+	}
+	resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/channels", map[string]any{
+		"name": "minimax-voice", "type": "minimax", "base_url": upstream.URL, "api_key": "upstream-key",
+		"models": []string{"speech-2.8-hd"}, "priority": 0, "weight": 1, "status": "enabled",
+	}, nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create channel status %d: %s", resp.StatusCode, body)
+	}
+
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/voice-designs", map[string]any{
+		"model": "speech-2.8-hd", "prompt": "A calm Mandarin narrator.", "preview_text": "你好，这是试听。",
+	}, nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create voice design status %d: %s", resp.StatusCode, body)
+	}
+	var design struct {
+		ID           int64  `json:"id"`
+		VoiceID      string `json:"voice_id"`
+		Name         string `json:"name"`
+		PreviewReady bool   `json:"preview_ready"`
+		PreviewURL   string `json:"preview_url"`
+	}
+	if err := json.Unmarshal(body, &design); err != nil {
+		t.Fatalf("decode voice design: %v", err)
+	}
+	if design.ID == 0 || design.VoiceID != voiceID || !design.PreviewReady ||
+		design.PreviewURL != fmt.Sprintf("/api/voice-designs/%d/preview", design.ID) {
+		t.Fatalf("unexpected voice design: %s", body)
+	}
+	if design.Name != "A calm Mandarin narrator." {
+		t.Fatalf("voice design name = %q", design.Name)
+	}
+
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+design.PreviewURL, nil, nil)
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(body, previewAudio) {
+		t.Fatalf("preview status %d body %q", resp.StatusCode, body)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "audio/mpeg" {
+		t.Fatalf("preview content type = %q", got)
+	}
+	resp, _ = doJSON(t, client, http.MethodGet, ts.URL+design.PreviewURL+"?download=1", nil, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Disposition"), "attachment") {
+		t.Fatalf("preview download status %d disposition %q", resp.StatusCode, resp.Header.Get("Content-Disposition"))
+	}
+
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+"/api/voice-designs", nil, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), voiceID) {
+		t.Fatalf("list voice designs status %d: %s", resp.StatusCode, body)
+	}
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+fmt.Sprintf("/api/voice-designs/%d", design.ID), nil, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"preview_ready":true`) {
+		t.Fatalf("get voice design status %d: %s", resp.StatusCode, body)
+	}
+
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+fmt.Sprintf("/api/voice-designs/%d/speech", design.ID), map[string]any{
+		"text": "用这个音色朗读另一段文案。", "speed": 1,
+	}, nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("design speech status %d: %s", resp.StatusCode, body)
+	}
+	var clip struct {
+		VoiceID    string `json:"voice_id"`
+		VoiceName  string `json:"voice_name"`
+		AudioReady bool   `json:"audio_ready"`
+		ContentURL string `json:"content_url"`
+	}
+	if err := json.Unmarshal(body, &clip); err != nil {
+		t.Fatalf("decode design speech: %v", err)
+	}
+	if clip.VoiceID != voiceID || clip.VoiceName != design.Name || !clip.AudioReady {
+		t.Fatalf("unexpected design speech: %s", body)
+	}
+	if speechVoiceID != voiceID {
+		t.Fatalf("synthesis used voice %q, want %q", speechVoiceID, voiceID)
+	}
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+clip.ContentURL, nil, nil)
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(body, previewAudio) {
+		t.Fatalf("speech content status %d body %q", resp.StatusCode, body)
+	}
+
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/voice-designs", map[string]any{
+		"model": "speech-2.8-hd", "prompt": "", "preview_text": "hello",
+	}, nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("empty prompt status %d: %s", resp.StatusCode, body)
+	}
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/voice-designs", map[string]any{
+		"model": "speech-2.8-hd", "prompt": "warm", "preview_text": strings.Repeat("x", 501),
+	}, nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("long preview status %d: %s", resp.StatusCode, body)
+	}
+
+	anonymous := newClient(t)
+	resp, _ = doJSON(t, anonymous, http.MethodGet, ts.URL+"/api/voice-designs", nil, nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("anonymous voice design access status %d", resp.StatusCode)
+	}
+}
+
 func TestPlaygroundAdminProxy(t *testing.T) {
 	ts, st := newTestServer(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

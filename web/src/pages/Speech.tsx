@@ -4,24 +4,11 @@ import { Icon } from '../components/Icon'
 import { EmptyState, ErrorBanner, FormField, PageHeader, Spinner } from '../components/ui'
 import { api } from '../lib/api'
 import { relativeTime } from '../lib/format'
+import { SPEECH_MAX_TEXT, SPEECH_DEFAULT_MODEL, formatSpeechDuration, isSpeechModel } from '../lib/speech'
 import { useToast } from '../lib/toast'
 import type { ModelInfo, SpeechClip, SpeechVoice } from '../lib/types'
 
-const MAX_TEXT = 10000
-const DEFAULT_SPEECH_MODEL = 'speech-2.8-hd'
 const DEFAULT_VOICE_ID = 'English_expressive_narrator'
-
-function isSpeechModel(model: ModelInfo): boolean {
-  if (!model.types.includes('minimax')) return false
-  return /^speech-/i.test(model.id) || /^minimax-speech/i.test(model.id)
-}
-
-function formatDuration(durationMS: number): string {
-  if (!durationMS || durationMS <= 0) return 'Unknown length'
-  const seconds = Math.round(durationMS / 1000)
-  const minutes = Math.floor(seconds / 60)
-  return `${minutes}:${String(seconds % 60).padStart(2, '0')}`
-}
 
 function formatBytes(bytes: number): string {
   if (!bytes || bytes <= 0) return ''
@@ -40,7 +27,7 @@ function SpeechCard({ clip }: { clip: SpeechClip }) {
         <div>
           <div className="speech-voice">{clip.voice_name || clip.voice_id}</div>
           <div className="video-meta">
-            {clip.model} · {formatDuration(clip.duration_ms)} · {clip.characters} characters
+            {clip.model} · {formatSpeechDuration(clip.duration_ms)} · {clip.characters} characters
             {size ? ` · ${size}` : ''} · {relativeTime(clip.created_at)}
           </div>
         </div>
@@ -132,7 +119,7 @@ export default function Speech() {
   useEffect(() => {
     setModel((previous) => {
       if (previous && speechModels.some((item) => item.id === previous)) return previous
-      if (speechModels.some((item) => item.id === DEFAULT_SPEECH_MODEL)) return DEFAULT_SPEECH_MODEL
+      if (speechModels.some((item) => item.id === SPEECH_DEFAULT_MODEL)) return SPEECH_DEFAULT_MODEL
       return speechModels[0]?.id ?? ''
     })
   }, [speechModels])
@@ -308,11 +295,11 @@ export default function Speech() {
                     <span>{voiceError}</span>
                   </div>
                 ) : null}
-                <FormField label="Text" hint={`${text.length} / ${MAX_TEXT} characters`}>
+                <FormField label="Text" hint={`${text.length} / ${SPEECH_MAX_TEXT} characters`}>
                   <textarea
                     className="input textarea"
                     rows={6}
-                    maxLength={MAX_TEXT}
+                    maxLength={SPEECH_MAX_TEXT}
                     value={text}
                     onChange={(event) => setText(event.target.value)}
                     placeholder="Type or paste the text you want MiniMax to read aloud…"

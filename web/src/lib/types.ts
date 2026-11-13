@@ -297,3 +297,37 @@ export interface SpeechClipsResponse {
   page: number
   page_size: number
 }
+
+export interface VoiceDesign {
+  id: number
+  channel_id: number
+  channel_name: string
+  model: string
+  upstream_model: string
+  voice_id: string
+  name: string
+  prompt: string
+  preview_text: string
+  preview_format: string
+  preview_duration_ms: number
+  preview_characters: number
+  preview_size_bytes: number
+  preview_ready: boolean
+  preview_url?: string
+  created_at: number
+}
+
+export interface VoiceDesignInput {
+  model: string
+  prompt: string
+  preview_text: string
+}
+
+export interface VoiceDesignSpeechInput {
+  text: string
+  speed: number
+}
+
+export interface VoiceDesignsResponse {
+  items: VoiceDesign[]
+}

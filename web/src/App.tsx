@@ -11,6 +11,7 @@ import Playground from './pages/Playground'
 import Speech from './pages/Speech'
 import Tokens from './pages/Tokens'
 import Videos from './pages/Videos'
+import VoiceDesignPage from './pages/VoiceDesign'
 
 function BootScreen() {
   return (
@@ -39,6 +40,7 @@ export default function App() {
         <Route path="/models" element={<Models />} />
         <Route path="/videos" element={<Videos />} />
         <Route path="/speech" element={<Speech />} />
+        <Route path="/voice-design" element={<VoiceDesignPage />} />
         <Route path="/tokens" element={<Tokens />} />
         <Route path="/logs" element={<Logs />} />
       </Route>

@@ -10,6 +10,7 @@ A self-hosted model gateway written in Go, with a React admin console. It expose
 - **Two chat upstream protocols** — OpenAI-compatible channels (OpenAI, DeepSeek, Moonshot, Qwen, vLLM, Ollama, …) and Anthropic Messages channels, translated to and from the OpenAI format.
 - **MiniMax-H3 and Seedance video generation** — text-to-video and first-frame image-to-video from the console, with asynchronous tasks, live status, video preview and MP4 download. Supports MiniMax-H3 and ByteDance Seedance on Volcano Ark.
 - **MiniMax text to speech** — choose a system voice, synthesize speech from the console, then replay and download the generated audio. Voice selection, generation and history are console-only.
+- **MiniMax voice design** — describe a voice in text, generate a custom voice with a preview sample, then read any text with the selected voice. Designed voices and their previews stay on the gateway.
 - **Channel routing** — priority first, weighted load balancing inside a priority, public-to-upstream model aliases, and automatic failover on connection errors, `401`, `403`, `404`, `429` and `5xx`.
 - **Upstream model discovery** — fetch the provider's model list in the channel form, tick the models to import, and keep manual entries and public aliases.
 - **Gateway keys** — per-key USD balance, daily spending budget, model allowlists, requests-per-minute, tokens-per-minute and concurrency limits, expiry, enable/disable, and a one-time plaintext reveal at creation.
@@ -123,6 +124,12 @@ Then open **Speech** in the console to:
 
 The Speech model picker lists public models whose ID starts with `speech-`; an alias keeps a `speech-` prefix to appear, for example `speech-my-voice=speech-2.8-hd`. Synthesis uses `POST /v1/t2a_v2` with `output_format: hex`; the gateway decodes the audio and stores it under `DATA_DIR/speech/`. The browser receives the clip only through the authenticated `/api/speech/{id}/content` endpoint, so the upstream key and temporary provider URLs are never exposed. Speech generation is console-only: it is not metered per gateway key and does not appear in request logs.
 
+#### Voice design
+
+The **Voice design** page creates custom MiniMax voices from text. Enter a description such as "a warm, calm female narrator with an unhurried delivery" plus up to 500 characters of preview text; the gateway calls `POST /v1/voice_design` and stores the returned `voice_id` in the `voice_designs` table and the hex-encoded preview sample under `DATA_DIR/voice-design/`. The page lists designed voices with their preview players.
+
+Selecting a designed voice lets you play its sample and read another text with it. That synthesis uses the normal `/v1/t2a_v2` flow but is pinned to the channel that created the voice, because MiniMax custom voices belong to the provider account that designed them. The resulting clip appears in the Voice design page and in the Speech history. Voice design is console-only and is not metered per gateway key.
+
 ### Docker
 
 ```bash
@@ -141,7 +148,7 @@ For Compose, create a `.env` file containing `SECRET_KEY` and `ADMIN_PASSWORD` (
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PORT` | `8080` | HTTP listen port. |
-| `DATA_DIR` | `./data` | Directory for `gateway.db`, downloaded videos and generated speech (created automatically). |
+| `DATA_DIR` | `./data` | Directory for `gateway.db`, downloaded videos, generated speech and voice-design previews (created automatically). |
 | `SECRET_KEY` | `dev-secret-change-me` | Signs admin sessions and encrypts upstream API keys with AES-256-GCM. Use a stable secret. |
 | `ADMIN_USERNAME` | `admin` | Admin username created on first boot. |
 | `ADMIN_PASSWORD` | `admin123` | Admin password created on first boot (minimum 6 characters). |
@@ -179,7 +186,11 @@ Changing `SECRET_KEY` invalidates admin sessions and makes existing channel keys
 | --- | --- |
 | ![Text to speech](docs/screenshots/speech-after.png) | ![Text to speech in light theme](docs/screenshots/speech-light.png) |
 
-The **Models** page shows the public catalog, serving channels and the lowest configured price per model. Star the models you use most to keep them in a favorites list, then use **Favorites only** to narrow the catalog; favorites are stored in the browser and survive reloads. The **Playground** page selects an existing gateway key, sends real relay requests, and shows streaming output, latency, token usage and the request ID. Most screenshots use the local mock upstream in `scripts/mock-upstream.py` (`python3 scripts/mock-upstream.py 19090`), so `127.0.0.1` URLs are demo data rather than real providers; the mock also answers MiniMax and Seedance video create/query calls, the MiniMax voice list and T2A calls, and serves `scripts/media/demo.mp4` and `scripts/media/demo.mp3` for local previews. The MiniMax and Seedance video screenshots additionally include one real generation each (`MiniMax-H3` and `doubao-seedance-2-0-260128`), and the Playground uses a public Pollinations GPT-OSS endpoint.
+| Voice design | Voice design (light) |
+| --- | --- |
+| ![Voice design](docs/screenshots/voice-design-after.png) | ![Voice design in light theme](docs/screenshots/voice-design-light.png) |
+
+The **Models** page shows the public catalog, serving channels and the lowest configured price per model. Star the models you use most to keep them in a favorites list, then use **Favorites only** to narrow the catalog; favorites are stored in the browser and survive reloads. The **Playground** page selects an existing gateway key, sends real relay requests, and shows streaming output, latency, token usage and the request ID. Most screenshots use the local mock upstream in `scripts/mock-upstream.py` (`python3 scripts/mock-upstream.py 19090`), so `127.0.0.1` URLs are demo data rather than real providers; the mock also answers MiniMax and Seedance video create/query calls, the MiniMax voice list, T2A and voice-design calls, and serves `scripts/media/demo.mp4` and `scripts/media/demo.mp3` for local previews. The MiniMax and Seedance video screenshots additionally include one real generation each (`MiniMax-H3` and `doubao-seedance-2-0-260128`), and the Playground uses a public Pollinations GPT-OSS endpoint.
 
 Use the theme control in the top bar, or on the sign-in screen, to switch between light, dark and follow-system themes. The console remembers the selection in the browser.
 
@@ -293,6 +304,10 @@ Admin endpoints use the `mr_session` HttpOnly cookie created by `POST /api/auth/
 | `GET/POST /api/speech` | session | List generated speech clips / synthesize text with a MiniMax voice. |
 | `GET /api/speech/{id}` | session | One speech clip with its model, voice and audio metadata. |
 | `GET /api/speech/{id}/content` | session | Stream the stored audio; add `?download=1` for an attachment. |
+| `GET/POST /api/voice-designs` | session | List designed voices / design a custom MiniMax voice from a description and preview text. |
+| `GET /api/voice-designs/{id}` | session | One designed voice with its preview metadata. |
+| `GET /api/voice-designs/{id}/preview` | session | Stream the stored preview audio; add `?download=1` for an attachment. |
+| `POST /api/voice-designs/{id}/speech` | session | Read new text with the designed voice on the channel that created it. |
 | `GET /v1/models` | gateway key | OpenAI model list, filtered by the key. |
 | `POST /v1/chat/completions` | gateway key | OpenAI-compatible chat completions, streaming supported. |
 | `POST /v1/embeddings` | gateway key | Embeddings passthrough for OpenAI-compatible channels. |
@@ -319,7 +334,7 @@ Project layout:
 cmd/server/            entrypoint
 internal/auth/         password hashing, API keys, session JWTs
 internal/config/       environment configuration
-internal/gateway/      relay, routing, OpenAI/Anthropic adapters, video tasks, speech synthesis, accounting
+internal/gateway/      relay, routing, OpenAI/Anthropic adapters, video tasks, speech synthesis, voice design, accounting
 internal/secretbox/    AES-GCM encryption for upstream keys
 internal/server/       HTTP API, middleware, static console
 internal/store/        SQLite schema and queries
@@ -336,7 +351,7 @@ docs/screenshots/      console screenshots used in this README
 - Upstream channel URLs are configured by an authenticated admin. The gateway will fetch whatever URL is configured, so restrict admin access accordingly.
 - The Anthropic adapter translates text, image data URLs, tool calls and tool results. Remote image URLs are not converted. OpenAI's Responses API, audio, rerank and native Anthropic endpoints are out of scope.
 - MiniMax-H3 video tasks are managed from the admin console; there is no gateway-key video API and video generation is not charged against key quotas. Task history and downloaded MP4 files stay in `DATA_DIR` until removed manually.
-- MiniMax speech synthesis is also console-only: there is no gateway-key speech API and it is not charged against key quotas. Generated audio stays in `DATA_DIR` until removed manually.
+- MiniMax speech synthesis and voice design are also console-only: there is no gateway-key speech API and they are not charged against key quotas. Generated audio and voice-design previews stay in `DATA_DIR` until removed manually.
 - Cost accounting trusts the configured prices and upstream token counts; it is an operational estimate, not an invoice. `estimated` and `unverified` charges are marked explicitly and should be reviewed before using the numbers for billing.
 - Playground uses the selected gateway key through an admin-authenticated server endpoint; the browser never receives the key secret. An admin session can therefore spend any key's quota, so restrict admin access accordingly.
 - Playground parameter ranges are protocol-level. Model-specific limits are enforced by the upstream and surfaced as errors; the page does not maintain a per-model capability database.
@@ -344,7 +359,7 @@ docs/screenshots/      console screenshots used in this README
 
 ## Upgrading an existing installation
 
-The SQLite schema is migrated automatically on startup: the gateway adds `logs.cost_status`, `logs.reserved_cost`, `logs.reservation_id` and the `token_reservations` table when they are missing, along with the per-key limit columns (`tpm_limit`, `max_concurrency`, `daily_quota`) and the `video_tasks` and `speech_clips` tables. No manual database step is required.
+The SQLite schema is migrated automatically on startup: the gateway adds `logs.cost_status`, `logs.reserved_cost`, `logs.reservation_id` and the `token_reservations` table when they are missing, along with the per-key limit columns (`tpm_limit`, `max_concurrency`, `daily_quota`) and the `video_tasks`, `speech_clips` and `voice_designs` tables. No manual database step is required.
 
 Existing keys and channels keep their configuration. Because the previous version had no reservations, the first boot after the upgrade has no pending reservations to recover; settled historical costs remain as recorded. New optional environment variables (`STREAM_TIMEOUT_SECONDS`, `QUOTA_DEFAULT_OUTPUT_TOKENS`) default to the values in the table above. Restart the binary (or rebuild the Docker image) as usual.
 
