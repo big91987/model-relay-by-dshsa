@@ -89,6 +89,7 @@ func (s *Server) routes() {
 	mux.Handle("DELETE /api/tokens/{id}", s.withAdmin(http.HandlerFunc(s.handleDeleteToken)))
 
 	mux.Handle("GET /api/logs", s.withAdmin(http.HandlerFunc(s.handleListLogs)))
+	mux.Handle("GET /api/logs/export", s.withAdmin(http.HandlerFunc(s.handleExportLogs)))
 	mux.Handle("GET /api/ledger", s.withAdmin(http.HandlerFunc(s.handleListReservations)))
 	mux.Handle("GET /api/models", s.withAdmin(http.HandlerFunc(s.handleListModels)))
 
