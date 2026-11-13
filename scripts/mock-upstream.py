@@ -1,10 +1,33 @@
 import json, os, sys, threading, time
+import math
+import struct
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 19090
 MEDIA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
 VIDEO_TASKS = {}
 VIDEO_LOCK = threading.Lock()
+
+# Streaming TTS answers with raw PCM so the console can schedule audio through
+# the Web Audio API. A synthesized tone keeps the mock self-contained; the
+# non-streaming path still returns scripts/media/demo.mp3.
+STREAM_SAMPLE_RATE = 32000
+STREAM_SECONDS = 7.44
+_STREAM_PCM = None
+
+def stream_pcm():
+    global _STREAM_PCM
+    if _STREAM_PCM is None:
+        total = int(STREAM_SAMPLE_RATE * STREAM_SECONDS)
+        samples = bytearray(total * 2)
+        for i in range(total):
+            t = i / STREAM_SAMPLE_RATE
+            # Fade the edges so stopping and starting do not click.
+            envelope = min(1.0, t / 0.08, max(0.0, (STREAM_SECONDS - t) / 0.15))
+            value = int(7000 * envelope * math.sin(2 * math.pi * 196 * t))
+            struct.pack_into("<h", samples, i * 2, value)
+        _STREAM_PCM = bytes(samples)
+    return _STREAM_PCM
 
 SYSTEM_VOICES = [
     {"voice_id": "English_expressive_narrator", "voice_name": "Expressive Narrator",
@@ -214,6 +237,8 @@ class Handler(BaseHTTPRequestHandler):
         text = str(body.get("text", ""))
         if not text.strip():
             return self.send_json(200, {"data": None, "base_resp": {"status_code": 2013, "status_msg": "text is required"}})
+        if body.get("stream"):
+            return self.stream_text_to_speech(body, text)
         if "error" in text.lower():
             return self.send_json(200, {"data": None, "base_resp": {"status_code": 2013, "status_msg": "the text was rejected by the mock upstream"}})
         with open(os.path.join(MEDIA_DIR, "demo.mp3"), "rb") as handle:
@@ -238,6 +263,48 @@ class Handler(BaseHTTPRequestHandler):
             "trace_id": "mock-t2a",
             "base_resp": {"status_code": 0, "status_msg": "success"},
         })
+
+    def stream_text_to_speech(self, body, text):
+        audio_format = str(body.get("audio_setting", {}).get("format") or "mp3").lower()
+        if audio_format == "pcm":
+            audio = stream_pcm()
+        else:
+            audio_format = "mp3"
+            with open(os.path.join(MEDIA_DIR, "demo.mp3"), "rb") as handle:
+                audio = handle.read()
+        chunk_size = int(STREAM_SAMPLE_RATE * 2 * 0.35) if audio_format == "pcm" else max(1, len(audio) // 20)
+        chunks = [audio[i:i + chunk_size] for i in range(0, len(audio), chunk_size)]
+        sys.stderr.write("mock t2a_v2 stream voice=%s chars=%d chunks=%d format=%s\n" % (
+            body.get("voice_setting", {}).get("voice_id"), len(text), len(chunks), audio_format))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        if "error" in text.lower():
+            # The provider reports business errors inside a 200 streaming body.
+            self.sse({"data": None, "base_resp": {"status_code": 2013, "status_msg": "the text was rejected by the mock upstream"}})
+            self.wfile.write(b"0\r\n\r\n")
+            return
+        for chunk in chunks:
+            self.sse({"data": {"audio": chunk.hex(), "status": 1},
+                      "base_resp": {"status_code": 0, "status_msg": ""}})
+            time.sleep(0.12)
+        self.sse({
+            "data": {"audio": "", "status": 2},
+            "extra_info": {
+                "audio_length": 7440,
+                "audio_sample_rate": STREAM_SAMPLE_RATE,
+                "audio_size": len(audio),
+                "word_count": len(text),
+                "usage_characters": len(text),
+                "audio_format": audio_format,
+                "audio_channel": 1,
+            },
+            "trace_id": "mock-t2a",
+            "base_resp": {"status_code": 0, "status_msg": "success"},
+        })
+        self.wfile.write(b"0\r\n\r\n")
 
     def media(self):
         name = "demo.mp3" if self.path.endswith(".mp3") else "demo.mp4"

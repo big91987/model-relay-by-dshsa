@@ -2,8 +2,10 @@ package gateway
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,17 +17,22 @@ import (
 )
 
 var testSpeechAudio = []byte("ID3\x03\x00\x00\x00mock-minimax-speech")
+var testSpeechPCM = []byte{0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0xff, 0x7f, 0x00, 0x80, 0x10, 0x00}
 
 type mockSpeechUpstream struct {
-	mu         sync.Mutex
-	ttsBodies  []map[string]any
-	voiceCalls int
-	voiceCode  int
-	voiceBody  string
-	ttsCode    int
-	ttsBody    string
-	audio      []byte
-	server     *httptest.Server
+	mu              sync.Mutex
+	ttsBodies       []map[string]any
+	voiceCalls      int
+	voiceCode       int
+	voiceBody       string
+	ttsCode         int
+	ttsBody         string
+	streamChunks    [][]byte
+	streamCode      int64
+	streamMsg       string
+	streamInterrupt bool
+	audio           []byte
+	server          *httptest.Server
 }
 
 func newMockSpeechUpstream(t *testing.T) *mockSpeechUpstream {
@@ -75,6 +82,10 @@ func newMockSpeechUpstream(t *testing.T) *mockSpeechUpstream {
 				_, _ = io.WriteString(w, raw)
 				return
 			}
+			if stream, _ := body["stream"].(bool); stream {
+				m.writeSpeechStream(w)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"data": map[string]any{"audio": hex.EncodeToString(audio), "status": 2},
 				"extra_info": map[string]any{
@@ -91,6 +102,57 @@ func newMockSpeechUpstream(t *testing.T) *mockSpeechUpstream {
 	}))
 	t.Cleanup(m.server.Close)
 	return m
+}
+
+// writeSpeechStream mimics MiniMax's SSE stream: one JSON payload per data
+// line, status 2 with extra_info on the final chunk.
+func (m *mockSpeechUpstream) writeSpeechStream(w http.ResponseWriter) {
+	m.mu.Lock()
+	chunks := append([][]byte(nil), m.streamChunks...)
+	code, msg := m.streamCode, m.streamMsg
+	interrupt := m.streamInterrupt
+	m.mu.Unlock()
+	if len(chunks) == 0 {
+		chunks = [][]byte{testSpeechPCM[:4], testSpeechPCM[4:8], testSpeechPCM[8:]}
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	if code != 0 {
+		payload, _ := json.Marshal(map[string]any{
+			"data":      nil,
+			"base_resp": map[string]any{"status_code": code, "status_msg": msg},
+		})
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return
+	}
+	for index, chunk := range chunks {
+		status := 1
+		payload := map[string]any{
+			"data":      map[string]any{"audio": hex.EncodeToString(chunk), "status": status},
+			"base_resp": map[string]any{"status_code": 0, "status_msg": ""},
+		}
+		if index == len(chunks)-1 && !interrupt {
+			payload["data"] = map[string]any{"audio": hex.EncodeToString(chunk), "status": 2}
+			payload["extra_info"] = map[string]any{
+				"audio_length":     1234,
+				"audio_format":     "pcm",
+				"audio_size":       len(testSpeechPCM),
+				"usage_characters": 5,
+			}
+		}
+		data, _ := json.Marshal(payload)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+		if flusher != nil {
+			flusher.Flush()
+		}
+		if interrupt {
+			return
+		}
+	}
 }
 
 func TestListSpeechVoices(t *testing.T) {
@@ -322,5 +384,209 @@ func TestCreateSpeechFailsOverToNextChannel(t *testing.T) {
 	}
 	if clip.ChannelName != "good" {
 		t.Fatalf("served by %q, want good", clip.ChannelName)
+	}
+}
+
+func TestStreamSpeech(t *testing.T) {
+	env := newTestEnv(t)
+	upstream := newMockSpeechUpstream(t)
+	channel := env.addChannel(t, "minimax", upstream.server.URL, "minimax", 0, []string{"speech-2.8-hd"}, nil, 0, 0)
+
+	var starts []SpeechStreamInfo
+	var received []byte
+	clip, err := env.gw.StreamSpeech(context.Background(), SpeechRequest{
+		Model:     "speech-2.8-hd",
+		Text:      "Hello from the relay.",
+		VoiceID:   "English_expressive_narrator",
+		VoiceName: "Expressive Narrator",
+		Speed:     1.25,
+	}, SpeechStreamHandlers{
+		OnStart: func(info SpeechStreamInfo) error {
+			starts = append(starts, info)
+			return nil
+		},
+		OnAudio: func(pcm []byte) error {
+			received = append(received, pcm...)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("stream speech: %v", err)
+	}
+	if len(starts) != 1 || starts[0].Format != "pcm" || starts[0].SampleRate != speechStreamSampleRate || starts[0].Channels != 1 {
+		t.Fatalf("unexpected stream start: %+v", starts)
+	}
+	if string(received) != string(testSpeechPCM) {
+		t.Fatalf("streamed PCM = %x, want %x", received, testSpeechPCM)
+	}
+	if clip.ID == 0 || clip.ChannelID != channel.ID || clip.ChannelName != "minimax" {
+		t.Fatalf("unexpected clip: %+v", clip)
+	}
+	if clip.Format != "wav" || clip.DurationMS != 1234 || clip.Characters != 5 {
+		t.Fatalf("unexpected clip metadata: %+v", clip)
+	}
+	if clip.SizeBytes != int64(len(testSpeechPCM)+44) {
+		t.Fatalf("clip size = %d, want %d", clip.SizeBytes, len(testSpeechPCM)+44)
+	}
+
+	stored, err := env.st.GetSpeechClip(clip.ID)
+	if err != nil {
+		t.Fatalf("get speech clip: %v", err)
+	}
+	audio, err := os.ReadFile(filepath.Join(env.gw.cfg.DataDir, stored.AudioPath))
+	if err != nil {
+		t.Fatalf("read stored audio: %v", err)
+	}
+	if string(audio[0:4]) != "RIFF" || string(audio[8:12]) != "WAVE" {
+		t.Fatalf("stored audio is not a WAV file: %x", audio[:12])
+	}
+	if got := binary.LittleEndian.Uint32(audio[24:28]); got != speechStreamSampleRate {
+		t.Fatalf("stored sample rate = %d", got)
+	}
+	if string(audio[44:]) != string(testSpeechPCM) {
+		t.Fatalf("stored PCM = %x, want %x", audio[44:], testSpeechPCM)
+	}
+
+	upstream.mu.Lock()
+	if len(upstream.ttsBodies) != 1 {
+		t.Fatalf("tts calls = %d, want 1", len(upstream.ttsBodies))
+	}
+	body := upstream.ttsBodies[0]
+	upstream.mu.Unlock()
+	if body["stream"] != true || body["output_format"] != "hex" {
+		t.Fatalf("unexpected upstream body: %+v", body)
+	}
+	audioSettings, _ := body["audio_setting"].(map[string]any)
+	if audioSettings["format"] != "pcm" || audioSettings["sample_rate"] != float64(speechStreamSampleRate) ||
+		audioSettings["channel"] != float64(1) {
+		t.Fatalf("unexpected audio settings: %+v", audioSettings)
+	}
+	voice, _ := body["voice_setting"].(map[string]any)
+	if voice["voice_id"] != "English_expressive_narrator" || voice["speed"] != 1.25 {
+		t.Fatalf("unexpected voice settings: %+v", voice)
+	}
+}
+
+func TestStreamSpeechFallsBackToJSON(t *testing.T) {
+	env := newTestEnv(t)
+	upstream := newMockSpeechUpstream(t)
+	// A provider that ignores stream=true answers with one JSON payload.
+	upstream.ttsBody = `{"data":{"audio":"` + hex.EncodeToString(testSpeechPCM) + `","status":2},
+		"extra_info":{"audio_length":900,"audio_format":"pcm","usage_characters":4},
+		"base_resp":{"status_code":0,"status_msg":"success"}}`
+	env.addChannel(t, "minimax", upstream.server.URL, "minimax", 0, []string{"speech-2.8-hd"}, nil, 0, 0)
+
+	var received []byte
+	clip, err := env.gw.StreamSpeech(context.Background(), SpeechRequest{
+		Model: "speech-2.8-hd", Text: "hello", VoiceID: "English_Graceful_Lady",
+	}, SpeechStreamHandlers{
+		OnAudio: func(pcm []byte) error { received = append(received, pcm...); return nil },
+	})
+	if err != nil {
+		t.Fatalf("stream speech: %v", err)
+	}
+	if string(received) != string(testSpeechPCM) || clip.DurationMS != 900 || clip.Characters != 4 {
+		t.Fatalf("unexpected fallback result: received=%x clip=%+v", received, clip)
+	}
+}
+
+func TestStreamSpeechFailsOverBeforeAudio(t *testing.T) {
+	env := newTestEnv(t)
+	bad := newMockSpeechUpstream(t)
+	bad.ttsCode = http.StatusInternalServerError
+	bad.ttsBody = `{"base_resp":{"status_code":1000,"status_msg":"internal error"}}`
+	good := newMockSpeechUpstream(t)
+	env.addChannel(t, "bad", bad.server.URL, "minimax", 10, []string{"speech-2.8-hd"}, nil, 0, 0)
+	env.addChannel(t, "good", good.server.URL, "minimax", 0, []string{"speech-2.8-hd"}, nil, 0, 0)
+
+	clip, err := env.gw.StreamSpeech(context.Background(), SpeechRequest{
+		Model: "speech-2.8-hd", Text: "hello", VoiceID: "English_Graceful_Lady",
+	}, SpeechStreamHandlers{})
+	if err != nil {
+		t.Fatalf("stream speech: %v", err)
+	}
+	if clip.ChannelName != "good" {
+		t.Fatalf("served by %q, want good", clip.ChannelName)
+	}
+}
+
+func TestStreamSpeechReportsBusinessErrorBeforeStart(t *testing.T) {
+	env := newTestEnv(t)
+	upstream := newMockSpeechUpstream(t)
+	upstream.streamCode = 2013
+	upstream.streamMsg = "invalid voice id"
+	env.addChannel(t, "minimax", upstream.server.URL, "minimax", 0, []string{"speech-2.8-hd"}, nil, 0, 0)
+
+	started := false
+	_, err := env.gw.StreamSpeech(context.Background(), SpeechRequest{
+		Model: "speech-2.8-hd", Text: "hello", VoiceID: "missing-voice",
+	}, SpeechStreamHandlers{
+		OnStart: func(SpeechStreamInfo) error { started = true; return nil },
+	})
+	speechErr, ok := err.(*SpeechError)
+	if !ok || speechErr.Status != http.StatusBadRequest {
+		t.Fatalf("error = %v, want 400 SpeechError", err)
+	}
+	if !strings.Contains(speechErr.Message, "invalid voice id") {
+		t.Fatalf("unexpected message: %q", speechErr.Message)
+	}
+	if started {
+		t.Fatal("stream started before the provider rejected the request")
+	}
+}
+
+func TestStreamSpeechInterruptedAfterAudio(t *testing.T) {
+	env := newTestEnv(t)
+	upstream := newMockSpeechUpstream(t)
+	upstream.streamInterrupt = true
+	env.addChannel(t, "minimax", upstream.server.URL, "minimax", 0, []string{"speech-2.8-hd"}, nil, 0, 0)
+
+	var received []byte
+	_, err := env.gw.StreamSpeech(context.Background(), SpeechRequest{
+		Model: "speech-2.8-hd", Text: "hello", VoiceID: "English_Graceful_Lady",
+	}, SpeechStreamHandlers{
+		OnAudio: func(pcm []byte) error { received = append(received, pcm...); return nil },
+	})
+	if len(received) == 0 {
+		t.Fatal("expected the first chunk to reach the caller")
+	}
+	speechErr, ok := err.(*SpeechError)
+	if !ok || speechErr.Status != http.StatusBadGateway {
+		t.Fatalf("error = %v, want 502 SpeechError", err)
+	}
+	if clips, _, err := env.st.ListSpeechClips(1, 10); err != nil || len(clips) != 0 {
+		t.Fatalf("interrupted stream stored a clip: %+v, %v", clips, err)
+	}
+}
+
+func TestPCMToWAV(t *testing.T) {
+	wav := pcmToWAV(testSpeechPCM, speechStreamSampleRate, speechStreamChannels)
+	if len(wav) != len(testSpeechPCM)+44 {
+		t.Fatalf("wav length = %d", len(wav))
+	}
+	if string(wav[0:4]) != "RIFF" || string(wav[8:12]) != "WAVE" || string(wav[12:16]) != "fmt " ||
+		string(wav[36:40]) != "data" {
+		t.Fatalf("unexpected wav header: %x", wav[:44])
+	}
+	if got := binary.LittleEndian.Uint32(wav[4:8]); got != uint32(36+len(testSpeechPCM)) {
+		t.Fatalf("RIFF size = %d", got)
+	}
+	if got := binary.LittleEndian.Uint16(wav[20:22]); got != 1 {
+		t.Fatalf("audio format = %d", got)
+	}
+	if got := binary.LittleEndian.Uint16(wav[22:24]); got != 1 {
+		t.Fatalf("channels = %d", got)
+	}
+	if got := binary.LittleEndian.Uint32(wav[24:28]); got != speechStreamSampleRate {
+		t.Fatalf("sample rate = %d", got)
+	}
+	if got := binary.LittleEndian.Uint16(wav[34:36]); got != 16 {
+		t.Fatalf("bits per sample = %d", got)
+	}
+	if got := binary.LittleEndian.Uint32(wav[40:44]); got != uint32(len(testSpeechPCM)) {
+		t.Fatalf("data size = %d", got)
+	}
+	if string(wav[44:]) != string(testSpeechPCM) {
+		t.Fatalf("wav payload = %x", wav[44:])
 	}
 }
