@@ -43,6 +43,9 @@ type SpeechRequest struct {
 	VoiceID   string
 	VoiceName string
 	Speed     float64
+	// ChannelID pins synthesis to the channel that owns a designed voice. It is
+	// zero for system voices, which may use any channel serving the model.
+	ChannelID int64
 }
 
 // SpeechVoice is one selectable MiniMax system voice.
@@ -228,14 +231,22 @@ func (g *Gateway) CreateSpeech(ctx context.Context, req SpeechRequest) (*store.S
 	}
 	candidates := make([]candidate, 0)
 	for _, cand := range orderCandidates(channels, req.Model) {
-		if cand.channel.Type == "minimax" {
-			candidates = append(candidates, cand)
+		if cand.channel.Type != "minimax" {
+			continue
 		}
+		if req.ChannelID != 0 && cand.channel.ID != req.ChannelID {
+			continue
+		}
+		candidates = append(candidates, cand)
 	}
 	if len(candidates) == 0 {
+		message := fmt.Sprintf("model %q is not available on any enabled MiniMax channel", req.Model)
+		if req.ChannelID != 0 {
+			message = fmt.Sprintf("model %q is not available on the channel that owns this voice", req.Model)
+		}
 		return nil, &SpeechError{
 			Status:  http.StatusNotFound,
-			Message: fmt.Sprintf("model %q is not available on any enabled MiniMax channel", req.Model),
+			Message: message,
 		}
 	}
 

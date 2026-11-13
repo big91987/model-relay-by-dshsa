@@ -98,6 +98,11 @@ func (s *Server) routes() {
 	mux.Handle("GET /api/videos/{id}/content", s.withAdmin(http.HandlerFunc(s.handleVideoContent)))
 
 	mux.Handle("GET /api/speech/voices", s.withAdmin(http.HandlerFunc(s.handleListSpeechVoices)))
+	mux.Handle("GET /api/voice-designs", s.withAdmin(http.HandlerFunc(s.handleListVoiceDesigns)))
+	mux.Handle("POST /api/voice-designs", s.withAdmin(http.HandlerFunc(s.handleCreateVoiceDesign)))
+	mux.Handle("GET /api/voice-designs/{id}", s.withAdmin(http.HandlerFunc(s.handleGetVoiceDesign)))
+	mux.Handle("GET /api/voice-designs/{id}/preview", s.withAdmin(http.HandlerFunc(s.handleVoiceDesignPreview)))
+	mux.Handle("POST /api/voice-designs/{id}/speech", s.withAdmin(http.HandlerFunc(s.handleVoiceDesignSpeech)))
 	mux.Handle("GET /api/speech", s.withAdmin(http.HandlerFunc(s.handleListSpeech)))
 	mux.Handle("POST /api/speech", s.withAdmin(http.HandlerFunc(s.handleCreateSpeech)))
 	mux.Handle("GET /api/speech/{id}", s.withAdmin(http.HandlerFunc(s.handleGetSpeech)))

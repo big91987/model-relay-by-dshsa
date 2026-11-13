@@ -5,6 +5,7 @@ PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 19090
 MEDIA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
 VIDEO_TASKS = {}
 VIDEO_LOCK = threading.Lock()
+VOICE_DESIGNS = {}
 
 SYSTEM_VOICES = [
     {"voice_id": "English_expressive_narrator", "voice_name": "Expressive Narrator",
@@ -93,6 +94,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.get_voice()
         if self.path.endswith("/v1/t2a_v2"):
             return self.text_to_speech(body)
+        if self.path.endswith("/v1/voice_design"):
+            return self.voice_design(body)
         self.send_json(404, {"error": {"message": "not found"}})
 
     def create_video(self, body):
@@ -236,6 +239,27 @@ class Handler(BaseHTTPRequestHandler):
                 "audio_channel": 1,
             },
             "trace_id": "mock-t2a",
+            "base_resp": {"status_code": 0, "status_msg": "success"},
+        })
+
+    def voice_design(self, body):
+        if self.headers.get("Authorization") != "Bearer upstream-key":
+            return self.send_json(401, {"base_resp": {"status_code": 1004, "status_msg": "login fail"}})
+        prompt = str(body.get("prompt", "")).strip()
+        preview = str(body.get("preview_text", "")).strip()
+        if not prompt or not preview:
+            return self.send_json(200, {"base_resp": {"status_code": 2013, "status_msg": "prompt and preview_text are required"}})
+        if "error" in prompt.lower() or "error" in preview.lower():
+            return self.send_json(200, {"base_resp": {"status_code": 2013, "status_msg": "the description was rejected by the mock upstream"}})
+        with VIDEO_LOCK:
+            voice_id = str(body.get("voice_id", "")).strip() or "ttv-voice-mock-%04d" % (len(VOICE_DESIGNS) + 1)
+            VOICE_DESIGNS[voice_id] = {"prompt": prompt, "preview_text": preview}
+        with open(os.path.join(MEDIA_DIR, "demo.mp3"), "rb") as handle:
+            audio = handle.read()
+        sys.stderr.write("mock voice_design voice=%s prompt=%r\n" % (voice_id, prompt[:60]))
+        self.send_json(200, {
+            "voice_id": voice_id,
+            "trial_audio": audio.hex(),
             "base_resp": {"status_code": 0, "status_msg": "success"},
         })
 
