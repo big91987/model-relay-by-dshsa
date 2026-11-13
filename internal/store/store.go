@@ -624,11 +624,20 @@ type LogFilter struct {
 	End       int64
 }
 
-// LogSummary aggregates every log that matches a filter, not just one page.
-type LogSummary struct {
+// ModelCost aggregates the logs of one model that match a filter.
+type ModelCost struct {
+	Model          string  `json:"model"`
 	Requests       int64   `json:"requests"`
 	Cost           float64 `json:"cost"`
 	UnverifiedCost float64 `json:"unverified_cost"`
+}
+
+// LogSummary aggregates every log that matches a filter, not just one page.
+type LogSummary struct {
+	Requests       int64       `json:"requests"`
+	Cost           float64     `json:"cost"`
+	UnverifiedCost float64     `json:"unverified_cost"`
+	ByModel        []ModelCost `json:"by_model"`
 }
 
 // LogPage is one page of logs plus aggregate totals across every match.
@@ -690,11 +699,28 @@ func (s *Store) ListLogsPage(f LogFilter) (*LogPage, error) {
 		f.PageSize = 50
 	}
 	where, args := logWhere(f)
-	var summary LogSummary
+	summary := LogSummary{ByModel: make([]ModelCost, 0)}
 	if err := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(cost), 0),
 		COALESCE(SUM(CASE WHEN cost_status = 'unverified' THEN cost ELSE 0 END), 0)
 		FROM logs`+where, args...).
 		Scan(&summary.Requests, &summary.Cost, &summary.UnverifiedCost); err != nil {
+		return nil, err
+	}
+	modelRows, err := s.db.Query(`SELECT model, COUNT(*), COALESCE(SUM(cost), 0),
+		COALESCE(SUM(CASE WHEN cost_status = 'unverified' THEN cost ELSE 0 END), 0)
+		FROM logs`+where+` GROUP BY model ORDER BY SUM(cost) DESC, COUNT(*) DESC, model ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer modelRows.Close()
+	for modelRows.Next() {
+		var item ModelCost
+		if err := modelRows.Scan(&item.Model, &item.Requests, &item.Cost, &item.UnverifiedCost); err != nil {
+			return nil, err
+		}
+		summary.ByModel = append(summary.ByModel, item)
+	}
+	if err := modelRows.Err(); err != nil {
 		return nil, err
 	}
 	queryArgs := append(append([]any{}, args...), f.PageSize, (f.Page-1)*f.PageSize)

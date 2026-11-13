@@ -1493,6 +1493,16 @@ select.input {
   color: var(--danger-text);
 }
 
+.cost-unverified {
+  color: var(--danger-text);
+}
+
+.cost-by-model-table th,
+.cost-by-model-table td {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
 /* ---------- chips, badges, switches ---------- */
 
 .chip-row {

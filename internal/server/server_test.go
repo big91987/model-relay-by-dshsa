@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -718,8 +719,12 @@ func TestLogsSummaryStableAcrossPages(t *testing.T) {
 	ts, st := newTestServer(t)
 	now := time.Now().Unix()
 	for i, cost := range []float64{0.25, 0.5, 0.75} {
+		model := "m-a"
+		if i > 0 {
+			model = "m-b"
+		}
 		if err := st.InsertLog(&store.Log{
-			RequestID: fmt.Sprintf("summary-req-%d", i), Model: "m", Status: "success",
+			RequestID: fmt.Sprintf("summary-req-%d", i), Model: model, Status: "success",
 			Cost: cost, CostStatus: "actual", CreatedAt: now - int64(i),
 		}); err != nil {
 			t.Fatalf("seed log: %v", err)
@@ -754,12 +759,24 @@ func TestLogsSummaryStableAcrossPages(t *testing.T) {
 	if first.Total != 3 || first.Summary.Requests != 3 || math.Abs(first.Summary.Cost-1.5) > 1e-9 {
 		t.Fatalf("unexpected first-page summary: %+v", first)
 	}
+	wantModels := []store.ModelCost{
+		{Model: "m-b", Requests: 2, Cost: 1.25},
+		{Model: "m-a", Requests: 1, Cost: 0.25},
+	}
+	if !reflect.DeepEqual(first.Summary.ByModel, wantModels) {
+		t.Fatalf("unexpected per-model breakdown: got=%+v want=%+v", first.Summary.ByModel, wantModels)
+	}
 	second := fetch("page=2&page_size=1")
-	if second.Total != 3 || second.Summary != first.Summary {
+	if second.Total != 3 || !reflect.DeepEqual(second.Summary, first.Summary) {
 		t.Fatalf("summary must stay constant while paging: first=%+v second=%+v", first, second)
 	}
 	filtered := fetch(fmt.Sprintf("start=%d&end=%d", now-1, now))
 	if filtered.Summary.Requests != 2 || math.Abs(filtered.Summary.Cost-0.75) > 1e-9 {
 		t.Fatalf("period filter must narrow the summary: %+v", filtered.Summary)
+	}
+	if len(filtered.Summary.ByModel) != 2 ||
+		filtered.Summary.ByModel[0] != (store.ModelCost{Model: "m-b", Requests: 1, Cost: 0.5}) ||
+		filtered.Summary.ByModel[1] != (store.ModelCost{Model: "m-a", Requests: 1, Cost: 0.25}) {
+		t.Fatalf("period filter must narrow the per-model breakdown: %+v", filtered.Summary.ByModel)
 	}
 }

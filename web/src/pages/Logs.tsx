@@ -12,6 +12,7 @@ import {
   formatNumber,
   formatTime,
   parseLocalDateTime,
+  percent,
 } from '../lib/format'
 import { useToast } from '../lib/toast'
 import type { LogItem, LogsResponse, Token } from '../lib/types'
@@ -205,6 +206,53 @@ export default function Logs() {
                 {formatCost(data.summary.unverified_cost)} unverified
               </span>
             ) : null}
+          </div>
+        </section>
+      ) : null}
+
+      {!loading && data && data.summary.by_model.length > 0 ? (
+        <section className="panel cost-by-model" aria-label="Cost by model for the selected period">
+          <div className="panel-head">
+            <div>
+              <h2>Cost by model</h2>
+              <p>Same filters and period as the total above.</p>
+            </div>
+            <span className="badge badge-muted">
+              {formatNumber(data.summary.by_model.length)} {data.summary.by_model.length === 1 ? 'model' : 'models'}
+            </span>
+          </div>
+          <div className="table-wrap">
+            <table className="table cost-by-model-table">
+              <thead>
+                <tr>
+                  <th>Model</th>
+                  <th className="num">Requests</th>
+                  <th className="num">Share</th>
+                  <th className="num">Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.summary.by_model.map((item) => (
+                  <tr key={item.model || '(unknown)'}>
+                    <td>
+                      <div className="cell-title mono">{item.model || 'Unknown model'}</div>
+                    </td>
+                    <td className="num">{formatNumber(item.requests)}</td>
+                    <td className="num muted">{percent(item.cost, data.summary.cost).toFixed(1)}%</td>
+                    <td className="num">
+                      <div className="cost-cell">
+                        <span>{formatCost(item.cost)}</span>
+                      </div>
+                      {item.unverified_cost > 0 ? (
+                        <div className="cell-sub cost-unverified">
+                          {formatCost(item.unverified_cost)} unverified
+                        </div>
+                      ) : null}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </section>
       ) : null}
