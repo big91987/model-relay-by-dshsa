@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -844,5 +845,257 @@ func TestPlaygroundAdminProxy(t *testing.T) {
 	resp, _ = doJSON(t, client, http.MethodGet, ts.URL+"/api/playground/models?token_id=9999", nil, nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("unknown playground key status %d", resp.StatusCode)
+	}
+}
+
+type speechEvent struct {
+	Event string
+	Data  json.RawMessage
+}
+
+func parseSpeechEvents(t *testing.T, body []byte) []speechEvent {
+	t.Helper()
+	var events []speechEvent
+	for _, block := range strings.Split(strings.TrimSpace(string(body)), "\n\n") {
+		var event speechEvent
+		for _, line := range strings.Split(block, "\n") {
+			switch {
+			case strings.HasPrefix(line, "event:"):
+				event.Event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			case strings.HasPrefix(line, "data:"):
+				event.Data = json.RawMessage(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			}
+		}
+		if event.Event != "" {
+			events = append(events, event)
+		}
+	}
+	return events
+}
+
+func TestMinimaxSpeechStreamFlow(t *testing.T) {
+	ts, _ := newTestServer(t)
+	pcmChunks := [][]byte{{0x00, 0x00, 0x01, 0x00}, {0x02, 0x00, 0x03, 0x00}, {0x04, 0x00, 0x05, 0x00}}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer upstream-key" {
+			t.Errorf("unexpected upstream auth: %q", r.Header.Get("Authorization"))
+		}
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/get_voice":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"system_voice":[
+				{"voice_id":"English_expressive_narrator","voice_name":"Expressive Narrator","description":["Clear English narrator."]}
+			],"base_resp":{"status_code":0,"status_msg":"success"}}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/t2a_v2":
+			var body struct {
+				Model        string `json:"model"`
+				Text         string `json:"text"`
+				Stream       bool   `json:"stream"`
+				OutputFormat string `json:"output_format"`
+				AudioSetting struct {
+					Format     string `json:"format"`
+					SampleRate int    `json:"sample_rate"`
+					Channel    int    `json:"channel"`
+				} `json:"audio_setting"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode speech request: %v", err)
+			}
+			if !body.Stream || body.OutputFormat != "hex" || body.AudioSetting.Format != "pcm" ||
+				body.AudioSetting.SampleRate != 32000 || body.AudioSetting.Channel != 1 {
+				t.Errorf("unexpected streaming request: %+v", body)
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher, _ := w.(http.Flusher)
+			for index, chunk := range pcmChunks {
+				payload := map[string]any{
+					"data":      map[string]any{"audio": fmt.Sprintf("%x", chunk), "status": 1},
+					"base_resp": map[string]any{"status_code": 0, "status_msg": ""},
+				}
+				if index == len(pcmChunks)-1 {
+					payload["data"] = map[string]any{"audio": fmt.Sprintf("%x", chunk), "status": 2}
+					payload["extra_info"] = map[string]any{
+						"audio_length":     1500,
+						"audio_format":     "pcm",
+						"audio_size":       len(pcmChunks) * 4,
+						"usage_characters": 23,
+					}
+				}
+				data, _ := json.Marshal(payload)
+				_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	client := newClient(t)
+	if resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/auth/login", map[string]any{
+		"username": "admin", "password": "admin-pass",
+	}, nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status %d: %s", resp.StatusCode, body)
+	}
+	resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/channels", map[string]any{
+		"name": "minimax-speech", "type": "minimax", "base_url": upstream.URL, "api_key": "upstream-key",
+		"models": []string{"speech-2.8-hd"}, "priority": 0, "weight": 1, "status": "enabled",
+	}, nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create channel status %d: %s", resp.StatusCode, body)
+	}
+
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/speech/stream", map[string]any{
+		"model": "speech-2.8-hd", "text": "Hello from the console.",
+		"voice_id": "English_expressive_narrator", "voice_name": "Expressive Narrator", "speed": 1.1,
+	}, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stream speech status %d: %s", resp.StatusCode, body)
+	}
+	if contentType := resp.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "text/event-stream") {
+		t.Fatalf("content type = %q", contentType)
+	}
+	events := parseSpeechEvents(t, body)
+	if len(events) != len(pcmChunks)+2 {
+		t.Fatalf("events = %d, want %d: %s", len(events), len(pcmChunks)+2, body)
+	}
+	if events[0].Event != "meta" {
+		t.Fatalf("first event = %+v", events[0])
+	}
+	var meta struct {
+		Format     string `json:"format"`
+		SampleRate int    `json:"sample_rate"`
+		Channels   int    `json:"channels"`
+	}
+	if err := json.Unmarshal(events[0].Data, &meta); err != nil {
+		t.Fatalf("decode meta: %v", err)
+	}
+	if meta.Format != "pcm" || meta.SampleRate != 32000 || meta.Channels != 1 {
+		t.Fatalf("unexpected meta: %+v", meta)
+	}
+	var streamed []byte
+	for _, event := range events[1 : len(events)-1] {
+		if event.Event != "audio" {
+			t.Fatalf("unexpected event %q", event.Event)
+		}
+		var payload struct {
+			Audio string `json:"audio"`
+		}
+		if err := json.Unmarshal(event.Data, &payload); err != nil {
+			t.Fatalf("decode audio: %v", err)
+		}
+		chunk, err := base64.StdEncoding.DecodeString(payload.Audio)
+		if err != nil {
+			t.Fatalf("decode audio chunk: %v", err)
+		}
+		streamed = append(streamed, chunk...)
+	}
+	expected := bytes.Join(pcmChunks, nil)
+	if !bytes.Equal(streamed, expected) {
+		t.Fatalf("streamed audio = %x, want %x", streamed, expected)
+	}
+	if events[len(events)-1].Event != "done" {
+		t.Fatalf("last event = %+v", events[len(events)-1])
+	}
+	var done struct {
+		Clip struct {
+			ID         int64  `json:"id"`
+			Format     string `json:"format"`
+			DurationMS int64  `json:"duration_ms"`
+			AudioReady bool   `json:"audio_ready"`
+			ContentURL string `json:"content_url"`
+		} `json:"clip"`
+	}
+	if err := json.Unmarshal(events[len(events)-1].Data, &done); err != nil {
+		t.Fatalf("decode done: %v", err)
+	}
+	if done.Clip.ID == 0 || done.Clip.Format != "wav" || done.Clip.DurationMS != 1500 ||
+		!done.Clip.AudioReady || done.Clip.ContentURL != fmt.Sprintf("/api/speech/%d/content", done.Clip.ID) {
+		t.Fatalf("unexpected clip: %+v", done.Clip)
+	}
+
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+done.Clip.ContentURL, nil, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("content status %d: %s", resp.StatusCode, body)
+	}
+	if contentType := resp.Header.Get("Content-Type"); contentType != "audio/wav" {
+		t.Fatalf("content type = %q", contentType)
+	}
+	if !bytes.HasPrefix(body, []byte("RIFF")) || !bytes.Equal(body[44:], expected) {
+		t.Fatalf("stored WAV is not the streamed PCM: %x", body)
+	}
+
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/speech/stream", map[string]any{
+		"model": "speech-2.8-hd", "text": "", "voice_id": "English_expressive_narrator",
+	}, nil)
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), `"error"`) {
+		t.Fatalf("empty text status %d: %s", resp.StatusCode, body)
+	}
+}
+
+func TestMinimaxSpeechStreamErrorEvent(t *testing.T) {
+	ts, st := newTestServer(t)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/t2a_v2" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		chunk, _ := json.Marshal(map[string]any{
+			"data":      map[string]any{"audio": "00000000", "status": 1},
+			"base_resp": map[string]any{"status_code": 0, "status_msg": ""},
+		})
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", chunk)
+		if flusher != nil {
+			flusher.Flush()
+		}
+		failure, _ := json.Marshal(map[string]any{
+			"data":      nil,
+			"base_resp": map[string]any{"status_code": 2013, "status_msg": "the text was rejected"},
+		})
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", failure)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	client := newClient(t)
+	if resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/auth/login", map[string]any{
+		"username": "admin", "password": "admin-pass",
+	}, nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status %d: %s", resp.StatusCode, body)
+	}
+	resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/channels", map[string]any{
+		"name": "minimax-speech", "type": "minimax", "base_url": upstream.URL, "api_key": "upstream-key",
+		"models": []string{"speech-2.8-hd"}, "priority": 0, "weight": 1, "status": "enabled",
+	}, nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create channel status %d: %s", resp.StatusCode, body)
+	}
+
+	resp, body = doJSON(t, client, http.MethodPost, ts.URL+"/api/speech/stream", map[string]any{
+		"model": "speech-2.8-hd", "text": "Hello from the console.",
+		"voice_id": "English_expressive_narrator",
+	}, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stream status %d: %s", resp.StatusCode, body)
+	}
+	events := parseSpeechEvents(t, body)
+	if len(events) != 3 || events[0].Event != "meta" || events[1].Event != "audio" || events[2].Event != "error" {
+		t.Fatalf("unexpected events: %s", body)
+	}
+	if !strings.Contains(string(events[2].Data), "the text was rejected") {
+		t.Fatalf("unexpected error event: %s", events[2].Data)
+	}
+	clips, _, err := st.ListSpeechClips(1, 10)
+	if err != nil {
+		t.Fatalf("list speech: %v", err)
+	}
+	if len(clips) != 0 {
+		t.Fatalf("failed stream stored a clip: %+v", clips)
 	}
 }
