@@ -132,3 +132,86 @@ func TestListLogsByRequestID(t *testing.T) {
 		t.Fatalf("ListLogs by request id: total=%d logs=%+v err=%v", total, logs, err)
 	}
 }
+
+func TestSpeechClipBackgroundJobMigration(t *testing.T) {
+	s := testStore(t)
+	if _, err := s.db.Exec(`DROP TABLE speech_clips`); err != nil {
+		t.Fatalf("drop speech_clips: %v", err)
+	}
+	if _, err := s.db.Exec(`CREATE TABLE speech_clips (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		channel_id INTEGER NOT NULL DEFAULT 0,
+		channel_name TEXT NOT NULL DEFAULT '',
+		model TEXT NOT NULL DEFAULT '',
+		upstream_model TEXT NOT NULL DEFAULT '',
+		voice_id TEXT NOT NULL DEFAULT '',
+		voice_name TEXT NOT NULL DEFAULT '',
+		text TEXT NOT NULL DEFAULT '',
+		format TEXT NOT NULL DEFAULT 'mp3',
+		audio_path TEXT NOT NULL DEFAULT '',
+		duration_ms INTEGER NOT NULL DEFAULT 0,
+		characters INTEGER NOT NULL DEFAULT 0,
+		size_bytes INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL
+	)`); err != nil {
+		t.Fatalf("create legacy speech_clips: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO speech_clips (channel_name, model, voice_id, text, format, audio_path, duration_ms, characters, size_bytes, created_at)
+		VALUES ('old', 'speech-2.8-hd', 'voice', 'legacy clip', 'mp3', 'speech/old.mp3', 1000, 11, 42, 1)`); err != nil {
+		t.Fatalf("insert legacy clip: %v", err)
+	}
+
+	if err := s.migrate(); err != nil {
+		t.Fatalf("migrate legacy speech_clips: %v", err)
+	}
+	legacy, err := s.GetSpeechClip(1)
+	if err != nil {
+		t.Fatalf("get legacy clip: %v", err)
+	}
+	if legacy.Status != "succeeded" || legacy.Speed != 1 || legacy.TotalChunks != 0 || legacy.DoneChunks != 0 {
+		t.Fatalf("legacy clip was not upgraded: %+v", legacy)
+	}
+
+	job := &SpeechClip{
+		ChannelID: 2, ChannelName: "minimax", Model: "speech-2.8-hd", VoiceID: "voice",
+		Text: "long text", Speed: 1.25, Status: "queued", TotalChunks: 3,
+	}
+	if err := s.CreateSpeechClip(job); err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	job.Status = "running"
+	job.DoneChunks = 1
+	job.DurationMS = 500
+	job.SizeBytes = 64
+	if err := s.UpdateSpeechClip(job); err != nil {
+		t.Fatalf("update job: %v", err)
+	}
+	stored, err := s.GetSpeechClip(job.ID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if stored.Status != "running" || stored.DoneChunks != 1 || stored.TotalChunks != 3 || stored.Speed != 1.25 {
+		t.Fatalf("unexpected stored job: %+v", stored)
+	}
+	clips, err := s.ListResumableSpeechClips()
+	if err != nil {
+		t.Fatalf("list resumable: %v", err)
+	}
+	if len(clips) != 1 || clips[0].ID != job.ID {
+		t.Fatalf("resumable clips = %+v", clips)
+	}
+
+	job.Status = "succeeded"
+	job.DoneChunks = 3
+	job.AudioPath = "speech/done.mp3"
+	if err := s.UpdateSpeechClip(job); err != nil {
+		t.Fatalf("finish job: %v", err)
+	}
+	clips, err = s.ListResumableSpeechClips()
+	if err != nil {
+		t.Fatalf("list resumable after finish: %v", err)
+	}
+	if len(clips) != 0 {
+		t.Fatalf("finished job was still resumable: %+v", clips)
+	}
+}
