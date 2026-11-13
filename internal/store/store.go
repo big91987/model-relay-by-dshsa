@@ -186,6 +186,23 @@ func (s *Store) migrate() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_video_tasks_created_at ON video_tasks(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_video_tasks_status ON video_tasks(status)`,
+		`CREATE TABLE IF NOT EXISTS speech_clips (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			channel_id INTEGER NOT NULL DEFAULT 0,
+			channel_name TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			upstream_model TEXT NOT NULL DEFAULT '',
+			voice_id TEXT NOT NULL DEFAULT '',
+			voice_name TEXT NOT NULL DEFAULT '',
+			text TEXT NOT NULL DEFAULT '',
+			format TEXT NOT NULL DEFAULT 'mp3',
+			audio_path TEXT NOT NULL DEFAULT '',
+			duration_ms INTEGER NOT NULL DEFAULT 0,
+			characters INTEGER NOT NULL DEFAULT 0,
+			size_bytes INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_speech_clips_created_at ON speech_clips(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_request_id ON logs(request_id)`,
 	}
 	for _, stmt := range stmts {
@@ -810,6 +827,90 @@ func scanVideoTask(row interface{ Scan(dest ...any) error }) (*VideoTask, error)
 		return nil, err
 	}
 	return &v, nil
+}
+
+// SpeechClip is one completed MiniMax text-to-speech synthesis.
+type SpeechClip struct {
+	ID            int64  `json:"id"`
+	ChannelID     int64  `json:"channel_id"`
+	ChannelName   string `json:"channel_name"`
+	Model         string `json:"model"`
+	UpstreamModel string `json:"upstream_model"`
+	VoiceID       string `json:"voice_id"`
+	VoiceName     string `json:"voice_name"`
+	Text          string `json:"text"`
+	Format        string `json:"format"`
+	AudioPath     string `json:"-"`
+	DurationMS    int64  `json:"duration_ms"`
+	Characters    int64  `json:"characters"`
+	SizeBytes     int64  `json:"size_bytes"`
+	CreatedAt     int64  `json:"created_at"`
+}
+
+const speechClipColumns = `id, channel_id, channel_name, model, upstream_model, voice_id, voice_name, text, format, audio_path, duration_ms, characters, size_bytes, created_at`
+
+// CreateSpeechClip inserts a generated speech clip and sets its id.
+func (s *Store) CreateSpeechClip(c *SpeechClip) error {
+	c.CreatedAt = now()
+	res, err := s.db.Exec(`INSERT INTO speech_clips (channel_id, channel_name, model, upstream_model, voice_id, voice_name,
+		text, format, audio_path, duration_ms, characters, size_bytes, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		c.ChannelID, c.ChannelName, c.Model, c.UpstreamModel, c.VoiceID, c.VoiceName,
+		c.Text, c.Format, c.AudioPath, c.DurationMS, c.Characters, c.SizeBytes, c.CreatedAt)
+	if err != nil {
+		return err
+	}
+	c.ID, err = res.LastInsertId()
+	return err
+}
+
+// GetSpeechClip returns a speech clip by id.
+func (s *Store) GetSpeechClip(id int64) (*SpeechClip, error) {
+	row := s.db.QueryRow(`SELECT `+speechClipColumns+` FROM speech_clips WHERE id = ?`, id)
+	c, err := scanSpeechClip(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return c, err
+}
+
+// ListSpeechClips returns one page of speech clips, newest first, with the total count.
+func (s *Store) ListSpeechClips(page, pageSize int) ([]SpeechClip, int64, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	var total int64
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM speech_clips`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.Query(`SELECT `+speechClipColumns+` FROM speech_clips ORDER BY id DESC LIMIT ? OFFSET ?`,
+		pageSize, (page-1)*pageSize)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := make([]SpeechClip, 0)
+	for rows.Next() {
+		c, err := scanSpeechClip(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, *c)
+	}
+	return out, total, rows.Err()
+}
+
+func scanSpeechClip(row interface{ Scan(dest ...any) error }) (*SpeechClip, error) {
+	var c SpeechClip
+	err := row.Scan(&c.ID, &c.ChannelID, &c.ChannelName, &c.Model, &c.UpstreamModel, &c.VoiceID, &c.VoiceName,
+		&c.Text, &c.Format, &c.AudioPath, &c.DurationMS, &c.Characters, &c.SizeBytes, &c.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
 }
 
 // Totals aggregates request counts, token usage and spend.

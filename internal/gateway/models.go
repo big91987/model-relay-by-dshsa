@@ -29,6 +29,20 @@ var minimaxVideoModels = []string{
 	"MiniMax-H3-Max",
 }
 
+// MiniMax's model list does not consistently include the speech synthesis
+// family either. Add the documented T2A models so the Speech page works right
+// after a channel fetch.
+var minimaxSpeechModels = []string{
+	"speech-2.8-hd",
+	"speech-2.8-turbo",
+	"speech-2.6-hd",
+	"speech-2.6-turbo",
+	"speech-02-hd",
+	"speech-02-turbo",
+	"speech-01-hd",
+	"speech-01-turbo",
+}
+
 // Ark's /api/v3/models endpoint lists the models an account can call. Seedance
 // is newer than most listings, so keep a small fallback catalog to make the
 // video page usable right after a fetch.
@@ -112,6 +126,13 @@ func (g *Gateway) FetchModels(ctx context.Context, channelType, baseURL, apiKey 
 	}
 	if channelType == "minimax" {
 		for _, id := range minimaxVideoModels {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			models = append(models, id)
+		}
+		for _, id := range minimaxSpeechModels {
 			if seen[id] {
 				continue
 			}
