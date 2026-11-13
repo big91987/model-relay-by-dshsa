@@ -12,7 +12,7 @@ A self-hosted model gateway written in Go, with a React admin console. It expose
 - **Channel routing** — priority first, weighted load balancing inside a priority, public-to-upstream model aliases, and automatic failover on connection errors, `401`, `403`, `404`, `429` and `5xx`.
 - **Upstream model discovery** — fetch the provider's model list in the channel form, tick the models to import, and keep manual entries and public aliases.
 - **Gateway keys** — per-key USD balance, daily spending budget, model allowlists, requests-per-minute, tokens-per-minute and concurrency limits, expiry, enable/disable, and a one-time plaintext reveal at creation.
-- **Usage accounting** — prompt/completion tokens and cost from per-channel input/output prices, request logs with status, upstream model, latency and error detail.
+- **Usage accounting** — prompt/completion tokens and cost from per-channel input/output prices, request logs with status, upstream model, latency and error detail. Filtered request detail can be downloaded as CSV for finance reconciliation.
 - **Admin console** — dashboard with 7-day traffic, top models and recent requests; channel, model, API key and log pages.
 - **Playground** — select an existing gateway key and try any model it can access: multi-turn chat, editable system prompt, temperature and max output, streaming, stop, and request IDs that link to the request log.
 - **Simple to operate** — one Go binary with the console embedded, SQLite storage, no Redis or Postgres, graceful shutdown.
@@ -264,6 +264,7 @@ Admin endpoints use the `mr_session` HttpOnly cookie created by `POST /api/auth/
 | `GET/POST /api/tokens` | session | List/create gateway keys. Creation returns the plaintext key once. |
 | `PUT/DELETE /api/tokens/{id}` | session | Update/delete a key. |
 | `GET /api/logs` | session | Paginated logs; filters: `model`, `status`, `request_id`, `token_id`, `start`, `end`, `page`, `page_size`. |
+| `GET /api/logs/export` | session | Download matching logs as a UTF-8 CSV; same filters as `/api/logs`, paging ignored. |
 | `GET /api/ledger` | session | Recent quota reservations and pending cost; `limit` defaults to 100. |
 | `GET /api/models` | session | Model catalog with channels, protocols and prices. |
 | `GET /api/playground/models?token_id=…` | session | Models available to a selected gateway key for Playground. |
@@ -277,6 +278,8 @@ Admin endpoints use the `mr_session` HttpOnly cookie created by `POST /api/auth/
 | `GET /healthz` | — | Liveness check. |
 
 Gateway responses include an `X-Request-Id` header; the same value is stored on the request log, so it can be pasted into the log page filter or queried with `GET /api/logs?request_id=…`. Gateway errors use the OpenAI error envelope, e.g. `{"error":{"message":"…","type":"invalid_api_key","code":"invalid_api_key"}}`.
+
+`GET /api/logs/export` streams a CSV with one row per call: RFC 3339 time, request ID, key name, channel name, public and upstream model, prompt/completion/total tokens, cost in USD, cost basis (`actual`, `estimated`, `unverified`, `free` or `pending`), request status, HTTP status, latency, streaming flag and error text. It accepts the same filters as `GET /api/logs`, so a finance export can be limited with `start`/`end` (unix seconds), `token_id`, `model` and `status`. The file starts with a UTF-8 BOM so Excel opens it correctly. A row whose cost basis is `unverified` has unknown real usage, so its `cost_usd` cell is `unknown` instead of the reserved upper bound; its `cost_status` stays `unverified`.
 
 ## Development
 

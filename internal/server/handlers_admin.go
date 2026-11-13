@@ -1,12 +1,14 @@
 package server
 
 import (
+	"encoding/csv"
 	"errors"
 	"net/http"
 	"net/url"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/big91987/model-relay-by-dshsa/internal/auth"
 	"github.com/big91987/model-relay-by-dshsa/internal/store"
@@ -482,24 +484,7 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListLogs(w http.ResponseWriter, r *http.Request) {
-	filter := store.LogFilter{
-		Page:      queryInt(r, "page", 1),
-		PageSize:  queryInt(r, "page_size", 50),
-		Model:     strings.TrimSpace(r.URL.Query().Get("model")),
-		Status:    strings.TrimSpace(r.URL.Query().Get("status")),
-		RequestID: strings.TrimSpace(r.URL.Query().Get("request_id")),
-		TokenID:   int64(queryInt(r, "token_id", 0)),
-	}
-	if v := r.URL.Query().Get("start"); v != "" {
-		if n, err := parseInt64(v); err == nil {
-			filter.Start = n
-		}
-	}
-	if v := r.URL.Query().Get("end"); v != "" {
-		if n, err := parseInt64(v); err == nil {
-			filter.End = n
-		}
-	}
+	filter := logFilterFromRequest(r)
 	logs, total, err := s.store.ListLogs(filter)
 	if err != nil {
 		s.logger.Error("list logs failed", "error", err)
@@ -512,6 +497,122 @@ func (s *Server) handleListLogs(w http.ResponseWriter, r *http.Request) {
 		"page":      filter.Page,
 		"page_size": filter.PageSize,
 	})
+}
+
+// logFilterFromRequest reads the filters shared by the log list and its CSV
+// export. Both endpoints accept the same query parameters.
+func logFilterFromRequest(r *http.Request) store.LogFilter {
+	query := r.URL.Query()
+	filter := store.LogFilter{
+		Page:      queryInt(r, "page", 1),
+		PageSize:  queryInt(r, "page_size", 50),
+		Model:     strings.TrimSpace(query.Get("model")),
+		Status:    strings.TrimSpace(query.Get("status")),
+		RequestID: strings.TrimSpace(query.Get("request_id")),
+		TokenID:   int64(queryInt(r, "token_id", 0)),
+	}
+	if v := query.Get("start"); v != "" {
+		if n, err := parseInt64(v); err == nil {
+			filter.Start = n
+		}
+	}
+	if v := query.Get("end"); v != "" {
+		if n, err := parseInt64(v); err == nil {
+			filter.End = n
+		}
+	}
+	return filter
+}
+
+// logExportColumns is the CSV header used for finance reconciliation.
+var logExportColumns = []string{
+	"time", "request_id", "api_key", "channel", "model", "upstream_model",
+	"prompt_tokens", "completion_tokens", "total_tokens", "cost_usd",
+	"cost_status", "status", "status_code", "latency_ms", "stream", "error",
+}
+
+func (s *Server) handleExportLogs(w http.ResponseWriter, r *http.Request) {
+	filter := logFilterFromRequest(r)
+	filename := "model-relay-logs-" + time.Now().Format("20060102-150405") + ".csv"
+	writer := csv.NewWriter(w)
+	started := false
+	start := func() error {
+		if started {
+			return nil
+		}
+		started = true
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+		w.Header().Set("Cache-Control", "no-store")
+		// A UTF-8 BOM makes Excel open non-ASCII names without mojibake.
+		if _, err := w.Write([]byte("\xEF\xBB\xBF")); err != nil {
+			return err
+		}
+		return writer.Write(logExportColumns)
+	}
+	err := s.store.ExportLogs(filter, func(l *store.Log) error {
+		if err := start(); err != nil {
+			return err
+		}
+		return writer.Write(logExportRow(l))
+	})
+	if err != nil {
+		s.logger.Error("export logs failed", "error", err)
+		if !started {
+			writeErr(w, http.StatusInternalServerError, "failed to export logs")
+		} else {
+			writer.Flush()
+		}
+		return
+	}
+	if err := start(); err != nil {
+		s.logger.Error("write log export failed", "error", err)
+		return
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		s.logger.Error("write log export failed", "error", err)
+	}
+}
+
+func logExportRow(l *store.Log) []string {
+	// An unverified charge means the real usage is unknown, so the row must not
+	// present the reserved upper bound as if it were a final cost.
+	cost := strconv.FormatFloat(l.Cost, 'f', -1, 64)
+	if l.CostStatus == store.CostUnverified {
+		cost = "unknown"
+	}
+	return []string{
+		time.Unix(l.CreatedAt, 0).Format(time.RFC3339),
+		csvText(l.RequestID),
+		csvText(l.TokenName),
+		csvText(l.ChannelName),
+		csvText(l.Model),
+		csvText(l.UpstreamModel),
+		strconv.FormatInt(l.PromptTokens, 10),
+		strconv.FormatInt(l.CompletionTokens, 10),
+		strconv.FormatInt(l.TotalTokens, 10),
+		cost,
+		csvText(l.CostStatus),
+		csvText(l.Status),
+		strconv.Itoa(l.StatusCode),
+		strconv.FormatInt(l.LatencyMS, 10),
+		strconv.FormatBool(l.Stream),
+		csvText(l.Error),
+	}
+}
+
+// csvText defuses spreadsheet formulas in values that may come from upstream
+// or user-supplied names. Numbers are written without passing through it.
+func csvText(v string) string {
+	if v == "" {
+		return v
+	}
+	switch v[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + v
+	}
+	return v
 }
 
 func (s *Server) handleListReservations(w http.ResponseWriter, r *http.Request) {

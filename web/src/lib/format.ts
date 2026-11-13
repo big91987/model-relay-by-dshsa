@@ -83,3 +83,16 @@ export function parseLocalDateTime(value: string): number | null {
   if (Number.isNaN(ms)) return null
   return Math.floor(ms / 1000)
 }
+
+/**
+ * parseLocalDate turns a yyyy-mm-dd input value into a unix timestamp for the
+ * start or the end of that local calendar day.
+ */
+export function parseLocalDate(value: string, endOfDay = false): number | undefined {
+  if (!value) return undefined
+  const [year, month, day] = value.split('-').map(Number)
+  if (!year || !month || !day) return undefined
+  const date = new Date(year, month - 1, day + (endOfDay ? 1 : 0))
+  const seconds = Math.floor(date.getTime() / 1000)
+  return endOfDay ? seconds - 1 : seconds
+}

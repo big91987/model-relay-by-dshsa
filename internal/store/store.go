@@ -624,14 +624,12 @@ type LogFilter struct {
 	End       int64
 }
 
-// ListLogs returns one page of logs and the total number of matches.
-func (s *Store) ListLogs(f LogFilter) ([]Log, int64, error) {
-	if f.Page < 1 {
-		f.Page = 1
-	}
-	if f.PageSize < 1 || f.PageSize > 200 {
-		f.PageSize = 50
-	}
+// logColumns is the column list scanLog expects.
+const logColumns = `id, request_id, reservation_id, user_id, token_id, channel_id, token_name, channel_name, model, upstream_model,
+	prompt_tokens, completion_tokens, total_tokens, cost, reserved_cost, cost_status, status, status_code, error, latency_ms, stream, created_at`
+
+// logWhere builds the filter clause shared by log listings and exports.
+func logWhere(f LogFilter) (string, []any) {
 	var clauses []string
 	var args []any
 	if f.Model != "" {
@@ -658,18 +656,27 @@ func (s *Store) ListLogs(f LogFilter) ([]Log, int64, error) {
 		clauses = append(clauses, `created_at <= ?`)
 		args = append(args, f.End)
 	}
-	where := ""
-	if len(clauses) > 0 {
-		where = " WHERE " + joinAnd(clauses)
+	if len(clauses) == 0 {
+		return "", nil
 	}
+	return " WHERE " + joinAnd(clauses), args
+}
+
+// ListLogs returns one page of logs and the total number of matches.
+func (s *Store) ListLogs(f LogFilter) ([]Log, int64, error) {
+	if f.Page < 1 {
+		f.Page = 1
+	}
+	if f.PageSize < 1 || f.PageSize > 200 {
+		f.PageSize = 50
+	}
+	where, args := logWhere(f)
 	var total int64
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM logs`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	queryArgs := append(append([]any{}, args...), f.PageSize, (f.Page-1)*f.PageSize)
-	rows, err := s.db.Query(`SELECT id, request_id, reservation_id, user_id, token_id, channel_id, token_name, channel_name, model, upstream_model,
-		prompt_tokens, completion_tokens, total_tokens, cost, reserved_cost, cost_status, status, status_code, error, latency_ms, stream, created_at
-		FROM logs`+where+` ORDER BY id DESC LIMIT ? OFFSET ?`, queryArgs...)
+	rows, err := s.db.Query(`SELECT `+logColumns+` FROM logs`+where+` ORDER BY id DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -683,6 +690,60 @@ func (s *Store) ListLogs(f LogFilter) ([]Log, int64, error) {
 		out = append(out, *l)
 	}
 	return out, total, rows.Err()
+}
+
+// ExportLogs calls fn for every log matching f, oldest first. Page fields are
+// ignored. Rows are read in bounded batches that are closed before fn is
+// called, so a slow client download does not hold the single SQLite
+// connection and stall the gateway. The newest id is captured up front so
+// requests logged during a long download do not extend the export.
+func (s *Store) ExportLogs(f LogFilter, fn func(*Log) error) error {
+	const batchSize = 500
+	where, baseArgs := logWhere(f)
+	var maxID int64
+	if err := s.db.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM logs`+where, baseArgs...).Scan(&maxID); err != nil {
+		return err
+	}
+	if maxID == 0 {
+		return nil
+	}
+	lastID := int64(0)
+	for {
+		clause := ` WHERE id > ? AND id <= ?`
+		if where != "" {
+			clause = where + ` AND id > ? AND id <= ?`
+		}
+		args := append(append([]any{}, baseArgs...), lastID, maxID, batchSize)
+		rows, err := s.db.Query(`SELECT `+logColumns+` FROM logs`+clause+` ORDER BY id ASC LIMIT ?`, args...)
+		if err != nil {
+			return err
+		}
+		batch := make([]Log, 0, batchSize)
+		for rows.Next() {
+			l, err := scanLog(rows)
+			if err != nil {
+				rows.Close()
+				return err
+			}
+			batch = append(batch, *l)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for i := range batch {
+			if err := fn(&batch[i]); err != nil {
+				return err
+			}
+			lastID = batch[i].ID
+		}
+		if len(batch) < batchSize {
+			return nil
+		}
+	}
 }
 
 func scanLog(row interface{ Scan(dest ...any) error }) (*Log, error) {
