@@ -120,6 +120,13 @@ func TestPostgresMigrationsAndRestart(t *testing.T) {
 	if err := first.CreateMusicTask(music); err != nil {
 		t.Fatalf("CreateMusicTask: %v", err)
 	}
+	clone := &VoiceClone{
+		VoiceID: "voice-authorized-restart", Name: "restart clone", Model: "speech-2.8-hd",
+		SampleFormat: "wav", Authorized: true,
+	}
+	if err := first.CreateVoiceClone(clone); err != nil {
+		t.Fatalf("CreateVoiceClone: %v", err)
+	}
 	if err := first.Close(); err != nil {
 		t.Fatalf("close first: %v", err)
 	}
@@ -168,6 +175,13 @@ func TestPostgresMigrationsAndRestart(t *testing.T) {
 	}
 	if !gotMusic.Instrumental || gotMusic.Prompt != "warm synth" || gotMusic.Lyrics != "la la" {
 		t.Fatalf("music task did not persist: %+v", gotMusic)
+	}
+	gotClone, err := second.GetVoiceClone(clone.ID)
+	if err != nil {
+		t.Fatalf("GetVoiceClone after restart: %v", err)
+	}
+	if !gotClone.Authorized {
+		t.Fatalf("voice clone authorized flag did not persist across restart: %+v", gotClone)
 	}
 }
 
