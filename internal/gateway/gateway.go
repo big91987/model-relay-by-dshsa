@@ -265,7 +265,8 @@ func (g *Gateway) Embeddings(w http.ResponseWriter, r *http.Request, tok *store.
 		return
 	}
 	var payload struct {
-		Model string `json:"model"`
+		Model string          `json:"model"`
+		Input json.RawMessage `json:"input"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
 		msg := "request body must be valid JSON"
@@ -278,6 +279,11 @@ func (g *Gateway) Embeddings(w http.ResponseWriter, r *http.Request, tok *store.
 		msg := "model is required"
 		writeOpenAIError(w, http.StatusBadRequest, msg, "invalid_request_error", "model_required")
 		g.recordFree(tok, requestID, "", false, "error", http.StatusBadRequest, msg, started)
+		return
+	}
+	if msg, code := validateEmbeddingInput(payload.Input); code != "" {
+		writeOpenAIError(w, http.StatusBadRequest, msg, "invalid_request_error", code)
+		g.recordFree(tok, requestID, model, false, "error", http.StatusBadRequest, msg, started)
 		return
 	}
 	if code, msg := authorize(tok, model); code != 0 {
@@ -379,6 +385,49 @@ func (g *Gateway) Embeddings(w http.ResponseWriter, r *http.Request, tok *store.
 	}
 	writeOpenAIError(w, status, msg, "upstream_error", "upstream_unavailable")
 	g.releaseRequest(tok, reservation, lastChannel, "", model, false, "error", status, msg, started)
+}
+
+// validateEmbeddingInput checks the `input` member of an embeddings request
+// before it can reach an upstream channel. A request without usable input would
+// otherwise be forwarded verbatim and billed while returning a meaningless
+// vector, so the gateway rejects it at the public entry point. The accepted
+// forms follow the OpenAI embeddings API: a string, an array of strings, an
+// array of token ids, or an array of token-id arrays. The returned code is
+// empty when the input is acceptable.
+func validateEmbeddingInput(input json.RawMessage) (message, code string) {
+	const shapeMessage = "input must be a string, an array of strings, or an array of token ids"
+	if len(input) == 0 || string(input) == "null" {
+		return "input is required", "input_required"
+	}
+	var value any
+	if err := json.Unmarshal(input, &value); err != nil {
+		return shapeMessage, "invalid_input"
+	}
+	switch v := value.(type) {
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return "input must not be empty", "invalid_input"
+		}
+	case []any:
+		if len(v) == 0 {
+			return "input must not be empty", "invalid_input"
+		}
+		for _, item := range v {
+			switch item := item.(type) {
+			case string:
+				if strings.TrimSpace(item) == "" {
+					return "input must not contain empty strings", "invalid_input"
+				}
+			case float64:
+			case []any:
+			default:
+				return shapeMessage, "invalid_input"
+			}
+		}
+	default:
+		return shapeMessage, "invalid_input"
+	}
+	return "", ""
 }
 
 // Models handles GET /v1/models.
