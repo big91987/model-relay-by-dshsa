@@ -11,6 +11,10 @@ import type {
   SpeechClipsResponse,
   SpeechInput,
   SpeechVoiceCatalog,
+  VoiceDesign,
+  VoiceDesignInput,
+  VoiceDesignsResponse,
+  VoiceDesignSpeechInput,
   TestResult,
   Token,
   TokenInput,
@@ -152,6 +156,18 @@ export const api = {
   },
   createSpeech(input: SpeechInput) {
     return request<SpeechClip>('/api/speech', { method: 'POST', ...jsonBody(input) })
+  },
+  speechClip(id: number) {
+    return request<SpeechClip>(`/api/speech/${id}`)
+  },
+  voiceDesigns() {
+    return request<VoiceDesignsResponse>('/api/voice-designs?limit=50')
+  },
+  createVoiceDesign(input: VoiceDesignInput) {
+    return request<VoiceDesign>('/api/voice-designs', { method: 'POST', ...jsonBody(input) })
+  },
+  speakWithVoiceDesign(id: number, input: VoiceDesignSpeechInput) {
+    return request<SpeechClip>(`/api/voice-designs/${id}/speech`, { method: 'POST', ...jsonBody(input) })
   },
   playgroundModels(tokenId: number) {
     return request<{ data: { id: string }[] }>(`/api/playground/models?token_id=${tokenId}`)
