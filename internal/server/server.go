@@ -97,6 +97,17 @@ func (s *Server) routes() {
 	mux.Handle("GET /api/videos/{id}", s.withAdmin(http.HandlerFunc(s.handleGetVideo)))
 	mux.Handle("GET /api/videos/{id}/content", s.withAdmin(http.HandlerFunc(s.handleVideoContent)))
 
+	mux.Handle("GET /api/speech/voices", s.withAdmin(http.HandlerFunc(s.handleListSpeechVoices)))
+	mux.Handle("GET /api/speech", s.withAdmin(http.HandlerFunc(s.handleListSpeech)))
+	mux.Handle("POST /api/speech", s.withAdmin(http.HandlerFunc(s.handleCreateSpeech)))
+	mux.Handle("GET /api/speech/{id}", s.withAdmin(http.HandlerFunc(s.handleGetSpeech)))
+	mux.Handle("GET /api/speech/{id}/content", s.withAdmin(http.HandlerFunc(s.handleSpeechContent)))
+
+	mux.Handle("GET /api/voice-clones", s.withAdmin(http.HandlerFunc(s.handleListVoiceClones)))
+	mux.Handle("POST /api/voice-clones", s.withAdmin(http.HandlerFunc(s.handleCreateVoiceClone)))
+	mux.Handle("GET /api/voice-clones/{id}/preview", s.withAdmin(http.HandlerFunc(s.handleVoiceClonePreview)))
+	mux.Handle("POST /api/voice-clones/{id}/preview", s.withAdmin(http.HandlerFunc(s.handleRegenerateVoiceClonePreview)))
+
 	mux.Handle("GET /api/playground/models", s.withAdmin(http.HandlerFunc(s.handlePlaygroundModels)))
 	mux.Handle("POST /api/playground/chat", s.withAdmin(http.HandlerFunc(s.handlePlaygroundChat)))
 

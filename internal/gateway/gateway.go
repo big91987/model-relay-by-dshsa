@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/big91987/model-relay-by-dshsa/internal/config"
@@ -30,12 +31,19 @@ type Gateway struct {
 	store   *store.Store
 	secrets *secretbox.Cipher
 	client  *http.Client
-	limits  *limitState
-	logger  *slog.Logger
+	// speechClient has a longer response-header timeout because speech
+	// synthesis of long text can take longer than a normal chat request.
+	speechClient *http.Client
+	limits       *limitState
+	logger       *slog.Logger
 
 	// videoPollInterval controls how often asynchronous video tasks are polled.
 	// Tests shorten it; production uses MiniMax's recommended polling cadence.
 	videoPollInterval time.Duration
+
+	// speechJobs guards each background speech job so a resume cannot start a
+	// second writer for the same clip.
+	speechJobs sync.Map
 }
 
 // New builds a Gateway with a tuned upstream HTTP client.
@@ -54,6 +62,8 @@ func New(cfg *config.Config, st *store.Store, secrets *secretbox.Cipher, logger 
 		ExpectContinueTimeout: time.Second,
 		ResponseHeaderTimeout: 120 * time.Second,
 	}
+	speechTransport := transport.Clone()
+	speechTransport.ResponseHeaderTimeout = 10 * time.Minute
 	pollInterval := cfg.VideoPollInterval
 	if pollInterval <= 0 {
 		pollInterval = 8 * time.Second
@@ -63,6 +73,7 @@ func New(cfg *config.Config, st *store.Store, secrets *secretbox.Cipher, logger 
 		store:             st,
 		secrets:           secrets,
 		client:            &http.Client{Transport: transport},
+		speechClient:      &http.Client{Transport: speechTransport},
 		limits:            newLimitState(),
 		logger:            logger,
 		videoPollInterval: pollInterval,
