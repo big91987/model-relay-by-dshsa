@@ -9,7 +9,7 @@ A self-hosted model gateway written in Go, with a React admin console. It expose
 - **OpenAI-compatible relay** — `POST /v1/chat/completions` (streaming and non-streaming), `POST /v1/embeddings`, `GET /v1/models`.
 - **Two chat upstream protocols** — OpenAI-compatible channels (OpenAI, DeepSeek, Moonshot, Qwen, vLLM, Ollama, …) and Anthropic Messages channels, translated to and from the OpenAI format.
 - **MiniMax-H3 and Seedance video generation** — text-to-video and first-frame image-to-video from the console, with asynchronous tasks, live status, video preview and MP4 download. Supports MiniMax-H3 and ByteDance Seedance on Volcano Ark.
-- **MiniMax text to speech, voice cloning and voice design** — choose a system voice, clone a custom one from an authorized sample recording (uploaded or recorded in the browser), or design one from a text description, then synthesize up to 50,000 characters of speech and replay or download the audio. Long text runs as a background task with live progress that survives a page refresh or a gateway restart. Voice selection, cloning, design, generation and history are console-only.
+- **MiniMax text to speech, voice cloning and voice design** — choose a system voice, clone a custom one from an authorized sample recording (uploaded or recorded in the browser), or design one from a text description, then synthesize up to 50,000 characters of speech. Short text starts playing while it is still being synthesized and can be stopped at any time; long text runs as a background task with live progress that survives a page refresh or a gateway restart. Replay and download the finished audio. Voice selection, cloning, design, generation and history are console-only.
 - **MiniMax Music generation** — write a style description and lyrics, optionally generate an instrumental, then preview the song in the console and download it as MP3 or WAV. Songs render in the background while the console polls live status.
 - **Channel routing** — priority first, weighted load balancing inside a priority, public-to-upstream model aliases, and automatic failover on connection errors, `401`, `403`, `404`, `429` and `5xx`.
 - **Upstream model discovery** — fetch the provider's model list in the channel form, tick the models to import, and keep manual entries and public aliases.
@@ -120,11 +120,12 @@ Then open **Speech** in the console to:
 1. pick a speech model;
 2. pick a system voice. The page reads the account's voices from `POST /v1/get_voice` and groups them by language. If the provider call fails, it falls back to a built-in list and shows the reason;
 3. enter up to 50,000 characters and optionally adjust the speed between 0.5× and 2×;
-4. generate the clip, replay it in the page and download the audio file.
+4. for text up to 2,000 characters, press **Generate and play**: playback starts with the first audio chunk while MiniMax is still synthesizing. **Stop** aborts the browser read and the relay request, so nothing is saved for an unfinished generation. A completed clip is saved in history, where it can be replayed and downloaded;
+5. for longer text, press **Start background task** and follow the progress bar. The task and its finished parts survive a refresh or a gateway restart.
 
-Text up to 2,000 characters is synthesized while the page waits. Longer text is split into parts at paragraph, sentence or clause boundaries and accepted as a background task: the console returns immediately, shows the task with a progress bar, and keeps polling until the merged MP3 is ready. Because the job and its completed parts live in SQLite and `DATA_DIR`, refreshing the page — or restarting the gateway — does not lose the task. Finished parts are reused after a restart, and only the remaining parts are requested again.
+Short text uses MiniMax streaming: the relay requests 16-bit mono PCM chunks from `POST /v1/t2a_v2`, exposes them as server-sent events on `POST /api/speech/stream`, and the browser schedules them through the Web Audio API. The finished stream is wrapped as WAV and stored through the same `speech_clips` path as a synchronous clip. Longer text is split into parts at paragraph, sentence or clause boundaries and accepted as a background task: the console returns immediately, shows the task with a progress bar, and keeps polling until the merged MP3 is ready. Because the job and its completed parts live in SQLite and `DATA_DIR`, refreshing the page — or restarting the gateway — does not lose the task. Finished parts are reused after a restart, and only the remaining parts are requested again.
 
-The Speech model picker lists public models whose ID starts with `speech-`; an alias keeps a `speech-` prefix to appear, for example `speech-my-voice=speech-2.8-hd`. Synthesis uses `POST /v1/t2a_v2` with `output_format: hex`; the gateway decodes each part, strips per-part ID3 metadata, concatenates the MP3 frames and stores the result under `DATA_DIR/speech/` (partial parts stay under `DATA_DIR/speech/jobs/` until the clip is finished). The browser receives the clip only through the authenticated `/api/speech/{id}/content` endpoint, so the upstream key and temporary provider URLs are never exposed. Speech generation is console-only: it is not metered per gateway key and does not appear in request logs.
+The Speech model picker lists public models whose ID starts with `speech-`; an alias keeps a `speech-` prefix to appear, for example `speech-my-voice=speech-2.8-hd`. Long-form synthesis uses `POST /v1/t2a_v2` with `output_format: hex`; the gateway decodes each part, strips per-part ID3 metadata, concatenates the MP3 frames and stores the result under `DATA_DIR/speech/` (partial parts stay under `DATA_DIR/speech/jobs/` until the clip is finished). The browser receives the clip only through the authenticated `/api/speech/{id}/content` endpoint, so the upstream key and temporary provider URLs are never exposed. Speech generation is console-only: it is not metered per gateway key and does not appear in request logs.
 
 ### Voice cloning (MiniMax)
 
@@ -212,9 +213,9 @@ Changing `SECRET_KEY` invalidates admin sessions and makes existing channel keys
 | --- | --- |
 | ![Seedance video generation](docs/screenshots/video-seedance-live.png) | ![Seedance channel](docs/screenshots/channel-seedance-after.png) |
 
-| Text to speech | Text to speech (light) |
+| Text to speech (streaming) | Text to speech (light) |
 | --- | --- |
-| ![Text to speech](docs/screenshots/speech-after.png) | ![Text to speech in light theme](docs/screenshots/speech-light.png) |
+| ![Text to speech streaming while MiniMax synthesizes](docs/screenshots/speech-stream-after.png) | ![Streaming text to speech in light theme](docs/screenshots/speech-stream-light.png) |
 
 | Cloned voices | Clone a voice dialog |
 | --- | --- |
@@ -342,6 +343,7 @@ Admin endpoints use the `mr_session` HttpOnly cookie created by `POST /api/auth/
 | `GET /api/videos/{id}/content` | session | Preview the stored MP4; add `?download=1` for an attachment. |
 | `GET /api/speech/voices?model=…` | session | System voices for the serving MiniMax channel; falls back to a built-in list with a warning. |
 | `GET/POST /api/speech` | session | List speech clips and background tasks / synthesize text with a MiniMax voice. Long text returns `202` with a queued task. |
+| `POST /api/speech/stream` | session | Stream short text as server-sent events: a `meta` event, PCM `audio` events, then a `done` event with the stored clip; failures after the first chunk arrive as an `error` event. Text over 2,000 characters is rejected in favour of the background task. |
 | `GET /api/speech/{id}` | session | One speech clip or job with its status, progress, model, voice and audio metadata. |
 | `GET /api/speech/{id}/content` | session | Stream the finished audio; add `?download=1` for an attachment. Returns `404` until the job completes. |
 | `GET/POST /api/voice-clones` | session | List cloned voices / clone a MiniMax voice from a multipart sample upload. |
@@ -396,7 +398,7 @@ docs/screenshots/      console screenshots used in this README
 - Upstream channel URLs are configured by an authenticated admin. The gateway will fetch whatever URL is configured, so restrict admin access accordingly.
 - The Anthropic adapter translates text, image data URLs, tool calls and tool results. Remote image URLs are not converted. OpenAI's Responses API, audio, rerank and native Anthropic endpoints are out of scope.
 - MiniMax-H3 video tasks are managed from the admin console; there is no gateway-key video API and video generation is not charged against key quotas. Task history and downloaded MP4 files stay in `DATA_DIR` until removed manually.
-- MiniMax speech synthesis, voice cloning and voice design are also console-only: there is no gateway-key speech, cloning or design API and they are not charged against key quotas. Generated audio and partial background-job parts stay in `DATA_DIR` until the clip finishes; finished audio, cloned-voice previews and voice-design previews stay until removed manually. A cloned voice lives on the MiniMax account; the gateway cannot recreate it and MiniMax may delete it after seven days without use.
+- MiniMax speech synthesis, voice cloning and voice design are also console-only: there is no gateway-key speech, cloning or design API and they are not charged against key quotas. Generated audio and partial background-job parts stay in `DATA_DIR` until the clip finishes; finished audio, cloned-voice previews and voice-design previews stay until removed manually. Stopping a streaming generation before MiniMax reaches its final chunk discards that request; only completed short-text clips are stored. A cloned voice lives on the MiniMax account; the gateway cannot recreate it and MiniMax may delete it after seven days without use.
 - MiniMax music generation is console-only too: there is no gateway-key music API and it is not charged against key quotas. Generated songs stay in `DATA_DIR/music/` until removed manually, and a generation interrupted by a restart is marked failed rather than retried.
 - Cost accounting trusts the configured prices and upstream token counts; it is an operational estimate, not an invoice. `estimated` and `unverified` charges are marked explicitly and should be reviewed before using the numbers for billing.
 - Playground uses the selected gateway key through an admin-authenticated server endpoint; the browser never receives the key secret. An admin session can therefore spend any key's quota, so restrict admin access accordingly.
