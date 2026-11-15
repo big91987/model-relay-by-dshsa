@@ -1491,7 +1491,7 @@ func (s *Store) CreateVoiceClone(c *VoiceClone) error {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.VoiceID, c.Name, c.ChannelID, c.ChannelName, c.Model, c.UpstreamModel, c.SampleFormat,
 		c.SampleBytes, c.SourceFilename, c.PreviewText, c.PreviewPath, c.PreviewFormat,
-		c.PreviewDurationMS, c.PreviewCharacters, c.Authorized, c.CreatedAt)
+		c.PreviewDurationMS, c.PreviewCharacters, boolValue(c.Authorized), c.CreatedAt)
 	return err
 }
 

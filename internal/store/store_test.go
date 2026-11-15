@@ -67,6 +67,58 @@ func TestEnsureTestAdminAllowsShortTestPassword(t *testing.T) {
 	}
 }
 
+func TestVoiceCloneAuthorizedRoundTrip(t *testing.T) {
+	s := testStore(t)
+	authorized := &VoiceClone{
+		VoiceID: "voice-authorized", Name: "authorized clone", Model: "speech-2.8-hd",
+		SampleFormat: "wav", SampleBytes: 1024, SourceFilename: "sample.wav",
+		PreviewText: "hello", PreviewPath: "voice-clones/preview.mp3", PreviewFormat: "mp3",
+		Authorized: true,
+	}
+	if err := s.CreateVoiceClone(authorized); err != nil {
+		t.Fatalf("CreateVoiceClone(authorized): %v", err)
+	}
+	got, err := s.GetVoiceClone(authorized.ID)
+	if err != nil {
+		t.Fatalf("GetVoiceClone: %v", err)
+	}
+	if !got.Authorized {
+		t.Fatalf("authorized flag did not survive the write/read round trip: %+v", got)
+	}
+	byVoiceID, err := s.GetVoiceCloneByVoiceID("voice-authorized")
+	if err != nil || !byVoiceID.Authorized {
+		t.Fatalf("GetVoiceCloneByVoiceID authorized=%v err=%v", byVoiceID != nil && byVoiceID.Authorized, err)
+	}
+
+	unauthorized := &VoiceClone{VoiceID: "voice-unauthorized", Name: "old row", Model: "speech-2.8-hd", SampleFormat: "wav", Authorized: false}
+	if err := s.CreateVoiceClone(unauthorized); err != nil {
+		t.Fatalf("CreateVoiceClone(unauthorized): %v", err)
+	}
+	got, err = s.GetVoiceClone(unauthorized.ID)
+	if err != nil {
+		t.Fatalf("GetVoiceClone(unauthorized): %v", err)
+	}
+	if got.Authorized {
+		t.Fatalf("unauthorized row read back as true: %+v", got)
+	}
+	clones, err := s.ListVoiceClones()
+	if err != nil {
+		t.Fatalf("ListVoiceClones: %v", err)
+	}
+	var seen int
+	for _, clone := range clones {
+		if clone.VoiceID == "voice-authorized" {
+			seen++
+			if !clone.Authorized {
+				t.Fatalf("ListVoiceClones lost the authorized flag: %+v", clone)
+			}
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("authorized clone not listed once: %d", seen)
+	}
+}
+
 func TestMusicTaskAndAsyncSpeechColumns(t *testing.T) {
 	s := testStore(t)
 	speech := &SpeechClip{
