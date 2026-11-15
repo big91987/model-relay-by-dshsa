@@ -2162,6 +2162,21 @@ select.input {
   transition: width 0.35s ease;
 }
 
+.speech-progress-indeterminate .speech-progress-bar {
+  width: 38%;
+  transition: none;
+  animation: speech-progress-slide 1.4s ease-in-out infinite;
+}
+
+@keyframes speech-progress-slide {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
 .speech-task-note {
   color: var(--muted);
   font-size: 11px;

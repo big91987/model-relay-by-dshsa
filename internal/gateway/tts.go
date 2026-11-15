@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -33,10 +34,21 @@ const (
 	speechChunkRunes  = 3000
 	maxSpeechResponse = 96 << 20
 	maxSpeechAudio    = 48 << 20
-	// speechRequestTimeout bounds one upstream synthesis request. Long-form
-	// speech is generated before the response starts, so it needs more time
-	// than a normal chat request.
+	// maxSpeechAsyncAudio bounds the downloaded result of one long-text task.
+	// A 50,000-character manuscript can produce hours of MP3 audio.
+	maxSpeechAsyncAudio = 512 << 20
+	// speechRequestTimeout bounds one synchronous upstream synthesis request.
+	// Long-form speech is generated before the response starts, so it needs
+	// more time than a normal chat request.
 	speechRequestTimeout = 10 * time.Minute
+	// The asynchronous long-text API accepts a task immediately and reports
+	// progress through a separate query endpoint.
+	speechAsyncCreateTimeout   = 2 * time.Minute
+	speechAsyncQueryTimeout    = 30 * time.Second
+	speechAsyncDownloadTimeout = 30 * time.Minute
+	speechAsyncTimeout         = 6 * time.Hour
+	maxSpeechAsyncErrors       = 5
+	maxSpeechAsyncResponse     = 4 << 20
 
 	// speechStreamSampleRate is the PCM rate used for progressive playback.
 	// MiniMax streams 16-bit little-endian mono PCM, which the browser can
@@ -276,7 +288,7 @@ func (g *Gateway) CreateSpeech(ctx context.Context, req SpeechRequest) (*store.S
 		return nil, &SpeechError{Status: http.StatusNotFound, Message: message}
 	}
 	if utf8.RuneCountInString(req.Text) > speechSyncLimit {
-		return g.createSpeechJob(&req, candidates)
+		return g.createSpeechAsyncJob(&req, candidates)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, speechRequestTimeout)
@@ -288,27 +300,150 @@ func (g *Gateway) CreateSpeech(ctx context.Context, req SpeechRequest) (*store.S
 	return g.storeSpeechClip(result, req)
 }
 
-// createSpeechJob persists a long-text job before synthesis starts, so the
-// console can list it immediately and find it again after a refresh.
-func (g *Gateway) createSpeechJob(req *SpeechRequest, candidates []candidate) (*store.SpeechClip, error) {
-	clip := &store.SpeechClip{
-		ChannelID:     candidates[0].channel.ID,
-		ChannelName:   candidates[0].channel.Name,
-		Model:         req.Model,
-		UpstreamModel: candidates[0].upstream,
-		VoiceID:       req.VoiceID,
-		VoiceName:     speechVoiceName(req),
-		Text:          req.Text,
-		Speed:         req.Speed,
-		Status:        "queued",
-		TotalChunks:   len(splitSpeechText(req.Text, speechChunkRunes)),
-		Characters:    int64(utf8.RuneCountInString(req.Text)),
+// createSpeechAsyncJob submits the complete manuscript as one MiniMax
+// long-text task, stores the task id immediately and returns the running clip.
+// The console and a restarted gateway both follow the same task id.
+func (g *Gateway) createSpeechAsyncJob(req *SpeechRequest, candidates []candidate) (*store.SpeechClip, error) {
+	var lastErr string
+	for _, cand := range candidates {
+		ch := cand.channel
+		apiKey, err := g.secrets.Decrypt(ch.APIKeyEncrypted)
+		if err != nil {
+			lastErr = fmt.Sprintf("channel %q: %v", ch.Name, err)
+			continue
+		}
+		body, err := json.Marshal(map[string]any{
+			"model":          cand.upstream,
+			"text":           req.Text,
+			"language_boost": "auto",
+			"voice_setting": map[string]any{
+				"voice_id": req.VoiceID,
+				"speed":    req.Speed,
+				"vol":      1,
+				"pitch":    0,
+			},
+			"audio_setting": map[string]any{
+				"format":            "mp3",
+				"audio_sample_rate": 32000,
+				"bitrate":           128000,
+				"channel":           1,
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+		// Submit outside the request context: once MiniMax accepts a task the
+		// gateway must persist its id even if the browser disconnects.
+		createCtx, cancel := context.WithTimeout(context.Background(), speechAsyncCreateTimeout)
+		upreq, err := g.upstreamRequest(createCtx, &ch, http.MethodPost, "/v1/t2a_async_v2", body, apiKey, false, true)
+		if err != nil {
+			cancel()
+			lastErr = err.Error()
+			continue
+		}
+		resp, err := g.speechClient.Do(upreq)
+		if err != nil {
+			cancel()
+			lastErr = fmt.Sprintf("channel %q: %v", ch.Name, err)
+			continue
+		}
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxSpeechAsyncResponse))
+		resp.Body.Close()
+		cancel()
+		if readErr != nil {
+			lastErr = fmt.Sprintf("channel %q: %v", ch.Name, readErr)
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			message := speechErrorMessage(data, resp.StatusCode)
+			if shouldFailover(resp.StatusCode) {
+				lastErr = fmt.Sprintf("channel %q returned %d: %s", ch.Name, resp.StatusCode, message)
+				continue
+			}
+			return nil, &SpeechError{Status: resp.StatusCode, Message: message}
+		}
+		var payload struct {
+			TaskID    json.RawMessage `json:"task_id"`
+			FileID    int64           `json:"file_id"`
+			ExtraInfo struct {
+				AudioLength int64 `json:"audio_length"`
+			} `json:"extra_info"`
+			BaseResp struct {
+				StatusCode int64  `json:"status_code"`
+				StatusMsg  string `json:"status_msg"`
+			} `json:"base_resp"`
+		}
+		if err := json.Unmarshal(data, &payload); err != nil {
+			lastErr = fmt.Sprintf("channel %q returned an unexpected async task payload: %v", ch.Name, err)
+			continue
+		}
+		if payload.BaseResp.StatusCode != 0 {
+			message := strings.TrimSpace(payload.BaseResp.StatusMsg)
+			if message == "" {
+				message = speechErrorMessage(data, resp.StatusCode)
+			}
+			switch payload.BaseResp.StatusCode {
+			case 1002, 1004, 1039:
+				lastErr = fmt.Sprintf("channel %q: %s (%d)", ch.Name, message, payload.BaseResp.StatusCode)
+				continue
+			}
+			status := http.StatusBadGateway
+			if payload.BaseResp.StatusCode == 2013 || payload.BaseResp.StatusCode == 1042 {
+				status = http.StatusBadRequest
+			}
+			return nil, &SpeechError{Status: status, Message: message}
+		}
+		taskID := jsonIDString(payload.TaskID)
+		if taskID == "" {
+			lastErr = fmt.Sprintf("channel %q returned no async task id", ch.Name)
+			continue
+		}
+		clip := &store.SpeechClip{
+			ChannelID:      ch.ID,
+			ChannelName:    ch.Name,
+			Model:          req.Model,
+			UpstreamModel:  cand.upstream,
+			VoiceID:        req.VoiceID,
+			VoiceName:      speechVoiceName(req),
+			Text:           req.Text,
+			Speed:          req.Speed,
+			Status:         "running",
+			UpstreamTaskID: taskID,
+			UpstreamFileID: payload.FileID,
+			DurationMS:     payload.ExtraInfo.AudioLength,
+			Characters:     int64(utf8.RuneCountInString(req.Text)),
+			Format:         "mp3",
+		}
+		if err := g.store.CreateSpeechClip(clip); err != nil {
+			return nil, err
+		}
+		g.logger.Info("speech async task submitted", "clip", clip.ID, "task", taskID)
+		go g.runSpeechAsyncJob(clip.ID)
+		return clip, nil
 	}
-	if err := g.store.CreateSpeechClip(clip); err != nil {
-		return nil, err
+
+	message := "no enabled MiniMax channel accepted the long-text speech task"
+	if lastErr != "" {
+		message += ": " + lastErr
 	}
-	go g.runSpeechJob(clip.ID)
-	return clip, nil
+	return nil, &SpeechError{Status: http.StatusBadGateway, Message: message}
+}
+
+// jsonIDString decodes an id that MiniMax may return as a JSON string or a
+// number without losing precision.
+func jsonIDString(raw json.RawMessage) string {
+	value := strings.TrimSpace(string(raw))
+	if value == "" || value == "null" {
+		return ""
+	}
+	if value[0] == '"' {
+		var text string
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return ""
+		}
+		return strings.TrimSpace(text)
+	}
+	return strings.Trim(value, " \t\r\n")
 }
 
 // speechCandidates lists the enabled MiniMax channels that can serve a model.
@@ -934,8 +1069,8 @@ func speechErrorMessage(data []byte, status int) string {
 }
 
 // ResumeSpeechJobs continues background speech jobs that were queued or
-// running when the gateway stopped. Finished chunks are reused, so a restart
-// does not synthesize the same text twice.
+// running when the gateway stopped. Long-text tasks are queried by the same
+// MiniMax task id; older chunked jobs keep their legacy runner.
 func (g *Gateway) ResumeSpeechJobs() {
 	jobs, err := g.store.ListResumableSpeechClips()
 	if err != nil {
@@ -943,16 +1078,20 @@ func (g *Gateway) ResumeSpeechJobs() {
 		return
 	}
 	for i := range jobs {
-		go g.runSpeechJob(jobs[i].ID)
+		if jobs[i].UpstreamTaskID != "" {
+			go g.runSpeechAsyncJob(jobs[i].ID)
+		} else {
+			go g.runSpeechJob(jobs[i].ID)
+		}
 	}
 	if len(jobs) > 0 {
 		g.logger.Info("resumed speech jobs", "count", len(jobs))
 	}
 }
 
-// runSpeechJob synthesizes one stored long-text job chunk by chunk. Everything
-// it needs is persisted, so the console can close, refresh, or reconnect while
-// the job keeps running.
+// runSpeechJob finishes a chunked job created by the previous long-text
+// implementation. New long text is submitted once to MiniMax's async API; this
+// path remains so in-flight jobs are not stranded after an upgrade.
 func (g *Gateway) runSpeechJob(id int64) {
 	if _, loaded := g.speechJobs.LoadOrStore(id, struct{}{}); loaded {
 		return
@@ -965,6 +1104,9 @@ func (g *Gateway) runSpeechJob(id int64) {
 		return
 	}
 	if clip.Status != "queued" && clip.Status != "running" {
+		return
+	}
+	if clip.UpstreamTaskID != "" {
 		return
 	}
 	chunks := splitSpeechText(clip.Text, speechChunkRunes)
@@ -1095,6 +1237,301 @@ func (g *Gateway) runSpeechJob(id int64) {
 		return
 	}
 	_ = os.RemoveAll(dir)
+}
+
+// speechAsyncTask is the subset of the MiniMax task-query response the gateway
+// needs.
+type speechAsyncTask struct {
+	status     string
+	fileID     int64
+	durationMS int64
+	message    string
+}
+
+// runSpeechAsyncJob follows one MiniMax long-text task until it succeeds or
+// fails, then downloads the audio. The task id is stored on the clip, so a
+// refreshed console and a restarted gateway follow the same upstream task.
+func (g *Gateway) runSpeechAsyncJob(id int64) {
+	if _, loaded := g.speechJobs.LoadOrStore(id, struct{}{}); loaded {
+		return
+	}
+	defer g.speechJobs.Delete(id)
+
+	clip, err := g.store.GetSpeechClip(id)
+	if err != nil {
+		g.logger.Error("load async speech job failed", "job", id, "error", err)
+		return
+	}
+	if clip.Status != "queued" && clip.Status != "running" {
+		return
+	}
+	if clip.UpstreamTaskID == "" {
+		g.failSpeechJob(clip, "the speech task has no MiniMax task id")
+		return
+	}
+	ch, err := g.store.GetChannel(clip.ChannelID)
+	if err != nil {
+		g.failSpeechJob(clip, "the channel that submitted this speech task no longer exists")
+		return
+	}
+	apiKey, err := g.secrets.Decrypt(ch.APIKeyEncrypted)
+	if err != nil {
+		g.failSpeechJob(clip, "could not read the channel API key for this speech task")
+		return
+	}
+	if clip.Status != "running" {
+		clip.Status = "running"
+		if err := g.store.UpdateSpeechClip(clip); err != nil {
+			g.logger.Error("update async speech job failed", "job", id, "error", err)
+			return
+		}
+	}
+
+	deadline := time.Now().Add(speechAsyncTimeout)
+	consecutiveErrors := 0
+	for {
+		if time.Now().After(deadline) {
+			g.failSpeechJob(clip, "MiniMax did not finish the speech task in time")
+			return
+		}
+		queryCtx, cancel := context.WithTimeout(context.Background(), speechAsyncQueryTimeout)
+		task, queryErr := g.querySpeechAsyncTask(queryCtx, ch, apiKey, clip.UpstreamTaskID)
+		cancel()
+		if queryErr != nil {
+			consecutiveErrors++
+			g.logger.Warn("query async speech task failed",
+				"job", id, "task", clip.UpstreamTaskID, "attempt", consecutiveErrors, "error", queryErr)
+			if consecutiveErrors >= maxSpeechAsyncErrors {
+				g.failSpeechJob(clip, "could not query the MiniMax speech task: "+queryErr.Error())
+				return
+			}
+			if !g.sleepSpeechPoll(deadline) {
+				g.failSpeechJob(clip, "MiniMax did not finish the speech task in time")
+				return
+			}
+			continue
+		}
+		consecutiveErrors = 0
+		if task.fileID != 0 && task.fileID != clip.UpstreamFileID {
+			clip.UpstreamFileID = task.fileID
+			if err := g.store.UpdateSpeechClip(clip); err != nil {
+				g.logger.Error("store async speech file id failed", "job", id, "error", err)
+			}
+		}
+		if task.durationMS > 0 && clip.DurationMS == 0 {
+			clip.DurationMS = task.durationMS
+		}
+
+		switch task.status {
+		case "success":
+			fileID := clip.UpstreamFileID
+			if task.fileID != 0 {
+				fileID = task.fileID
+			}
+			if fileID == 0 {
+				g.failSpeechJob(clip, "MiniMax finished the speech task without a file id")
+				return
+			}
+			// A previous attempt may have downloaded the audio before its final
+			// database update failed; reuse the stored file.
+			if clip.AudioPath != "" {
+				if info, statErr := os.Stat(filepath.Join(g.cfg.DataDir, clip.AudioPath)); statErr == nil && !info.IsDir() {
+					clip.Status = "succeeded"
+					clip.SizeBytes = info.Size()
+					clip.Error = ""
+					if err := g.store.UpdateSpeechClip(clip); err != nil {
+						g.logger.Error("finish async speech job failed", "job", id, "error", err)
+					}
+					return
+				}
+			}
+			rel, size, downloadErr := g.downloadSpeechAsyncAudio(ch, apiKey, fileID)
+			if downloadErr != nil {
+				g.failSpeechJob(clip, "could not download the generated audio: "+downloadErr.Error())
+				return
+			}
+			clip.AudioPath = rel
+			clip.SizeBytes = size
+			if clip.DurationMS == 0 {
+				// The query response does not always carry the audio length.
+				// The requested MP3 bitrate gives a useful CBR estimate.
+				clip.DurationMS = size * 8 * 1000 / 128000
+			}
+			clip.Format = "mp3"
+			clip.Status = "succeeded"
+			clip.Error = ""
+			if err := g.store.UpdateSpeechClip(clip); err != nil {
+				g.logger.Error("finish async speech job failed", "job", id, "error", err)
+				_ = os.Remove(filepath.Join(g.cfg.DataDir, rel))
+				return
+			}
+			g.logger.Info("speech async task finished", "clip", id, "task", clip.UpstreamTaskID, "bytes", size)
+			return
+		case "failed":
+			message := strings.TrimSpace(task.message)
+			if message == "" || strings.EqualFold(message, "success") {
+				message = "MiniMax could not generate this speech task"
+			}
+			g.failSpeechJob(clip, message)
+			return
+		case "expired":
+			g.failSpeechJob(clip, "the MiniMax speech task expired before its audio could be downloaded")
+			return
+		case "processing", "":
+			// Keep polling.
+		default:
+			g.logger.Warn("unknown async speech task status", "job", id, "status", task.status)
+		}
+		if !g.sleepSpeechPoll(deadline) {
+			g.failSpeechJob(clip, "MiniMax did not finish the speech task in time")
+			return
+		}
+	}
+}
+
+// sleepSpeechPoll waits for the next task query and reports whether the task
+// deadline still allows another poll.
+func (g *Gateway) sleepSpeechPoll(deadline time.Time) bool {
+	wait := g.speechPollInterval
+	if wait <= 0 {
+		wait = 5 * time.Second
+	}
+	if remaining := time.Until(deadline); remaining < wait {
+		wait = remaining
+	}
+	if wait <= 0 {
+		return false
+	}
+	time.Sleep(wait)
+	return true
+}
+
+// querySpeechAsyncTask reads the current status of a MiniMax long-text task.
+func (g *Gateway) querySpeechAsyncTask(ctx context.Context, ch *store.Channel, apiKey, taskID string) (*speechAsyncTask, error) {
+	path := "/v1/query/t2a_async_query_v2?task_id=" + url.QueryEscape(taskID)
+	req, err := g.upstreamRequest(ctx, ch, http.MethodGet, path, nil, apiKey, false, true)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := g.speechClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("channel %q: %w", ch.Name, err)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxSpeechAsyncResponse))
+	resp.Body.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("channel %q: %w", ch.Name, readErr)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &SpeechError{Status: resp.StatusCode, Message: speechErrorMessage(data, resp.StatusCode)}
+	}
+	var payload struct {
+		Status    string `json:"status"`
+		FileID    int64  `json:"file_id"`
+		ExtraInfo struct {
+			AudioLength int64 `json:"audio_length"`
+		} `json:"extra_info"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+		BaseResp struct {
+			StatusCode int64  `json:"status_code"`
+			StatusMsg  string `json:"status_msg"`
+		} `json:"base_resp"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, fmt.Errorf("channel %q returned an unexpected task payload: %w", ch.Name, err)
+	}
+	if payload.BaseResp.StatusCode != 0 {
+		message := strings.TrimSpace(payload.BaseResp.StatusMsg)
+		if message == "" {
+			message = speechErrorMessage(data, resp.StatusCode)
+		}
+		return nil, &SpeechError{Status: http.StatusBadGateway, Message: message}
+	}
+	message := strings.TrimSpace(payload.BaseResp.StatusMsg)
+	if payload.Error.Message != "" {
+		message = strings.TrimSpace(payload.Error.Message)
+	}
+	return &speechAsyncTask{
+		status:     strings.ToLower(strings.TrimSpace(payload.Status)),
+		fileID:     payload.FileID,
+		durationMS: payload.ExtraInfo.AudioLength,
+		message:    message,
+	}, nil
+}
+
+// downloadSpeechAsyncAudio retries the file download a few times. MiniMax
+// serves the completed file through the same channel and API key that created
+// the task.
+func (g *Gateway) downloadSpeechAsyncAudio(ch *store.Channel, apiKey string, fileID int64) (string, int64, error) {
+	dir := filepath.Join(g.cfg.DataDir, "speech")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return "", 0, err
+	}
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 2 * time.Second)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), speechAsyncDownloadTimeout)
+		rel, size, err := g.fetchSpeechAudioFile(ctx, ch, apiKey, fileID, dir)
+		cancel()
+		if err == nil {
+			return rel, size, nil
+		}
+		lastErr = err
+	}
+	return "", 0, lastErr
+}
+
+func (g *Gateway) fetchSpeechAudioFile(ctx context.Context, ch *store.Channel, apiKey string, fileID int64, dir string) (string, int64, error) {
+	path := "/v1/files/retrieve_content?file_id=" + strconv.FormatInt(fileID, 10)
+	req, err := g.upstreamRequest(ctx, ch, http.MethodGet, path, nil, apiKey, false, false)
+	if err != nil {
+		return "", 0, err
+	}
+	resp, err := g.speechClient.Do(req)
+	if err != nil {
+		return "", 0, fmt.Errorf("channel %q: %w", ch.Name, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxSpeechAsyncResponse))
+		return "", 0, &SpeechError{Status: resp.StatusCode, Message: speechErrorMessage(data, resp.StatusCode)}
+	}
+	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "application/json") {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxSpeechAsyncResponse))
+		return "", 0, errors.New(speechErrorMessage(data, resp.StatusCode))
+	}
+	file, err := os.CreateTemp(dir, "speech-async-*.mp3")
+	if err != nil {
+		return "", 0, err
+	}
+	name := file.Name()
+	written, copyErr := io.Copy(file, io.LimitReader(resp.Body, maxSpeechAsyncAudio+1))
+	closeErr := file.Close()
+	if copyErr != nil || closeErr != nil {
+		_ = os.Remove(name)
+		if copyErr != nil {
+			return "", 0, copyErr
+		}
+		return "", 0, closeErr
+	}
+	if written > maxSpeechAsyncAudio {
+		_ = os.Remove(name)
+		return "", 0, fmt.Errorf("the generated audio exceeds the %d MiB limit", maxSpeechAsyncAudio>>20)
+	}
+	if written == 0 {
+		_ = os.Remove(name)
+		return "", 0, errors.New("the provider returned an empty audio file")
+	}
+	rel, err := filepath.Rel(g.cfg.DataDir, name)
+	if err != nil {
+		_ = os.Remove(name)
+		return "", 0, err
+	}
+	return rel, written, nil
 }
 
 func (g *Gateway) speechJobDir(id int64) string {

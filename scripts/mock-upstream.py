@@ -1,6 +1,5 @@
-import json, os, sys, threading, time
-import math
-import struct
+import json, math, os, struct, sys, threading, time
+from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 19090
@@ -11,6 +10,11 @@ MEDIA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
 MUSIC_AUDIO_PATH = os.path.join(MEDIA_DIR, "demo-music.mp3")
 VIDEO_TASKS = {}
 VIDEO_LOCK = threading.Lock()
+ASYNC_TTS_TASKS = {}
+ASYNC_TTS_LOCK = threading.Lock()
+# Number of status queries before an async speech task reports Success.
+ASYNC_TTS_QUERIES = int(os.environ.get("MOCK_TTS_ASYNC_QUERIES", "3"))
+ASYNC_TTS_FAIL = os.environ.get("MOCK_TTS_ASYNC_FAIL", "") == "1"
 VOICE_DESIGNS = {}
 UPLOADED_FILES = {}
 UPLOAD_LOCK = threading.Lock()
@@ -80,6 +84,10 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
     def do_GET(self):
+        if self.path.startswith("/v1/query/t2a_async_query_v2"):
+            return self.query_async_speech()
+        if self.path.startswith("/v1/files/retrieve_content"):
+            return self.retrieve_async_speech_audio()
         if self.path.startswith("/v2/query/video_generation/"):
             return self.query_video(self.path.rsplit("/", 1)[-1])
         if self.path.startswith("/api/v3/contents/generations/tasks/"):
@@ -127,6 +135,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.get_voice()
         if self.path.endswith("/v1/t2a_v2"):
             return self.text_to_speech(body)
+        if self.path.endswith("/v1/t2a_async_v2"):
+            return self.create_async_speech(body)
         if self.path.endswith("/v1/files/upload"):
             return self.upload_file(raw)
         if self.path.endswith("/v1/voice_clone"):
@@ -327,6 +337,92 @@ class Handler(BaseHTTPRequestHandler):
             },
             "base_resp": {"status_code": 0, "status_msg": "success"},
         })
+
+    def create_async_speech(self, body):
+        if self.headers.get("Authorization") != "Bearer upstream-key":
+            return self.send_json(401, {"base_resp": {"status_code": 1004, "status_msg": "login fail"}})
+        text = str(body.get("text", ""))
+        if not text.strip():
+            return self.send_json(200, {"base_resp": {"status_code": 2013, "status_msg": "text is required"}})
+        if "error" in text.lower():
+            return self.send_json(200, {"base_resp": {"status_code": 2013, "status_msg": "the text was rejected by the mock upstream"}})
+        with ASYNC_TTS_LOCK:
+            task_id = 800000 + len(ASYNC_TTS_TASKS) + 1
+            file_id = 700000 + len(ASYNC_TTS_TASKS) + 1
+            ASYNC_TTS_TASKS[task_id] = {
+                "file_id": file_id,
+                "queries": 0,
+                "text": text,
+                "model": body.get("model", ""),
+                "voice_id": body.get("voice_setting", {}).get("voice_id", ""),
+            }
+        sys.stderr.write("mock t2a_async_v2 task=%s file=%s voice=%s chars=%d\n" % (
+            task_id, file_id, body.get("voice_setting", {}).get("voice_id"), len(text)))
+        self.send_json(200, {
+            "task_id": task_id,
+            "file_id": file_id,
+            "usage_characters": len(text),
+            "base_resp": {"status_code": 0, "status_msg": "success"},
+        })
+
+    def query_async_speech(self):
+        if self.headers.get("Authorization") != "Bearer upstream-key":
+            return self.send_json(401, {"base_resp": {"status_code": 1004, "status_msg": "login fail"}})
+        query = parse_qs(urlparse(self.path).query)
+        try:
+            task_id = int((query.get("task_id") or ["0"])[0])
+        except ValueError:
+            task_id = 0
+        with ASYNC_TTS_LOCK:
+            task = ASYNC_TTS_TASKS.get(task_id)
+            if task is None:
+                return self.send_json(200, {"base_resp": {"status_code": 2013, "status_msg": "invalid task_id"}})
+            task["queries"] += 1
+            queries = task["queries"]
+            file_id = task["file_id"]
+        if ASYNC_TTS_FAIL:
+            status = "Failed"
+            message = "the mock MiniMax task failed"
+        elif queries < ASYNC_TTS_QUERIES:
+            status = "Processing"
+            message = "success"
+        else:
+            status = "Success"
+            message = "success"
+        sys.stderr.write("mock t2a_async_query task=%s queries=%d status=%s\n" % (task_id, queries, status))
+        payload = {
+            "task_id": task_id,
+            "status": status,
+            "base_resp": {"status_code": 0, "status_msg": message},
+        }
+        if status == "Success":
+            payload["file_id"] = file_id
+            payload["extra_info"] = {"audio_length": 7440, "audio_size": 60236, "usage_characters": 0}
+        self.send_json(200, payload)
+
+    def retrieve_async_speech_audio(self):
+        if self.headers.get("Authorization") != "Bearer upstream-key":
+            return self.send_json(401, {"base_resp": {"status_code": 1004, "status_msg": "login fail"}})
+        query = parse_qs(urlparse(self.path).query)
+        try:
+            file_id = int((query.get("file_id") or ["0"])[0])
+        except ValueError:
+            file_id = 0
+        with ASYNC_TTS_LOCK:
+            found = any(task["file_id"] == file_id for task in ASYNC_TTS_TASKS.values())
+        if not found:
+            return self.send_json(404, {"base_resp": {"status_code": 2013, "status_msg": "file not found"}})
+        try:
+            with open(os.path.join(MEDIA_DIR, "demo.mp3"), "rb") as handle:
+                data = handle.read()
+        except OSError:
+            return self.send_json(404, {"error": {"message": "demo media is missing"}})
+        sys.stderr.write("mock t2a_async_download file=%s bytes=%d\n" % (file_id, len(data)))
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def text_to_speech(self, body):
         if self.headers.get("Authorization") != "Bearer upstream-key":

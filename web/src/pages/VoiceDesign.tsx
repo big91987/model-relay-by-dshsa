@@ -230,7 +230,7 @@ export default function VoiceDesignPage() {
       })
       setClip(created)
       if (isPending(created)) {
-        toast.success('Long text started as a background task')
+        toast.success('Long text submitted as one background task')
       } else {
         toast.success('Speech generated')
       }
@@ -414,8 +414,8 @@ export default function VoiceDesignPage() {
                           onChange={(event) => setSpeed(Number.parseFloat(event.target.value))}
                         />
                         <span className="field-hint">
-                          Text over {SPEECH_SYNC_LIMIT.toLocaleString()} characters is split into parts and synthesized
-                          in the background on the channel that owns the voice.
+                          Text over {SPEECH_SYNC_LIMIT.toLocaleString()} characters is submitted as one asynchronous
+                          MiniMax task on the channel that owns the voice.
                         </span>
                       </div>
                       <button
@@ -462,28 +462,45 @@ export default function VoiceDesignPage() {
                               <Spinner size={14} />
                               <span className="speech-task-label">
                                 {clip.status === 'queued'
-                                  ? 'Waiting to start…'
-                                  : `Synthesizing part ${Math.min(clip.done_chunks + 1, clip.total_chunks)} of ${
-                                      clip.total_chunks
-                                    }…`}
+                                  ? 'Submitting the task…'
+                                  : clip.async
+                                    ? 'MiniMax is generating the full audio as one task…'
+                                    : `Synthesizing part ${Math.min(clip.done_chunks + 1, clip.total_chunks)} of ${
+                                        clip.total_chunks
+                                      }…`}
                               </span>
-                              <span className="speech-task-percent">{progressPercent(clip)}%</span>
+                              {clip.async ? null : (
+                                <span className="speech-task-percent">{progressPercent(clip)}%</span>
+                              )}
                             </div>
-                            <div
-                              className="speech-progress"
-                              role="progressbar"
-                              aria-valuenow={progressPercent(clip)}
-                              aria-valuemin={0}
-                              aria-valuemax={100}
-                              aria-label="Speech synthesis progress"
-                            >
-                              <span
-                                className="speech-progress-bar"
-                                style={{ width: `${progressPercent(clip)}%` }}
-                              />
-                            </div>
+                            {clip.async ? (
+                              <div
+                                className="speech-progress speech-progress-indeterminate"
+                                role="progressbar"
+                                aria-valuetext="Waiting for MiniMax to finish the full audio"
+                                aria-label="Speech synthesis progress"
+                              >
+                                <span className="speech-progress-bar" />
+                              </div>
+                            ) : (
+                              <div
+                                className="speech-progress"
+                                role="progressbar"
+                                aria-valuenow={progressPercent(clip)}
+                                aria-valuemin={0}
+                                aria-valuemax={100}
+                                aria-label="Speech synthesis progress"
+                              >
+                                <span
+                                  className="speech-progress-bar"
+                                  style={{ width: `${progressPercent(clip)}%` }}
+                                />
+                              </div>
+                            )}
                             <span className="speech-task-note">
-                              This task keeps running in the background; the finished audio appears here automatically.
+                              {clip.async
+                                ? 'This is one MiniMax task; refreshing the page or restarting the gateway keeps following it.'
+                                : 'This task keeps running in the background; the finished audio appears here automatically.'}
                             </span>
                           </div>
                         )}

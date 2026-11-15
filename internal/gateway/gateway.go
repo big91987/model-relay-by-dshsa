@@ -43,6 +43,9 @@ type Gateway struct {
 	// videoPollInterval controls how often asynchronous video tasks are polled.
 	// Tests shorten it; production uses MiniMax's recommended polling cadence.
 	videoPollInterval time.Duration
+	// speechPollInterval controls how often asynchronous long-text speech
+	// tasks are queried.
+	speechPollInterval time.Duration
 
 	// speechJobs guards each background speech job so a resume cannot start a
 	// second writer for the same clip.
@@ -71,6 +74,10 @@ func New(cfg *config.Config, st *store.Store, secrets *secretbox.Cipher, logger 
 	if pollInterval <= 0 {
 		pollInterval = 8 * time.Second
 	}
+	speechPoll := cfg.SpeechPollInterval
+	if speechPoll <= 0 {
+		speechPoll = 5 * time.Second
+	}
 	musicTimeout := cfg.MusicTimeout
 	if musicTimeout <= 0 {
 		musicTimeout = 10 * time.Minute
@@ -78,15 +85,16 @@ func New(cfg *config.Config, st *store.Store, secrets *secretbox.Cipher, logger 
 	mediaTransport := transport.Clone()
 	mediaTransport.ResponseHeaderTimeout = musicTimeout
 	return &Gateway{
-		cfg:               cfg,
-		store:             st,
-		secrets:           secrets,
-		client:            &http.Client{Transport: transport},
-		speechClient:      &http.Client{Transport: speechTransport},
-		mediaClient:       &http.Client{Transport: mediaTransport},
-		limits:            newLimitState(),
-		logger:            logger,
-		videoPollInterval: pollInterval,
+		cfg:                cfg,
+		store:              st,
+		secrets:            secrets,
+		client:             &http.Client{Transport: transport},
+		speechClient:       &http.Client{Transport: speechTransport},
+		mediaClient:        &http.Client{Transport: mediaTransport},
+		limits:             newLimitState(),
+		logger:             logger,
+		videoPollInterval:  pollInterval,
+		speechPollInterval: speechPoll,
 	}
 }
 

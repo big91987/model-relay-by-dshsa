@@ -200,6 +200,8 @@ func (s *Store) migrate() error {
 			error TEXT NOT NULL DEFAULT '',
 			total_chunks INTEGER NOT NULL DEFAULT 0,
 			done_chunks INTEGER NOT NULL DEFAULT 0,
+			upstream_task_id TEXT NOT NULL DEFAULT '',
+			upstream_file_id INTEGER NOT NULL DEFAULT 0,
 			format TEXT NOT NULL DEFAULT 'mp3',
 			audio_path TEXT NOT NULL DEFAULT '',
 			duration_ms INTEGER NOT NULL DEFAULT 0,
@@ -301,6 +303,8 @@ func (s *Store) migrate() error {
 		{"error", `TEXT NOT NULL DEFAULT ''`},
 		{"total_chunks", `INTEGER NOT NULL DEFAULT 0`},
 		{"done_chunks", `INTEGER NOT NULL DEFAULT 0`},
+		{"upstream_task_id", `TEXT NOT NULL DEFAULT ''`},
+		{"upstream_file_id", `INTEGER NOT NULL DEFAULT 0`},
 	} {
 		if err := s.ensureColumn("speech_clips", column.name, column.definition); err != nil {
 			return fmt.Errorf("migrate database: %w", err)
@@ -1025,32 +1029,36 @@ func scanVideoTask(row interface{ Scan(dest ...any) error }) (*VideoTask, error)
 }
 
 // SpeechClip is one MiniMax text-to-speech synthesis. Short text finishes as a
-// single request; long text is stored as a queued background job and filled in
-// chunk by chunk until the merged audio is ready.
+// single request. Long text is submitted once to MiniMax's asynchronous
+// long-text endpoint and tracked by UpstreamTaskID until its audio is ready.
+// Clips created by the older chunked implementation have no UpstreamTaskID and
+// keep their TotalChunks/DoneChunks progress.
 type SpeechClip struct {
-	ID            int64   `json:"id"`
-	ChannelID     int64   `json:"channel_id"`
-	ChannelName   string  `json:"channel_name"`
-	Model         string  `json:"model"`
-	UpstreamModel string  `json:"upstream_model"`
-	VoiceID       string  `json:"voice_id"`
-	VoiceName     string  `json:"voice_name"`
-	Text          string  `json:"text"`
-	Speed         float64 `json:"speed"`
-	Status        string  `json:"status"`
-	Error         string  `json:"error"`
-	TotalChunks   int     `json:"total_chunks"`
-	DoneChunks    int     `json:"done_chunks"`
-	Format        string  `json:"format"`
-	AudioPath     string  `json:"-"`
-	DurationMS    int64   `json:"duration_ms"`
-	Characters    int64   `json:"characters"`
-	SizeBytes     int64   `json:"size_bytes"`
-	CreatedAt     int64   `json:"created_at"`
+	ID             int64   `json:"id"`
+	ChannelID      int64   `json:"channel_id"`
+	ChannelName    string  `json:"channel_name"`
+	Model          string  `json:"model"`
+	UpstreamModel  string  `json:"upstream_model"`
+	VoiceID        string  `json:"voice_id"`
+	VoiceName      string  `json:"voice_name"`
+	Text           string  `json:"text"`
+	Speed          float64 `json:"speed"`
+	Status         string  `json:"status"`
+	Error          string  `json:"error"`
+	TotalChunks    int     `json:"total_chunks"`
+	DoneChunks     int     `json:"done_chunks"`
+	UpstreamTaskID string  `json:"-"`
+	UpstreamFileID int64   `json:"-"`
+	Format         string  `json:"format"`
+	AudioPath      string  `json:"-"`
+	DurationMS     int64   `json:"duration_ms"`
+	Characters     int64   `json:"characters"`
+	SizeBytes      int64   `json:"size_bytes"`
+	CreatedAt      int64   `json:"created_at"`
 }
 
 const speechClipColumns = `id, channel_id, channel_name, model, upstream_model, voice_id, voice_name, text, speed,
-	status, error, total_chunks, done_chunks, format, audio_path, duration_ms, characters, size_bytes, created_at`
+	status, error, total_chunks, done_chunks, upstream_task_id, upstream_file_id, format, audio_path, duration_ms, characters, size_bytes, created_at`
 
 // CreateSpeechClip inserts a generated speech clip or background job and sets
 // its id. An empty status means the clip is already complete.
@@ -1063,11 +1071,12 @@ func (s *Store) CreateSpeechClip(c *SpeechClip) error {
 	}
 	c.CreatedAt = now()
 	res, err := s.db.Exec(`INSERT INTO speech_clips (channel_id, channel_name, model, upstream_model, voice_id, voice_name,
-		text, speed, status, error, total_chunks, done_chunks, format, audio_path, duration_ms, characters, size_bytes, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		text, speed, status, error, total_chunks, done_chunks, upstream_task_id, upstream_file_id, format, audio_path,
+		duration_ms, characters, size_bytes, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.ChannelID, c.ChannelName, c.Model, c.UpstreamModel, c.VoiceID, c.VoiceName,
-		c.Text, c.Speed, c.Status, c.Error, c.TotalChunks, c.DoneChunks, c.Format, c.AudioPath,
-		c.DurationMS, c.Characters, c.SizeBytes, c.CreatedAt)
+		c.Text, c.Speed, c.Status, c.Error, c.TotalChunks, c.DoneChunks, c.UpstreamTaskID, c.UpstreamFileID,
+		c.Format, c.AudioPath, c.DurationMS, c.Characters, c.SizeBytes, c.CreatedAt)
 	if err != nil {
 		return err
 	}
@@ -1079,9 +1088,10 @@ func (s *Store) CreateSpeechClip(c *SpeechClip) error {
 // it advances, including partial progress and the final audio path.
 func (s *Store) UpdateSpeechClip(c *SpeechClip) error {
 	_, err := s.db.Exec(`UPDATE speech_clips SET channel_id=?, channel_name=?, upstream_model=?, status=?, error=?,
-		total_chunks=?, done_chunks=?, format=?, audio_path=?, duration_ms=?, characters=?, size_bytes=? WHERE id=?`,
+		total_chunks=?, done_chunks=?, upstream_task_id=?, upstream_file_id=?, format=?, audio_path=?, duration_ms=?,
+		characters=?, size_bytes=? WHERE id=?`,
 		c.ChannelID, c.ChannelName, c.UpstreamModel, c.Status, c.Error, c.TotalChunks, c.DoneChunks,
-		c.Format, c.AudioPath, c.DurationMS, c.Characters, c.SizeBytes, c.ID)
+		c.UpstreamTaskID, c.UpstreamFileID, c.Format, c.AudioPath, c.DurationMS, c.Characters, c.SizeBytes, c.ID)
 	return err
 }
 
@@ -1147,8 +1157,8 @@ func (s *Store) ListResumableSpeechClips() ([]SpeechClip, error) {
 func scanSpeechClip(row interface{ Scan(dest ...any) error }) (*SpeechClip, error) {
 	var c SpeechClip
 	err := row.Scan(&c.ID, &c.ChannelID, &c.ChannelName, &c.Model, &c.UpstreamModel, &c.VoiceID, &c.VoiceName,
-		&c.Text, &c.Speed, &c.Status, &c.Error, &c.TotalChunks, &c.DoneChunks, &c.Format, &c.AudioPath,
-		&c.DurationMS, &c.Characters, &c.SizeBytes, &c.CreatedAt)
+		&c.Text, &c.Speed, &c.Status, &c.Error, &c.TotalChunks, &c.DoneChunks, &c.UpstreamTaskID, &c.UpstreamFileID,
+		&c.Format, &c.AudioPath, &c.DurationMS, &c.Characters, &c.SizeBytes, &c.CreatedAt)
 	if err != nil {
 		return nil, err
 	}

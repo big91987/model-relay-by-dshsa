@@ -29,12 +29,13 @@ type speechInput struct {
 // speechClipView adds console-facing fields to a stored speech clip.
 type speechClipView struct {
 	store.SpeechClip
+	Async      bool   `json:"async"`
 	AudioReady bool   `json:"audio_ready"`
 	ContentURL string `json:"content_url,omitempty"`
 }
 
 func (s *Server) speechClipView(clip *store.SpeechClip) speechClipView {
-	view := speechClipView{SpeechClip: *clip}
+	view := speechClipView{SpeechClip: *clip, Async: clip.UpstreamTaskID != ""}
 	if clip.AudioPath == "" {
 		return view
 	}
@@ -70,8 +71,8 @@ func (s *Server) handleCreateSpeech(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to generate speech")
 		return
 	}
-	// Long text is accepted for background synthesis; the console polls the
-	// clip until the merged audio is ready.
+	// Long text is accepted as one asynchronous MiniMax task; the console
+	// polls the clip until the full audio is ready.
 	status := http.StatusCreated
 	if clip.Status == "queued" || clip.Status == "running" {
 		status = http.StatusAccepted

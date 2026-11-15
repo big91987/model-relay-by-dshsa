@@ -281,13 +281,15 @@ func TestSpeechClipBackgroundJobMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get legacy clip: %v", err)
 	}
-	if legacy.Status != "succeeded" || legacy.Speed != 1 || legacy.TotalChunks != 0 || legacy.DoneChunks != 0 {
+	if legacy.Status != "succeeded" || legacy.Speed != 1 || legacy.TotalChunks != 0 || legacy.DoneChunks != 0 ||
+		legacy.UpstreamTaskID != "" || legacy.UpstreamFileID != 0 {
 		t.Fatalf("legacy clip was not upgraded: %+v", legacy)
 	}
 
 	job := &SpeechClip{
 		ChannelID: 2, ChannelName: "minimax", Model: "speech-2.8-hd", VoiceID: "voice",
 		Text: "long text", Speed: 1.25, Status: "queued", TotalChunks: 3,
+		UpstreamTaskID: "910001", UpstreamFileID: 920001,
 	}
 	if err := s.CreateSpeechClip(job); err != nil {
 		t.Fatalf("create job: %v", err)
@@ -303,7 +305,8 @@ func TestSpeechClipBackgroundJobMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get job: %v", err)
 	}
-	if stored.Status != "running" || stored.DoneChunks != 1 || stored.TotalChunks != 3 || stored.Speed != 1.25 {
+	if stored.Status != "running" || stored.DoneChunks != 1 || stored.TotalChunks != 3 || stored.Speed != 1.25 ||
+		stored.UpstreamTaskID != "910001" || stored.UpstreamFileID != 920001 {
 		t.Fatalf("unexpected stored job: %+v", stored)
 	}
 	clips, err := s.ListResumableSpeechClips()

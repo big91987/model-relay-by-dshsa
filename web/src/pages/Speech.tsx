@@ -145,6 +145,7 @@ function SpeechCard({ clip }: { clip: SpeechClip }) {
   const format = (clip.format || 'mp3').toUpperCase()
   const size = formatBytes(clip.size_bytes)
   const percent = progressPercent(clip)
+  const oneTask = clip.async
   return (
     <article className="speech-card">
       <div className="speech-card-head">
@@ -165,23 +166,38 @@ function SpeechCard({ clip }: { clip: SpeechClip }) {
             <Spinner size={14} />
             <span className="speech-task-label">
               {clip.status === 'queued'
-                ? 'Waiting to start…'
-                : `Synthesizing part ${Math.min(clip.done_chunks + 1, clip.total_chunks)} of ${clip.total_chunks}…`}
+                ? 'Submitting the task…'
+                : oneTask
+                  ? 'MiniMax is generating the full audio as one task…'
+                  : `Synthesizing part ${Math.min(clip.done_chunks + 1, clip.total_chunks)} of ${clip.total_chunks}…`}
             </span>
-            <span className="speech-task-percent">{percent}%</span>
+            {oneTask ? null : <span className="speech-task-percent">{percent}%</span>}
           </div>
-          <div
-            className="speech-progress"
-            role="progressbar"
-            aria-valuenow={percent}
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-label="Speech synthesis progress"
-          >
-            <span className="speech-progress-bar" style={{ width: `${percent}%` }} />
-          </div>
+          {oneTask ? (
+            <div
+              className="speech-progress speech-progress-indeterminate"
+              role="progressbar"
+              aria-valuetext="Waiting for MiniMax to finish the full audio"
+              aria-label="Speech synthesis progress"
+            >
+              <span className="speech-progress-bar" />
+            </div>
+          ) : (
+            <div
+              className="speech-progress"
+              role="progressbar"
+              aria-valuenow={percent}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-label="Speech synthesis progress"
+            >
+              <span className="speech-progress-bar" style={{ width: `${percent}%` }} />
+            </div>
+          )}
           <span className="speech-task-note">
-            This task keeps running in the background; refresh or leave the page and come back to download it.
+            {oneTask
+              ? 'This is one MiniMax long-text task, tracked by its task id. Refresh, reopen the page or restart the gateway and it keeps following the same task.'
+              : 'This task keeps running in the background; refresh or leave the page and come back to download it.'}
           </span>
         </div>
       ) : clip.status === 'failed' ? (
@@ -204,7 +220,11 @@ function SpeechCard({ clip }: { clip: SpeechClip }) {
           </a>
         ) : (
           <span className="video-meta">
-            {clip.status === 'failed' ? 'No audio to download' : `Audio will be ready after ${clip.total_chunks} parts`}
+            {clip.status === 'failed'
+              ? 'No audio to download'
+              : oneTask
+                ? 'One task will produce the full audio'
+                : `Audio will be ready after ${clip.total_chunks} parts`}
           </span>
         )}
         <span className="video-meta">by {clip.channel_name}</span>
@@ -826,7 +846,7 @@ export default function Speech() {
       setTotal((previous) => previous + 1)
       setText('')
       if (isPending(clip)) {
-        toast.success('Long text started as a background task')
+        toast.success('Long text submitted as one background task')
       } else {
         toast.success('Speech generated')
       }
@@ -918,7 +938,7 @@ export default function Speech() {
     <div className="page">
       <PageHeader
         title="Text to speech"
-        subtitle="MiniMax speech synthesis from the console. Short text starts playing while it is still being synthesized; long text runs as a background task, and cloned voices and recordings work as before."
+        subtitle="MiniMax speech synthesis from the console. Short text starts playing while it is still being synthesized; long text is submitted as one asynchronous task that survives a page refresh or a gateway restart."
         actions={
           <>
             <button className="btn btn-ghost" onClick={refresh} disabled={loading}>
@@ -1062,7 +1082,7 @@ export default function Speech() {
                     maxLength={MAX_TEXT}
                     value={text}
                     onChange={(event) => setText(event.target.value)}
-                    placeholder="Type or paste the text you want MiniMax to read aloud. Longer text is split into parts and synthesized in the background…"
+                    placeholder="Type or paste the text you want MiniMax to read aloud. Longer text is submitted as one asynchronous task…"
                   />
                 </FormField>
                 <div className="field">
@@ -1125,8 +1145,9 @@ export default function Speech() {
                 ) : null}
                 <span className="field-hint">
                   Short text streams: playback starts with the first chunk, and Stop cancels the request. Text over{' '}
-                  {SYNC_TEXT_LIMIT.toLocaleString()} characters is split into parts and synthesized in the background,
-                  with progress saved on the gateway.
+                  {SYNC_TEXT_LIMIT.toLocaleString()} characters is submitted as one asynchronous MiniMax task; the task
+                  id is saved on the gateway, so a refresh, a new tab or a gateway restart keeps following the same task
+                  and its download.
                 </span>
               </form>
             )}

@@ -27,6 +27,7 @@ type Config struct {
 	// the reservation a trustworthy upper bound.
 	QuotaDefaultOutputTokens int
 	VideoPollInterval        time.Duration
+	SpeechPollInterval       time.Duration
 	// MusicTimeout bounds a synchronous MiniMax Music generation call. Songs
 	// can take several minutes, so it is much longer than RequestTimeout.
 	MusicTimeout time.Duration
@@ -50,6 +51,7 @@ func Load(version string) (*Config, error) {
 		StreamTimeout:            time.Duration(envInt("STREAM_TIMEOUT_SECONDS", 1800)) * time.Second,
 		QuotaDefaultOutputTokens: envInt("QUOTA_DEFAULT_OUTPUT_TOKENS", 4096),
 		VideoPollInterval:        time.Duration(envInt("VIDEO_POLL_SECONDS", 8)) * time.Second,
+		SpeechPollInterval:       time.Duration(envInt("SPEECH_POLL_SECONDS", 5)) * time.Second,
 		MusicTimeout:             time.Duration(envInt("MUSIC_TIMEOUT_SECONDS", 600)) * time.Second,
 		Version:                  version,
 	}
