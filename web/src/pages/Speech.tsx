@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Modal } from '../components/Modal'
 import { Icon } from '../components/Icon'
@@ -48,6 +48,60 @@ function formatBytes(bytes: number): string {
 function fileExtension(name: string): string {
   const index = name.lastIndexOf('.')
   return index >= 0 ? name.slice(index + 1).toLowerCase() : ''
+}
+
+function pickRecorderMimeType(): string {
+  const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus']
+  for (const candidate of candidates) {
+    if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(candidate)) {
+      return candidate
+    }
+  }
+  return ''
+}
+
+function encodePcm16Wav(samples: Float32Array, sampleRate: number): Blob {
+  const buffer = new ArrayBuffer(44 + samples.length * 2)
+  const view = new DataView(buffer)
+  const writeString = (offset: number, value: string) => {
+    for (let index = 0; index < value.length; index += 1) {
+      view.setUint8(offset + index, value.charCodeAt(index))
+    }
+  }
+  writeString(0, 'RIFF')
+  view.setUint32(4, 36 + samples.length * 2, true)
+  writeString(8, 'WAVE')
+  writeString(12, 'fmt ')
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, 1, true)
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, sampleRate * 2, true)
+  view.setUint16(32, 2, true)
+  view.setUint16(34, 16, true)
+  writeString(36, 'data')
+  view.setUint32(40, samples.length * 2, true)
+  for (let index = 0; index < samples.length; index += 1) {
+    const sample = Math.max(-1, Math.min(1, samples[index] ?? 0))
+    view.setInt16(44 + index * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true)
+  }
+  return new Blob([buffer], { type: 'audio/wav' })
+}
+
+// MiniMax only accepts mp3, m4a and wav. MediaRecorder produces webm/opus in
+// most browsers, so the recording is decoded, downmixed to mono and resampled
+// to 16 kHz WAV locally before it is uploaded.
+async function recordingToWav(blob: Blob, context: AudioContext): Promise<{ blob: Blob; duration: number }> {
+  const decoded = await context.decodeAudioData(await blob.arrayBuffer())
+  const sampleRate = 16000
+  const frames = Math.max(1, Math.ceil(decoded.duration * sampleRate))
+  const offline = new OfflineAudioContext(1, frames, sampleRate)
+  const source = offline.createBufferSource()
+  source.buffer = decoded
+  source.connect(offline.destination)
+  source.start(0)
+  const rendered = await offline.startRendering()
+  return { blob: encodePcm16Wav(rendered.getChannelData(0), sampleRate), duration: decoded.duration }
 }
 
 function statusLabel(status: SpeechClipStatus): string {
@@ -251,6 +305,26 @@ export default function Speech() {
   const [cloneAuthorized, setCloneAuthorized] = useState(false)
   const [cloneSubmitting, setCloneSubmitting] = useState(false)
   const [cloneError, setCloneError] = useState('')
+  const [cloneSource, setCloneSource] = useState<'upload' | 'record'>('upload')
+  const [recording, setRecording] = useState(false)
+  const [recordingSeconds, setRecordingSeconds] = useState(0)
+  const [recordingUrl, setRecordingUrl] = useState('')
+  const [recordingError, setRecordingError] = useState('')
+  const [recordingApplied, setRecordingApplied] = useState(false)
+  const [preparingRecording, setPreparingRecording] = useState(false)
+
+  const recorderRef = useRef<MediaRecorder | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const timerRef = useRef<number | null>(null)
+  const startedAtRef = useRef(0)
+  const audioContextRef = useRef<AudioContext | null>(null)
+  const discardRecordingRef = useRef(false)
+  const recordingStartingRef = useRef(false)
+
+  const recordingSupported =
+    typeof window !== 'undefined' &&
+    typeof window.MediaRecorder !== 'undefined' &&
+    !!navigator.mediaDevices?.getUserMedia
 
   const speechModels = useMemo(() => models.filter(isSpeechModel), [models])
   const selectedVoice = useMemo(() => voices.find((voice) => voice.voice_id === voiceId), [voices, voiceId])
@@ -287,6 +361,41 @@ export default function Speech() {
           ? 'Choose a system voice or one of your cloned voices.'
           : 'No system voices are available.'
   const canClone = speechModels.length > 0 && !loading
+
+  const cleanupRecording = useCallback(() => {
+    discardRecordingRef.current = true
+    if (timerRef.current !== null) {
+      window.clearInterval(timerRef.current)
+      timerRef.current = null
+    }
+    const recorder = recorderRef.current
+    recorderRef.current = null
+    if (recorder && recorder.state !== 'inactive') {
+      try {
+        recorder.stop()
+      } catch {
+        // The recorder can already be stopping; stopping the tracks is enough.
+      }
+    }
+    streamRef.current?.getTracks().forEach((track) => track.stop())
+    streamRef.current = null
+    if (audioContextRef.current) {
+      void audioContextRef.current.close().catch(() => {})
+      audioContextRef.current = null
+    }
+    setRecording(false)
+    setRecordingSeconds(0)
+    setRecordingApplied(false)
+    setPreparingRecording(false)
+    setRecordingUrl((previous) => {
+      if (previous) URL.revokeObjectURL(previous)
+      return ''
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!cloneOpen) cleanupRecording()
+  }, [cloneOpen, cleanupRecording])
 
   useEffect(() => {
     let active = true
@@ -398,6 +507,8 @@ export default function Speech() {
   }
 
   const openCloneModal = () => {
+    cleanupRecording()
+    setCloneSource('upload')
     setCloneName('')
     setCloneFile(null)
     setCloneSampleDuration(null)
@@ -405,6 +516,7 @@ export default function Speech() {
     setCloneModel(model || speechModels[0]?.id || '')
     setCloneAuthorized(false)
     setCloneError('')
+    setRecordingError('')
     setCloneOpen(true)
   }
 
@@ -442,13 +554,171 @@ export default function Speech() {
     audio.src = url
   }
 
+  const applyRecording = async (blob: Blob) => {
+    setPreparingRecording(true)
+    setRecordingError('')
+    try {
+      const context = audioContextRef.current ?? new AudioContext()
+      audioContextRef.current = context
+      const prepared = await recordingToWav(blob, context)
+      if (discardRecordingRef.current) return
+      if (prepared.duration < MIN_SAMPLE_SECONDS) {
+        setRecordingError(
+          `The recording is ${prepared.duration.toFixed(1)} seconds; MiniMax needs at least ${MIN_SAMPLE_SECONDS}. Record again.`,
+        )
+        setRecordingApplied(false)
+        setCloneFile(null)
+        setCloneSampleDuration(null)
+        return
+      }
+      if (prepared.duration > MAX_SAMPLE_SECONDS) {
+        setRecordingError(`The recording is longer than ${MAX_SAMPLE_SECONDS / 60} minutes. Record again.`)
+        setRecordingApplied(false)
+        setCloneFile(null)
+        setCloneSampleDuration(null)
+        return
+      }
+      const file = new File([prepared.blob], `voice-recording-${Date.now()}.wav`, { type: 'audio/wav' })
+      setCloneFile(file)
+      setCloneSampleDuration(prepared.duration)
+      setRecordingApplied(true)
+    } catch (err) {
+      if (!discardRecordingRef.current) {
+        setRecordingError(
+          err instanceof Error ? `Could not prepare the recording: ${err.message}` : 'Could not prepare the recording.',
+        )
+      }
+    } finally {
+      setPreparingRecording(false)
+    }
+  }
+
+  const startRecording = async () => {
+    if (!recordingSupported) {
+      setRecordingError('This browser cannot record audio. Upload a file instead.')
+      return
+    }
+    if (recordingStartingRef.current) return
+    recordingStartingRef.current = true
+    cleanupRecording()
+    setCloneFile(null)
+    setCloneSampleDuration(null)
+    setCloneError('')
+    setRecordingError('')
+    discardRecordingRef.current = false
+    try {
+      audioContextRef.current = new AudioContext()
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      if (discardRecordingRef.current) {
+        stream.getTracks().forEach((track) => track.stop())
+        if (audioContextRef.current) {
+          void audioContextRef.current.close().catch(() => {})
+          audioContextRef.current = null
+        }
+        return
+      }
+      const mimeType = pickRecorderMimeType()
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream)
+      const chunks: Blob[] = []
+      recorderRef.current = recorder
+      streamRef.current = stream
+      startedAtRef.current = Date.now()
+      setRecording(true)
+      setRecordingSeconds(0)
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) chunks.push(event.data)
+      }
+      recorder.onstop = () => {
+        if (timerRef.current !== null) {
+          window.clearInterval(timerRef.current)
+          timerRef.current = null
+        }
+        stream.getTracks().forEach((track) => track.stop())
+        if (streamRef.current === stream) streamRef.current = null
+        if (recorderRef.current === recorder) recorderRef.current = null
+        const seconds = Math.min((Date.now() - startedAtRef.current) / 1000, MAX_SAMPLE_SECONDS)
+        setRecording(false)
+        setRecordingSeconds(seconds)
+        if (discardRecordingRef.current) return
+        const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' })
+        if (blob.size === 0) {
+          setRecordingError('No audio was captured. Check your microphone and try again.')
+          return
+        }
+        const url = URL.createObjectURL(blob)
+        setRecordingUrl((previous) => {
+          if (previous) URL.revokeObjectURL(previous)
+          return url
+        })
+        void applyRecording(blob)
+      }
+      timerRef.current = window.setInterval(() => {
+        const elapsed = (Date.now() - startedAtRef.current) / 1000
+        setRecordingSeconds(Math.min(elapsed, MAX_SAMPLE_SECONDS))
+        if (elapsed >= MAX_SAMPLE_SECONDS && recorderRef.current?.state === 'recording') {
+          recorderRef.current.stop()
+        }
+      }, 200)
+      recorder.start()
+    } catch (err) {
+      streamRef.current?.getTracks().forEach((track) => track.stop())
+      streamRef.current = null
+      recorderRef.current = null
+      if (audioContextRef.current) {
+        void audioContextRef.current.close().catch(() => {})
+        audioContextRef.current = null
+      }
+      setRecording(false)
+      setRecordingError(
+        err instanceof Error ? `Could not access the microphone: ${err.message}` : 'Could not access the microphone.',
+      )
+    } finally {
+      recordingStartingRef.current = false
+    }
+  }
+
+  const stopRecording = () => {
+    const recorder = recorderRef.current
+    if (!recorder || recorder.state !== 'recording') return
+    const elapsed = (Date.now() - startedAtRef.current) / 1000
+    // MediaRecorder can drop the first frames, so wait a moment when the user
+    // stops right at the 10-second boundary and verify the decoded length later.
+    const remaining = MIN_SAMPLE_SECONDS + 0.6 - elapsed
+    if (remaining > 0) {
+      window.setTimeout(() => {
+        if (recorderRef.current?.state === 'recording') recorderRef.current.stop()
+      }, Math.ceil(remaining * 1000))
+    } else {
+      recorder.stop()
+    }
+  }
+
+  const clearRecording = () => {
+    cleanupRecording()
+    setCloneFile(null)
+    setCloneSampleDuration(null)
+    setRecordingError('')
+  }
+
+  const switchCloneSource = (next: 'upload' | 'record') => {
+    if (next === cloneSource) return
+    cleanupRecording()
+    setCloneSource(next)
+    setCloneFile(null)
+    setCloneSampleDuration(null)
+    setCloneError('')
+    setRecordingError('')
+  }
+
   const submitClone = async () => {
     if (!cloneName.trim()) {
       setCloneError('Give the cloned voice a name.')
       return
     }
     if (!cloneFile) {
-      setCloneError('Choose the sample recording to clone.')
+      setCloneError(
+        cloneSource === 'record' ? 'Record a sample or switch to uploading a file.' : 'Choose the sample recording to clone.',
+      )
       return
     }
     if (!SAMPLE_EXTENSIONS.includes(fileExtension(cloneFile.name))) {
@@ -848,22 +1118,118 @@ export default function Speech() {
               placeholder="My narration voice"
             />
           </FormField>
-          <FormField
-            label="Sample recording"
-            hint={
-              cloneSampleDuration !== null
-                ? `${cloneFile?.name ?? 'Recording'} · ${formatDuration(cloneSampleDuration * 1000)} · mp3, m4a or wav`
-                : 'mp3, m4a or wav · 10 seconds to 5 minutes · up to 20 MB.'
-            }
-          >
-            <input
-              id="clone-file"
-              className="input file-input"
-              type="file"
-              accept=".mp3,.m4a,.wav,audio/mpeg,audio/mp4,audio/wav"
-              onChange={(event) => pickCloneFile(event.target.files?.[0] ?? null)}
-            />
-          </FormField>
+          <div className="field">
+            <span className="field-label">Sample recording</span>
+            {recordingSupported ? (
+              <div className="clone-source-tabs" role="tablist" aria-label="Sample source">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={cloneSource === 'upload'}
+                  className={cloneSource === 'upload' ? 'active' : ''}
+                  onClick={() => switchCloneSource('upload')}
+                  disabled={cloneSubmitting}
+                >
+                  <Icon name="upload" size={14} /> Upload a file
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={cloneSource === 'record'}
+                  className={cloneSource === 'record' ? 'active' : ''}
+                  onClick={() => switchCloneSource('record')}
+                  disabled={cloneSubmitting}
+                >
+                  <Icon name="mic" size={14} /> Record now
+                </button>
+              </div>
+            ) : null}
+            {cloneSource === 'upload' ? (
+              <>
+                <input
+                  id="clone-file"
+                  className="input file-input"
+                  type="file"
+                  aria-label="Sample recording file"
+                  accept=".mp3,.m4a,.wav,audio/mpeg,audio/mp4,audio/wav"
+                  onChange={(event) => pickCloneFile(event.target.files?.[0] ?? null)}
+                />
+                <span className="field-hint">
+                  {cloneSampleDuration !== null
+                    ? `${cloneFile?.name ?? 'Recording'} · ${formatDuration(cloneSampleDuration * 1000)} · mp3, m4a or wav`
+                    : 'mp3, m4a or wav · 10 seconds to 5 minutes · up to 20 MB.'}
+                </span>
+              </>
+            ) : (
+              <div className="recorder">
+                {recording ? (
+                  <>
+                    <div className="recorder-live">
+                      <span className="recorder-dot" />
+                      <span>Recording… {formatDuration(recordingSeconds * 1000)}</span>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={stopRecording}
+                      disabled={recordingSeconds < MIN_SAMPLE_SECONDS}
+                    >
+                      <Icon name="stop" size={15} /> Stop recording
+                    </button>
+                    <span className="field-hint">
+                      {recordingSeconds < MIN_SAMPLE_SECONDS
+                        ? `Keep recording for at least ${Math.ceil(MIN_SAMPLE_SECONDS - recordingSeconds)} more seconds.`
+                        : 'Stops automatically at 5 minutes. The recording stays on this page until you submit.'}
+                    </span>
+                  </>
+                ) : preparingRecording ? (
+                  <div className="recorder-preparing">
+                    <Spinner size={15} /> Preparing the recording…
+                  </div>
+                ) : recordingApplied && cloneFile ? (
+                  <>
+                    <div className="recorder-ready">
+                      <Icon name="check" size={14} /> Recording ready ·{' '}
+                      {formatDuration((cloneSampleDuration ?? 0) * 1000)} · {formatBytes(cloneFile.size)}
+                    </div>
+                    {recordingUrl ? <audio className="speech-audio" controls preload="metadata" src={recordingUrl} /> : null}
+                    <div className="recorder-actions">
+                      <button type="button" className="btn btn-ghost btn-sm" onClick={() => void startRecording()}>
+                        <Icon name="refresh" size={14} /> Re-record
+                      </button>
+                      <button type="button" className="btn btn-ghost btn-sm" onClick={clearRecording}>
+                        <Icon name="trash" size={14} /> Remove
+                      </button>
+                    </div>
+                    <span className="field-hint">
+                      The recording is converted to WAV on this page and sent to MiniMax only when you submit.
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <button type="button" className="btn btn-primary" onClick={() => void startRecording()}>
+                      <Icon name="mic" size={15} /> Start recording
+                    </button>
+                    <span className="field-hint">
+                      Allow microphone access, then record 10 seconds to 5 minutes. The recording is converted to WAV
+                      locally and uploaded only when you submit.
+                    </span>
+                  </>
+                )}
+              </div>
+            )}
+            {recordingError ? (
+              <div className="speech-note speech-note-error">
+                <Icon name="alert" size={14} />
+                <span>{recordingError}</span>
+              </div>
+            ) : null}
+            {!recordingSupported ? (
+              <span className="field-hint">
+                Recording needs microphone access and a secure (HTTPS or localhost) page; upload a file instead.
+              </span>
+            ) : null}
+          </div>
           <FormField label="Preview model">
             <select
               className="input"
