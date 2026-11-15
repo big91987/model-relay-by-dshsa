@@ -106,6 +106,7 @@ func (s *Server) routes() {
 	mux.Handle("POST /api/voice-designs/{id}/speech", s.withAdmin(http.HandlerFunc(s.handleVoiceDesignSpeech)))
 	mux.Handle("GET /api/speech", s.withAdmin(http.HandlerFunc(s.handleListSpeech)))
 	mux.Handle("POST /api/speech", s.withAdmin(http.HandlerFunc(s.handleCreateSpeech)))
+	mux.Handle("POST /api/speech/stream", s.withAdmin(http.HandlerFunc(s.handleStreamSpeech)))
 	mux.Handle("GET /api/speech/{id}", s.withAdmin(http.HandlerFunc(s.handleGetSpeech)))
 	mux.Handle("GET /api/speech/{id}/content", s.withAdmin(http.HandlerFunc(s.handleSpeechContent)))
 

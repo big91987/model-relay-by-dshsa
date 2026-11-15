@@ -5,6 +5,7 @@ import { Icon } from '../components/Icon'
 import { EmptyState, ErrorBanner, FormField, PageHeader, Spinner } from '../components/ui'
 import { api } from '../lib/api'
 import { relativeTime } from '../lib/format'
+import { SpeechStreamPlayer, type SpeechStreamProgress } from '../lib/speechStream'
 import { useToast } from '../lib/toast'
 import type { ModelInfo, SpeechClip, SpeechClipStatus, SpeechVoice, VoiceClone } from '../lib/types'
 
@@ -43,6 +44,12 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function formatClock(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '0:00'
+  const whole = Math.floor(seconds)
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`
 }
 
 function fileExtension(name: string): string {
@@ -282,6 +289,12 @@ export default function Speech() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [live, setLive] = useState(false)
+  const [phase, setPhase] = useState<'streaming' | 'playing'>('streaming')
+  const [progress, setProgress] = useState<SpeechStreamProgress>({ generated: 0, played: 0 })
+  const [streamNotice, setStreamNotice] = useState('')
+  const playerRef = useRef<SpeechStreamPlayer | null>(null)
+  const clipSavedRef = useRef(false)
 
   const [model, setModel] = useState('')
   const [text, setText] = useState('')
@@ -470,6 +483,13 @@ export default function Speech() {
     // clones are read only to preserve a cloned selection across voice reloads.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [model, voiceNonce])
+
+  useEffect(() => {
+    return () => {
+      playerRef.current?.dispose()
+      playerRef.current = null
+    }
+  }, [])
 
   const refreshClips = useCallback(async () => {
     try {
@@ -792,19 +812,7 @@ export default function Speech() {
     }
   }
 
-  const submit = async () => {
-    if (!model) {
-      toast.error('Add a MiniMax channel with a speech model first')
-      return
-    }
-    if (!text.trim()) {
-      toast.error('Enter the text you want to hear')
-      return
-    }
-    if (!voiceId) {
-      toast.error('Choose a voice')
-      return
-    }
+  const submitBackgroundTask = async () => {
     setSubmitting(true)
     try {
       const clip = await api.createSpeech({
@@ -829,11 +837,88 @@ export default function Speech() {
     }
   }
 
+  const startStreaming = () => {
+    const player = new SpeechStreamPlayer()
+    playerRef.current = player
+    clipSavedRef.current = false
+    setStreamNotice('')
+    setLive(true)
+    setPhase('streaming')
+    setProgress({ generated: 0, played: 0 })
+    void player
+      .start(
+        {
+          model,
+          text: text.trim(),
+          voice_id: voiceId,
+          voice_name: selectedClone?.name ?? selectedVoice?.name ?? '',
+          speed,
+        },
+        {
+          onProgress: (value) => {
+            if (!player.isStopped) setProgress(value)
+          },
+          onClip: (clip) => {
+            clipSavedRef.current = true
+            setClips((previous) => [clip, ...previous.filter((item) => item.id !== clip.id)])
+            setTotal((previous) => previous + 1)
+            setText('')
+            setPhase('playing')
+            toast.success('Speech generated')
+          },
+          onPlaybackEnd: () => {
+            if (player.isStopped) return
+            playerRef.current = null
+            setLive(false)
+          },
+        },
+      )
+      .catch((err: unknown) => {
+        if (player.isStopped) return
+        playerRef.current = null
+        setLive(false)
+        toast.error(err instanceof Error ? err.message : 'Failed to generate speech')
+      })
+  }
+
+  const submit = () => {
+    if (!model) {
+      toast.error('Add a MiniMax channel with a speech model first')
+      return
+    }
+    if (!text.trim()) {
+      toast.error('Enter the text you want to hear')
+      return
+    }
+    if (!voiceId) {
+      toast.error('Choose a voice')
+      return
+    }
+    if (backgroundTask) {
+      void submitBackgroundTask()
+      return
+    }
+    startStreaming()
+  }
+
+  const stopPlayback = () => {
+    const player = playerRef.current
+    if (!player) return
+    player.stop()
+    playerRef.current = null
+    setLive(false)
+    setStreamNotice(
+      clipSavedRef.current
+        ? 'Playback stopped. The completed clip is saved in the history below and can be replayed there.'
+        : 'Playback stopped before generation finished, so no clip was saved. Choose “Generate and play” to start again.',
+    )
+  }
+
   return (
     <div className="page">
       <PageHeader
         title="Text to speech"
-        subtitle="MiniMax speech synthesis from the console. Choose a system or cloned voice; short text is generated immediately and long text runs as a background task that survives a page refresh."
+        subtitle="MiniMax speech synthesis from the console. Short text starts playing while it is still being synthesized; long text runs as a background task, and cloned voices and recordings work as before."
         actions={
           <>
             <button className="btn btn-ghost" onClick={refresh} disabled={loading}>
@@ -996,22 +1081,52 @@ export default function Speech() {
                   />
                   <span className="field-hint">0.5× to 2×. The default is 1×.</span>
                 </div>
-                <button
-                  className="btn btn-primary btn-block"
-                  type="submit"
-                  disabled={submitting || !text.trim() || !voiceId}
-                >
-                  {submitting ? <Spinner size={16} /> : <Icon name="speech" size={16} />}
-                  {submitting
-                    ? 'Starting…'
-                    : backgroundTask
-                      ? 'Start background task'
-                      : 'Generate speech'}
-                </button>
+                {live ? (
+                  <div className="speech-live">
+                    <div className="speech-live-copy">
+                      <span className="speech-live-bars" aria-hidden="true">
+                        <span />
+                        <span />
+                        <span />
+                        <span />
+                        <span />
+                      </span>
+                      <div>
+                        <div className="speech-live-title" role="status">
+                          {phase === 'streaming' ? 'Generating and playing…' : 'Playing generated audio…'}
+                        </div>
+                        <div className="speech-live-meta">
+                          {formatClock(progress.played)} played · {formatClock(progress.generated)} received
+                        </div>
+                      </div>
+                    </div>
+                    <button className="btn btn-sm btn-danger" type="button" onClick={stopPlayback}>
+                      <Icon name="stop" size={15} /> Stop
+                    </button>
+                  </div>
+                ) : backgroundTask ? (
+                  <button
+                    className="btn btn-primary btn-block"
+                    type="submit"
+                    disabled={submitting || !text.trim() || !voiceId}
+                  >
+                    {submitting ? <Spinner size={16} /> : <Icon name="speech" size={16} />}
+                    {submitting ? 'Starting…' : 'Start background task'}
+                  </button>
+                ) : (
+                  <button className="btn btn-primary btn-block" type="submit" disabled={!text.trim() || !voiceId}>
+                    <Icon name="speech" size={16} /> Generate and play
+                  </button>
+                )}
+                {streamNotice ? (
+                  <p className="speech-status" role="status">
+                    {streamNotice}
+                  </p>
+                ) : null}
                 <span className="field-hint">
-                  Text over {SYNC_TEXT_LIMIT.toLocaleString()} characters is split into parts and synthesized in the
-                  background. Progress is saved on the gateway, so the task and its audio are still here after a
-                  refresh.
+                  Short text streams: playback starts with the first chunk, and Stop cancels the request. Text over{' '}
+                  {SYNC_TEXT_LIMIT.toLocaleString()} characters is split into parts and synthesized in the background,
+                  with progress saved on the gateway.
                 </span>
               </form>
             )}
