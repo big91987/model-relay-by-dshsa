@@ -2067,6 +2067,91 @@ select.input {
   color: var(--danger-text);
 }
 
+.speech-live {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--accent-soft);
+}
+
+.speech-live .btn {
+  flex: none;
+}
+
+.speech-live-copy {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.speech-live-bars {
+  display: inline-flex;
+  flex: none;
+  align-items: flex-end;
+  gap: 2px;
+  height: 18px;
+}
+
+.speech-live-bars span {
+  width: 3px;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent-text);
+  transform-origin: bottom;
+  animation: speech-live-level 1s ease-in-out infinite;
+}
+
+.speech-live-bars span:nth-child(2) {
+  animation-delay: -0.78s;
+}
+
+.speech-live-bars span:nth-child(3) {
+  animation-delay: -0.5s;
+}
+
+.speech-live-bars span:nth-child(4) {
+  animation-delay: -0.28s;
+}
+
+.speech-live-bars span:nth-child(5) {
+  animation-delay: -0.62s;
+}
+
+@keyframes speech-live-level {
+  0%,
+  100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.speech-live-title {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.speech-live-meta {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.speech-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
 /* ---------- empty, error, spinner ---------- */
 
 .empty-state {

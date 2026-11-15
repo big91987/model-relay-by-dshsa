@@ -1,7 +1,9 @@
 package gateway
 
 import (
+	"bufio"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -27,6 +29,12 @@ const (
 	// is generated before the response starts, so it needs more time than a
 	// normal chat request.
 	speechRequestTimeout = 10 * time.Minute
+
+	// speechStreamSampleRate is the PCM rate used for progressive playback.
+	// MiniMax streams 16-bit little-endian mono PCM, which the browser can
+	// schedule through the Web Audio API without a container.
+	speechStreamSampleRate = 32000
+	speechStreamChannels   = 1
 )
 
 // SpeechError is a client-visible failure while synthesizing speech.
@@ -36,6 +44,21 @@ type SpeechError struct {
 }
 
 func (e *SpeechError) Error() string { return e.Message }
+
+// SpeechStreamInfo describes the progressive audio a StreamSpeech call emits.
+type SpeechStreamInfo struct {
+	Format     string
+	SampleRate int
+	Channels   int
+}
+
+// SpeechStreamHandlers receive audio while MiniMax is still synthesizing it.
+// OnStart runs once, immediately before the first chunk; an error from either
+// callback stops the stream, for example when the browser has disconnected.
+type SpeechStreamHandlers struct {
+	OnStart func(info SpeechStreamInfo) error
+	OnAudio func(pcm []byte) error
+}
 
 // SpeechRequest describes one MiniMax text-to-speech request.
 type SpeechRequest struct {
@@ -357,6 +380,299 @@ func (g *Gateway) CreateSpeech(ctx context.Context, req SpeechRequest) (*store.S
 		message += ": " + lastErr
 	}
 	return nil, &SpeechError{Status: http.StatusBadGateway, Message: message}
+}
+
+// StreamSpeech synthesizes speech with MiniMax streaming and hands PCM chunks
+// to the caller while the provider is still generating them. A clip is stored
+// only after the provider reports the final chunk, so stopping playback never
+// leaves a truncated history entry.
+func (g *Gateway) StreamSpeech(ctx context.Context, req SpeechRequest, handlers SpeechStreamHandlers) (*store.SpeechClip, error) {
+	if err := normalizeSpeechRequest(&req); err != nil {
+		return nil, &SpeechError{Status: http.StatusBadRequest, Message: err.Error()}
+	}
+	channels, err := g.store.ListChannels()
+	if err != nil {
+		return nil, err
+	}
+	candidates := make([]candidate, 0)
+	for _, cand := range orderCandidates(channels, req.Model) {
+		if cand.channel.Type == "minimax" {
+			candidates = append(candidates, cand)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, &SpeechError{
+			Status:  http.StatusNotFound,
+			Message: fmt.Sprintf("model %q is not available on any enabled MiniMax channel", req.Model),
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, speechRequestTimeout)
+	defer cancel()
+
+	var lastErr string
+	for _, cand := range candidates {
+		clip, emitted, retryable, err := g.streamSpeechAttempt(ctx, cand, req, handlers)
+		if err == nil {
+			return clip, nil
+		}
+		if emitted {
+			// Audio already reached the caller, so another channel would
+			// concatenate unrelated speech into the same clip.
+			var speechErr *SpeechError
+			if errors.As(err, &speechErr) {
+				return nil, speechErr
+			}
+			return nil, &SpeechError{Status: http.StatusBadGateway, Message: err.Error()}
+		}
+		if !retryable {
+			var speechErr *SpeechError
+			if errors.As(err, &speechErr) {
+				return nil, speechErr
+			}
+			return nil, &SpeechError{Status: http.StatusBadGateway, Message: err.Error()}
+		}
+		lastErr = err.Error()
+	}
+
+	message := "no enabled MiniMax channel accepted the speech request"
+	if lastErr != "" {
+		message += ": " + lastErr
+	}
+	return nil, &SpeechError{Status: http.StatusBadGateway, Message: message}
+}
+
+// streamSpeechAttempt tries one channel. It reports whether audio was already
+// handed to the caller (no failover is possible afterwards) and whether the
+// failure may be retried on another channel.
+func (g *Gateway) streamSpeechAttempt(ctx context.Context, cand candidate, req SpeechRequest, handlers SpeechStreamHandlers) (*store.SpeechClip, bool, bool, error) {
+	ch := cand.channel
+	apiKey, err := g.secrets.Decrypt(ch.APIKeyEncrypted)
+	if err != nil {
+		return nil, false, true, fmt.Errorf("channel %q: %w", ch.Name, err)
+	}
+	body, err := json.Marshal(map[string]any{
+		"model":         cand.upstream,
+		"text":          req.Text,
+		"stream":        true,
+		"output_format": "hex",
+		"voice_setting": map[string]any{
+			"voice_id": req.VoiceID,
+			"speed":    req.Speed,
+			"vol":      1,
+			"pitch":    0,
+		},
+		"audio_setting": map[string]any{
+			"format":      "pcm",
+			"sample_rate": speechStreamSampleRate,
+			"channel":     speechStreamChannels,
+		},
+	})
+	if err != nil {
+		return nil, false, false, err
+	}
+	upreq, err := g.upstreamRequest(ctx, &ch, http.MethodPost, "/v1/t2a_v2", body, apiKey, true, false)
+	if err != nil {
+		return nil, false, true, err
+	}
+	resp, err := g.speechClient.Do(upreq)
+	if err != nil {
+		return nil, false, true, fmt.Errorf("channel %q: %w", ch.Name, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxSpeechResponse))
+		message := speechErrorMessage(data, resp.StatusCode)
+		if shouldFailover(resp.StatusCode) {
+			return nil, false, true, fmt.Errorf("channel %q returned %d: %s", ch.Name, resp.StatusCode, message)
+		}
+		return nil, false, false, &SpeechError{Status: resp.StatusCode, Message: message}
+	}
+
+	collector := &speechStreamCollector{handlers: handlers}
+	retryable, err := collector.read(resp)
+	if err != nil {
+		return nil, collector.started, retryable, err
+	}
+	if !collector.started || len(collector.audio) == 0 {
+		return nil, collector.started, true, fmt.Errorf("channel %q returned no audio", ch.Name)
+	}
+	if !collector.complete {
+		return nil, true, false, &SpeechError{
+			Status:  http.StatusBadGateway,
+			Message: fmt.Sprintf("channel %q ended the speech stream before synthesis completed", ch.Name),
+		}
+	}
+
+	durationMS := collector.durationMS
+	if durationMS <= 0 {
+		durationMS = int64(len(collector.audio)/2) * 1000 / speechStreamSampleRate
+	}
+	audio := pcmToWAV(collector.audio, speechStreamSampleRate, speechStreamChannels)
+	clip, err := g.storeSpeechClip(&ch, cand.upstream, req, audio, "wav", durationMS, collector.characters)
+	if err != nil {
+		g.logger.Error("store streamed speech clip failed", "channel", ch.Name, "error", err)
+		return nil, true, false, &SpeechError{Status: http.StatusInternalServerError, Message: "failed to store the generated speech"}
+	}
+	return clip, true, false, nil
+}
+
+// speechStreamCollector accumulates one channel's progressive audio and
+// forwards each chunk to the caller.
+type speechStreamCollector struct {
+	handlers   SpeechStreamHandlers
+	started    bool
+	complete   bool
+	audio      []byte
+	durationMS int64
+	characters int64
+}
+
+// read consumes an upstream response: SSE when the provider streams, or a
+// single JSON payload when it ignored the stream flag.
+func (c *speechStreamCollector) read(resp *http.Response) (bool, error) {
+	if !strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
+		data, err := io.ReadAll(io.LimitReader(resp.Body, maxSpeechResponse))
+		if err != nil {
+			return true, fmt.Errorf("read the speech response: %w", err)
+		}
+		var payload speechPayload
+		if err := json.Unmarshal(data, &payload); err != nil {
+			return true, fmt.Errorf("the provider returned an unexpected speech payload: %w", err)
+		}
+		if retryable, err := c.handle(payload); err != nil {
+			return retryable, err
+		}
+		// A non-streaming body is complete by definition.
+		c.complete = true
+		return false, nil
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64<<10), 16<<20)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" || data == "[DONE]" {
+			continue
+		}
+		var payload speechPayload
+		if err := json.Unmarshal([]byte(data), &payload); err != nil {
+			if c.started {
+				return false, &SpeechError{Status: http.StatusBadGateway, Message: "the provider returned a malformed speech stream"}
+			}
+			return true, fmt.Errorf("the provider returned a malformed speech stream: %w", err)
+		}
+		if retryable, err := c.handle(payload); err != nil {
+			return retryable, err
+		}
+		if c.complete {
+			return false, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		if c.started {
+			return false, &SpeechError{Status: http.StatusBadGateway, Message: "the speech stream was interrupted: " + err.Error()}
+		}
+		return true, fmt.Errorf("read the speech stream: %w", err)
+	}
+	return false, nil
+}
+
+// handle processes one provider payload and returns whether the failure may be
+// retried on another channel.
+func (c *speechStreamCollector) handle(payload speechPayload) (bool, error) {
+	if payload.BaseResp.StatusCode != 0 {
+		message := strings.TrimSpace(payload.BaseResp.StatusMsg)
+		if message == "" {
+			message = "speech synthesis failed"
+		}
+		if c.started {
+			return false, &SpeechError{Status: http.StatusBadGateway, Message: message}
+		}
+		switch payload.BaseResp.StatusCode {
+		case 1002, 1004, 1039:
+			// Rate limit or authentication: another channel may work.
+			return true, fmt.Errorf("%s (%d)", message, payload.BaseResp.StatusCode)
+		}
+		status := http.StatusBadGateway
+		if payload.BaseResp.StatusCode == 2013 || payload.BaseResp.StatusCode == 1042 {
+			status = http.StatusBadRequest
+		}
+		return false, &SpeechError{Status: status, Message: message}
+	}
+	if payload.ExtraInfo.AudioLength > 0 {
+		c.durationMS = payload.ExtraInfo.AudioLength
+	}
+	if payload.ExtraInfo.UsageCharacters > 0 {
+		c.characters = payload.ExtraInfo.UsageCharacters
+	}
+	if payload.Data.Status == 2 {
+		c.complete = true
+	}
+	audioHex := strings.TrimSpace(payload.Data.Audio)
+	if audioHex == "" {
+		return false, nil
+	}
+	audio, err := hex.DecodeString(audioHex)
+	if err != nil || len(audio) == 0 {
+		if c.started {
+			return false, &SpeechError{Status: http.StatusBadGateway, Message: "the provider returned invalid audio data"}
+		}
+		return true, errors.New("the provider returned invalid audio data")
+	}
+	if len(c.audio)+len(audio) > maxSpeechAudio {
+		return false, &SpeechError{
+			Status:  http.StatusBadGateway,
+			Message: fmt.Sprintf("the generated audio exceeds the %d MiB limit", maxSpeechAudio>>20),
+		}
+	}
+	if !c.started {
+		c.started = true
+		if c.handlers.OnStart != nil {
+			if err := c.handlers.OnStart(SpeechStreamInfo{
+				Format:     "pcm",
+				SampleRate: speechStreamSampleRate,
+				Channels:   speechStreamChannels,
+			}); err != nil {
+				return false, err
+			}
+		}
+	}
+	c.audio = append(c.audio, audio...)
+	if c.handlers.OnAudio != nil {
+		if err := c.handlers.OnAudio(audio); err != nil {
+			return false, err
+		}
+	}
+	return false, nil
+}
+
+// pcmToWAV wraps 16-bit little-endian PCM in a WAV container so the stored
+// clip can be replayed with a normal <audio> element.
+func pcmToWAV(pcm []byte, sampleRate, channels int) []byte {
+	const headerSize = 44
+	// A WAV data chunk with an odd size is padded to an even boundary.
+	padding := len(pcm) % 2
+	out := make([]byte, headerSize+len(pcm)+padding)
+	copy(out[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(out[4:8], uint32(36+len(pcm)+padding))
+	copy(out[8:12], "WAVE")
+	copy(out[12:16], "fmt ")
+	binary.LittleEndian.PutUint32(out[16:20], 16)
+	binary.LittleEndian.PutUint16(out[20:22], 1) // PCM
+	binary.LittleEndian.PutUint16(out[22:24], uint16(channels))
+	binary.LittleEndian.PutUint32(out[24:28], uint32(sampleRate))
+	binary.LittleEndian.PutUint32(out[28:32], uint32(sampleRate*channels*2))
+	binary.LittleEndian.PutUint16(out[32:34], uint16(channels*2))
+	binary.LittleEndian.PutUint16(out[34:36], 16)
+	copy(out[36:40], "data")
+	binary.LittleEndian.PutUint32(out[40:44], uint32(len(pcm)))
+	copy(out[44:], pcm)
+	return out
 }
 
 func normalizeSpeechRequest(req *SpeechRequest) error {

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -70,6 +71,83 @@ func (s *Server) handleCreateSpeech(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, s.speechClipView(clip))
+}
+
+// handleStreamSpeech synthesizes speech and relays PCM audio to the browser as
+// server-sent events while MiniMax is still generating it. The event sequence
+// is a "meta" event, zero or more "audio" events, and a final "done" event
+// carrying the stored clip. A failure after the response has started arrives as
+// an "error" event; validation and routing failures keep their normal JSON
+// status because streaming only begins with the first audio chunk.
+func (s *Server) handleStreamSpeech(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxSpeechBody)
+	var in speechInput
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	started := false
+	clip, err := s.gw.StreamSpeech(r.Context(), gateway.SpeechRequest{
+		Model:     in.Model,
+		Text:      in.Text,
+		VoiceID:   in.VoiceID,
+		VoiceName: in.VoiceName,
+		Speed:     in.Speed,
+	}, gateway.SpeechStreamHandlers{
+		OnStart: func(info gateway.SpeechStreamInfo) error {
+			w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("X-Accel-Buffering", "no")
+			w.WriteHeader(http.StatusOK)
+			started = true
+			return writeSpeechEvent(w, "meta", map[string]any{
+				"format":      info.Format,
+				"sample_rate": info.SampleRate,
+				"channels":    info.Channels,
+			})
+		},
+		OnAudio: func(pcm []byte) error {
+			return writeSpeechEvent(w, "audio", map[string]any{
+				"audio": base64.StdEncoding.EncodeToString(pcm),
+			})
+		},
+	})
+	if err != nil {
+		if started {
+			message := "speech generation failed"
+			var speechErr *gateway.SpeechError
+			if errors.As(err, &speechErr) {
+				message = speechErr.Message
+			} else {
+				s.logger.Error("stream speech failed after playback started", "error", err)
+			}
+			_ = writeSpeechEvent(w, "error", map[string]any{"error": message})
+			return
+		}
+		var speechErr *gateway.SpeechError
+		if errors.As(err, &speechErr) {
+			writeErr(w, speechErr.Status, speechErr.Message)
+			return
+		}
+		s.logger.Error("stream speech failed", "error", err)
+		writeErr(w, http.StatusInternalServerError, "failed to generate speech")
+		return
+	}
+	_ = writeSpeechEvent(w, "done", map[string]any{"clip": s.speechClipView(clip)})
+}
+
+func writeSpeechEvent(w http.ResponseWriter, event string, payload any) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, data); err != nil {
+		return err
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return nil
 }
 
 func (s *Server) handleListSpeech(w http.ResponseWriter, r *http.Request) {
