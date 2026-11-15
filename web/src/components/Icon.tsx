@@ -37,6 +37,7 @@ export type IconName =
   | 'stop'
   | 'eye'
   | 'eyeOff'
+  | 'mic'
 
 const icons: Record<IconName, ReactNode> = {
   dashboard: (
@@ -70,6 +71,13 @@ const icons: Record<IconName, ReactNode> = {
   speech: (
     <>
       <path d="M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4" />
+    </>
+  ),
+  mic: (
+    <>
+      <rect x="9" y="2" width="6" height="12" rx="3" />
+      <path d="M5 10v2a7 7 0 0 0 14 0v-2" />
+      <path d="M12 19v3" />
     </>
   ),
   key: (
