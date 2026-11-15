@@ -50,7 +50,11 @@ func TestFetchModelsMinimax(t *testing.T) {
 	if gotPath != "/v1/models" || gotAuth != "Bearer sk-mini" {
 		t.Fatalf("upstream request path=%q auth=%q", gotPath, gotAuth)
 	}
-	want := []string{"MiniMax-H3", "MiniMax-H3-Highspeed", "MiniMax-H3-Lite", "MiniMax-H3-Max", "MiniMax-M3"}
+	want := []string{
+		"MiniMax-H3", "MiniMax-H3-Highspeed", "MiniMax-H3-Lite", "MiniMax-H3-Max", "MiniMax-M3",
+		"speech-01-hd", "speech-01-turbo", "speech-02-hd", "speech-02-turbo",
+		"speech-2.6-hd", "speech-2.6-turbo", "speech-2.8-hd", "speech-2.8-turbo",
+	}
 	if !reflect.DeepEqual(models, want) {
 		t.Fatalf("models = %v, want %v", models, want)
 	}

@@ -5,6 +5,7 @@ export type IconName =
   | 'channels'
   | 'models'
   | 'video'
+  | 'speech'
   | 'key'
   | 'logs'
   | 'plus'
@@ -16,6 +17,7 @@ export type IconName =
   | 'check'
   | 'alert'
   | 'search'
+  | 'star'
   | 'chevronLeft'
   | 'chevronRight'
   | 'logout'
@@ -35,6 +37,7 @@ export type IconName =
   | 'stop'
   | 'eye'
   | 'eyeOff'
+  | 'mic'
 
 const icons: Record<IconName, ReactNode> = {
   dashboard: (
@@ -63,6 +66,18 @@ const icons: Record<IconName, ReactNode> = {
     <>
       <rect x="2.5" y="5" width="19" height="14" rx="2.5" />
       <path d="m10 9 5 3-5 3V9Z" />
+    </>
+  ),
+  speech: (
+    <>
+      <path d="M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4" />
+    </>
+  ),
+  mic: (
+    <>
+      <rect x="9" y="2" width="6" height="12" rx="3" />
+      <path d="M5 10v2a7 7 0 0 0 14 0v-2" />
+      <path d="M12 19v3" />
     </>
   ),
   key: (
@@ -118,6 +133,7 @@ const icons: Record<IconName, ReactNode> = {
       <path d="m21 21-4.3-4.3" />
     </>
   ),
+  star: <path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2Z" />,
   chevronLeft: <path d="m15 18-6-6 6-6" />,
   chevronRight: <path d="m9 18 6-6-6-6" />,
   logout: (
