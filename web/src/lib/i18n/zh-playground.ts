@@ -1,0 +1,152 @@
+// Chinese translations for the playground console surface.
+export const zh: Record<string, string> = {
+  'Playground conversation': '试验场对话',
+  'Exported {time} (local time).': '导出时间：{time}（本地时间）。',
+  User: '用户',
+  'Assistant ({model})': '助手（{model}）',
+  Assistant: '助手',
+  'Generation stopped before completion.': '生成在完成前已停止。',
+  'Request failed: {detail}.': '请求失败：{detail}。',
+  'Request failed.': '请求失败。',
+  'Failed to load gateway keys': '加载网关密钥失败',
+  'Failed to load the model catalog': '加载模型目录失败',
+  'Failed to load models for this key': '加载该密钥的模型失败',
+  'Range 0–2 for OpenAI-compatible models. Select a model to see its supported range.':
+    'OpenAI 兼容模型的取值范围为 0–2。选择模型后可查看其支持的取值范围。',
+  'This model is served by both Anthropic and OpenAI channels; the temperature cap is 1 for compatibility.':
+    '该模型同时由 Anthropic 和 OpenAI 渠道提供；为兼容起见，温度上限为 1。',
+  'This model is served by an Anthropic channel, whose temperature range is 0–1.':
+    '该模型由 Anthropic 渠道提供，其温度范围为 0–1。',
+  'This model is served by OpenAI-compatible channels, whose temperature range is 0–2.':
+    '该模型由 OpenAI 兼容渠道提供，其温度范围为 0–2。',
+  'No gateway keys yet. Create one on the API keys page; the key secret stays on the server.':
+    '暂无网关密钥。请先在 API 密钥页面创建一个；密钥明文仅保存在服务端。',
+  'This gateway key has expired. Select another key.': '该网关密钥已过期，请选择其他密钥。',
+  'Select an active gateway key to load models.': '请选择有效的网关密钥以加载模型。',
+  'The relay reported no available models for this key. Check the key allowlist and enabled channels.':
+    '网关报告该密钥没有可用模型。请检查密钥的模型允许列表和已启用的渠道。',
+  'The gateway has no available models. Add and enable a channel in Channels first.':
+    '网关暂无可用模型。请先在渠道中添加并启用一个渠道。',
+  'This key has no available models: its model allowlist may not match any enabled channel, or the channels are disabled.':
+    '该密钥没有可用模型：它的模型允许列表可能未匹配任何已启用的渠道，或渠道已被停用。',
+  'Select a gateway key first.': '请先选择网关密钥。',
+  'Request failed: {error}': '请求失败：{error}',
+  'Request ID copied': '已复制请求 ID',
+  'Cannot access the clipboard; select and copy the value manually': '无法访问剪贴板，请手动选择并复制该值',
+  'Conversation cleared': '对话已清空',
+  'Conversation exported as Markdown': '对话已导出为 Markdown',
+  'No key': '无密钥',
+  "Pick an existing gateway key, choose a model and chat. The relay applies that key's model access, quota, rate limit and logs; the key secret never reaches the browser.":
+    '选择一个已有的网关密钥，挑选模型并开始对话。网关会应用该密钥的模型权限、额度、速率限制并记录日志；密钥明文不会传到浏览器。',
+  'Download this conversation as a Markdown file': '将本次对话下载为 Markdown 文件',
+  'Export Markdown': '导出 Markdown',
+  'Clear conversation': '清空对话',
+  Conversation: '对话',
+  'Generating…': '生成中…',
+  '{turns} turn · {messages} message': '共 {turns} 轮对话 · {messages} 条消息',
+  '{turns} turn · {messages} messages': '共 {turns} 轮对话 · {messages} 条消息',
+  '{turns} turns · {messages} message': '共 {turns} 轮对话 · {messages} 条消息',
+  '{turns} turns · {messages} messages': '共 {turns} 轮对话 · {messages} 条消息',
+  'Not started': '尚未开始',
+  'Loading gateway keys…': '正在加载网关密钥…',
+  'Could not load gateway keys': '无法加载网关密钥',
+  'Create a gateway key first': '请先创建网关密钥',
+  'Playground uses an existing key from API keys. The relay uses it server-side; the key secret is never sent to the browser.':
+    '试验场使用 API 密钥页面中已有的密钥。网关在服务端使用它，密钥明文不会发送到浏览器。',
+  'Go to API keys': '前往 API 密钥',
+  'This key has expired': '该密钥已过期',
+  'This key is disabled': '该密钥已停用',
+  'Select an active gateway key in the panel on the right, or update this key on the API keys page.':
+    '请在右侧面板选择一个有效的网关密钥，或在 API 密钥页面更新该密钥。',
+  'Loading models for this key…': '正在加载该密钥可用的模型…',
+  'Could not load models': '无法加载模型',
+  'No models available for this key': '该密钥没有可用模型',
+  'Start a real request': '发起一次真实请求',
+  'Pick a model and send a message. Responses stream in, keep multi-turn context, can be stopped, and can be traced in Logs by request ID.':
+    '选择模型并发送消息。响应会流式返回，保留多轮上下文，可随时停止，并可在日志中按请求 ID 追踪。',
+  You: '你',
+  AI: 'AI',
+  'Waiting for the first chunk…': '正在等待首个数据块…',
+  'Generation stopped. Content already received may still be billed.': '生成已停止。已接收的内容仍可能计费。',
+  'key {key} · {model} · temp {temperature} · max output {maxTokens}':
+    '密钥 {key} · {model} · 温度 {temperature} · 最大输出 {maxTokens}',
+  default: '默认',
+  'The upstream did not report usage; the relay estimated it from the request and returned text.':
+    '上游未上报用量，网关根据请求与返回文本进行了估算。',
+  'Token usage reported by the upstream.': '上游上报的令牌用量。',
+  'Tokens {total} ({prompt} in / {completion} out)': '令牌 {total}（输入 {prompt} / 输出 {completion}）',
+  'Tokens {total} ({prompt} in / {completion} out) · estimated':
+    '令牌 {total}（输入 {prompt} / 输出 {completion}）· 估算',
+  'Token usage unavailable for this response': '此响应暂无令牌用量数据',
+  Request: '请求',
+  'View log': '查看日志',
+  'Fix the max output value first': '请先修正最大输出值',
+  'Creates a new gateway request and may incur new charges': '将创建一个新的网关请求，可能产生新的费用',
+  Regenerate: '重新生成',
+  'Sends a new request and may incur new charges.': '会发送新请求并可能产生新的费用。',
+  'Type a message. Enter to send, Shift+Enter for a new line.': '输入消息。按 Enter 发送，Shift+Enter 换行。',
+  'Select a gateway key and model above.': '请在上方选择网关密钥和模型。',
+  Message: '消息',
+  'Max output must be an integer between 1 and {max}.': '最大输出必须是 1 到 {max} 之间的整数。',
+  'Requests go through this relay; this page never calls an upstream directly.':
+    '请求都经由本网关转发；此页面不会直接调用上游。',
+  'Stop generating': '停止生成',
+  Send: '发送',
+  "Every send or regeneration creates a new gateway request and may incur charges. Provider billing applies; the relay's cost display depends on configured channel prices. This page never retries automatically.":
+    '每次发送或重新生成都会创建新的网关请求，并可能产生费用。上游提供方会照常计费；网关显示的费用取决于渠道的配置价格。此页面不会自动重试。',
+  'Gateway key': '网关密钥',
+  'Refresh API keys': '刷新 API 密钥',
+  'Refresh gateway keys': '刷新网关密钥',
+  'Use an existing key': '使用已有密钥',
+  'Loading keys…': '正在加载密钥…',
+  'No gateway keys': '暂无网关密钥',
+  'The relay uses this key server-side; the browser never sees its secret. Model access, quota, RPM limit and request logs apply.':
+    '网关在服务端使用该密钥，浏览器不会看到密钥明文。模型权限、额度、每分钟请求数限制和请求日志都会生效。',
+  Quota: '额度',
+  Unlimited: '不限额度',
+  'Rate limit': '速率限制',
+  '{rate} / min': '每分钟 {rate} 次',
+  'Model access': '模型权限',
+  '{n} allowed': '已允许 {n} 个',
+  'All models': '全部模型',
+  Expires: '到期时间',
+  'Manage keys in API keys.': '在 API 密钥页面管理密钥。',
+  '{n} available': '可用 {n} 个',
+  'Loading models…': '正在加载模型…',
+  'No models available': '暂无可用模型',
+  'Select an active gateway key': '请选择有效的网关密钥',
+  'Cost price is not configured for this channel. Provider billing still applies.':
+    '该渠道未配置成本价格。上游提供方仍会照常计费。',
+  'Input {input} / 1M · Output {output} / 1M': '输入 {input} / 1M · 输出 {output} / 1M',
+  '(configured prices used for cost estimates)': '（费用估算使用已配置的价格）',
+  'Failed to load the model catalog: {error}': '加载模型目录失败：{error}',
+  "Available models come from the key's model allowlist and enabled channels. Switching models only affects the next request; the conversation is not resent automatically, and history stays in context.":
+    '可用模型来自密钥的模型允许列表和已启用的渠道。切换模型只影响下一次请求；不会自动重新发送对话，历史记录会保留在上下文中。',
+  'Chat parameters': '对话参数',
+  'System prompt': '系统提示词',
+  'Optional. For example: You are a concise technical assistant.': '可选。例如：你是一位简洁的技术助手。',
+  'Changes apply from the next request.': '修改将在下一次请求时生效。',
+  Temperature: '温度',
+  'Max output tokens': '最大输出令牌数',
+  'Leave empty for the default': '留空则使用默认值',
+  'Maximum output tokens': '最大输出令牌数',
+  '1–{max}, or empty for the model/relay default. The exact model limit is enforced by the upstream; if exceeded, its error is shown here.':
+    '1–{max}，留空则使用模型或网关的默认值。精确的模型上限由上游强制执行；超出时会在此处显示其错误。',
+  "Parameter ranges follow the selected model's channel protocol. If the model rejects a parameter, the upstream error is shown in the conversation.":
+    '参数范围遵循所选模型对应渠道的协议。如果模型拒绝某个参数，上游错误会显示在对话中。',
+  'Send this turn again?': '再次发送本轮对话？',
+  'This creates a new gateway request and may incur new charges.': '这会创建新的网关请求，并可能产生新的费用。',
+  'Send new request': '发送新请求',
+  "The last user message will be sent again and the current assistant reply will be replaced. The request uses the page's current settings:":
+    '最后一条用户消息将被重新发送，当前的助手回复将被替换。请求将使用页面当前的设置：',
+  'Max output': '最大输出',
+  Default: '默认',
+  'The previous generation was stopped; the new request starts from scratch.':
+    '上一次生成已停止；新请求将从头开始。',
+  'Nothing is retried automatically. A request is sent only after you click “{action}”.':
+    '不会自动重试。只有点击“{action}”后才会发送请求。',
+  'Clear this conversation?': '清空此对话？',
+  'The system prompt and parameters are kept.': '系统提示词和参数将保留。',
+  'All messages on this page will be removed. Existing request logs and charges remain available in Logs.':
+    '此页面上的所有消息都会被移除。已有的请求日志和费用仍可在日志中查看。',
+}

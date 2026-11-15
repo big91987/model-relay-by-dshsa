@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Icon } from '../components/Icon'
+import { t } from './i18n'
 
 type ToastKind = 'success' | 'error'
 
@@ -50,7 +51,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           <div className={`toast toast-${toast.kind}`} key={toast.id}>
             <Icon name={toast.kind === 'success' ? 'check' : 'alert'} size={16} />
             <span>{toast.message}</span>
-            <button className="toast-close" onClick={() => remove(toast.id)} aria-label="Dismiss">
+            <button className="toast-close" onClick={() => remove(toast.id)} aria-label={t("Dismiss")}>
               <Icon name="x" size={14} />
             </button>
           </div>

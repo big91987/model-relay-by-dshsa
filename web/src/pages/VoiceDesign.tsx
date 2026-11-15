@@ -13,13 +13,14 @@ import {
 } from '../lib/speech'
 import { useToast } from '../lib/toast'
 import type { ModelInfo, SpeechClip, SpeechClipStatus, VoiceDesign } from '../lib/types'
+import { t } from '../lib/i18n'
 
 const MAX_PROMPT = 2000
 const MAX_PREVIEW_TEXT = 500
 const DEFAULT_PREVIEW_TEXT =
   'Hello! This is a preview of the voice designed from your description. You can use this voice to read any text aloud.'
 const EXAMPLE_PROMPT =
-  'A warm, calm female narrator in her thirties with a gentle, unhurried delivery and a hint of curiosity.'
+  t("A warm, calm female narrator in her thirties with a gentle, unhurried delivery and a hint of curiosity.")
 
 function formatBytes(bytes: number): string {
   if (!bytes || bytes <= 0) return ''
@@ -41,13 +42,13 @@ function progressPercent(clip: SpeechClip): number {
 function statusLabel(status: SpeechClipStatus): string {
   switch (status) {
     case 'queued':
-      return 'Queued'
+      return t("Queued")
     case 'running':
-      return 'Synthesizing'
+      return t("Synthesizing")
     case 'succeeded':
-      return 'Ready'
+      return t("Ready")
     case 'failed':
-      return 'Failed'
+      return t("Failed")
   }
 }
 
@@ -77,21 +78,21 @@ function DesignCard({
       <p className="speech-text">{design.prompt}</p>
       {design.preview_ready && design.preview_url ? (
         <audio className="speech-audio" controls preload="metadata" src={design.preview_url}>
-          Your browser cannot play this audio.
+          {t("Your browser cannot play this audio.")}
         </audio>
       ) : (
         <div className="speech-audio-missing">
-          <Icon name="alert" size={14} /> The preview audio is not available.
+          <Icon name="alert" size={14} /> {t("The preview audio is not available.")}
         </div>
       )}
       <div className="video-actions">
         <button className="btn btn-sm btn-ghost" onClick={onSelect} disabled={selected}>
           <Icon name={selected ? 'check' : 'speech'} size={15} />
-          {selected ? 'Selected' : 'Use this voice'}
+          {selected ? t("Selected") : t("Use this voice")}
         </button>
         {design.preview_ready && design.preview_url ? (
           <a className="btn btn-sm btn-ghost" href={`${design.preview_url}?download=1`}>
-            <Icon name="download" size={15} /> Download
+            <Icon name="download" size={15} /> {t("Download")}
           </a>
         ) : null}
       </div>
@@ -137,7 +138,7 @@ export default function VoiceDesignPage() {
         setDesigns(designResponse.items)
         setSelectedId((previous) => previous ?? designResponse.items[0]?.id ?? null)
       } catch (err) {
-        if (active) setError(err instanceof Error ? err.message : 'Failed to load voice design')
+        if (active) setError(err instanceof Error ? err.message : t("Failed to load voice design"))
       } finally {
         if (active) setLoading(false)
       }
@@ -182,21 +183,21 @@ export default function VoiceDesignPage() {
         return designResponse.items[0]?.id ?? null
       })
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to refresh voice design')
+      toast.error(err instanceof Error ? err.message : t("Failed to refresh voice design"))
     }
   }, [toast])
 
   const design = async () => {
     if (!model) {
-      toast.error('Add a MiniMax channel with a speech model first')
+      toast.error(t("Add a MiniMax channel with a speech model first"))
       return
     }
     if (!prompt.trim()) {
-      toast.error('Describe the voice you want to design')
+      toast.error(t("Describe the voice you want to design"))
       return
     }
     if (!previewText.trim()) {
-      toast.error('Enter the preview text for the voice sample')
+      toast.error(t("Enter the preview text for the voice sample"))
       return
     }
     setDesigning(true)
@@ -208,9 +209,9 @@ export default function VoiceDesignPage() {
       })
       setDesigns((previous) => [created, ...previous])
       setSelectedId(created.id)
-      toast.success('Voice designed')
+      toast.success(t("Voice designed"))
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to design the voice')
+      toast.error(err instanceof Error ? err.message : t("Failed to design the voice"))
     } finally {
       setDesigning(false)
     }
@@ -219,7 +220,7 @@ export default function VoiceDesignPage() {
   const speak = async () => {
     if (!selected) return
     if (!readText.trim()) {
-      toast.error('Enter the text this voice should read')
+      toast.error(t("Enter the text this voice should read"))
       return
     }
     setSpeaking(true)
@@ -230,12 +231,12 @@ export default function VoiceDesignPage() {
       })
       setClip(created)
       if (isPending(created)) {
-        toast.success('Long text submitted as one background task')
+        toast.success(t('Long text submitted as one background task'))
       } else {
-        toast.success('Speech generated')
+        toast.success(t("Speech generated"))
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to generate speech')
+      toast.error(err instanceof Error ? err.message : t("Failed to generate speech"))
     } finally {
       setSpeaking(false)
     }
@@ -244,11 +245,11 @@ export default function VoiceDesignPage() {
   return (
     <div className="page">
       <PageHeader
-        title="Voice design"
-        subtitle="Describe a voice, preview the sample MiniMax generates, then use that voice to read any text."
+        title={t("Voice design")}
+        subtitle={t("Describe a voice, preview the sample MiniMax generates, then use that voice to read any text.")}
         actions={
           <button className="btn btn-ghost" onClick={() => void refresh()} disabled={loading}>
-            <Icon name="refresh" size={16} /> Refresh
+            <Icon name="refresh" size={16} /> {t("Refresh")}
           </button>
         }
       />
@@ -256,16 +257,16 @@ export default function VoiceDesignPage() {
 
       {loading ? (
         <div className="page-loading">
-          <Spinner size={22} /> Loading voice design…
+          <Spinner size={22} /> {t("Loading voice design…")}
         </div>
       ) : speechModels.length === 0 ? (
         <EmptyState
           icon="speech"
-          title="No speech model"
-          description="Add a MiniMax channel with a speech model such as speech-2.8-hd, then come back here to design a voice from a description."
+          title={t("No speech model")}
+          description={t("Add a MiniMax channel with a speech model such as speech-2.8-hd, then come back here to design a voice from a description.")}
           action={
             <Link className="btn btn-primary" to="/channels">
-              <Icon name="plus" size={16} /> Add a channel
+              <Icon name="plus" size={16} /> {t("Add a channel")}
             </Link>
           }
         />
@@ -274,8 +275,8 @@ export default function VoiceDesignPage() {
           <section className="panel speech-create">
             <div className="panel-head">
               <div>
-                <h2>Design a voice</h2>
-                <p>Describe the voice you want. MiniMax creates a custom voice and reads the preview text as a sample.</p>
+                <h2>{t("Design a voice")}</h2>
+                <p>{t("Describe the voice you want. MiniMax creates a custom voice and reads the preview text as a sample.")}</p>
               </div>
             </div>
             <form
@@ -285,7 +286,7 @@ export default function VoiceDesignPage() {
                 void design()
               }}
             >
-              <FormField label="Model">
+              <FormField label={t("Model")}>
                 <select className="input" value={model} onChange={(event) => setModel(event.target.value)}>
                   {speechModels.map((item) => (
                     <option key={item.id} value={item.id}>
@@ -294,7 +295,7 @@ export default function VoiceDesignPage() {
                   ))}
                 </select>
               </FormField>
-              <FormField label="Voice description" hint={`${prompt.length} / ${MAX_PROMPT} characters`}>
+              <FormField label={t("Voice description")} hint={t('{n} / {max} characters', { n: prompt.length, max: MAX_PROMPT })}>
                 <textarea
                   className="input textarea"
                   rows={5}
@@ -304,21 +305,23 @@ export default function VoiceDesignPage() {
                   placeholder={EXAMPLE_PROMPT}
                 />
               </FormField>
-              <FormField label="Preview text" hint={`${previewText.length} / ${MAX_PREVIEW_TEXT} characters`}>
+              <FormField label={t("Preview text")} hint={t('{n} / {max} characters', { n: previewText.length, max: MAX_PREVIEW_TEXT })}>
                 <textarea
                   className="input textarea"
                   rows={4}
                   maxLength={MAX_PREVIEW_TEXT}
                   value={previewText}
                   onChange={(event) => setPreviewText(event.target.value)}
-                  placeholder="The sample sentence the designed voice reads in its preview."
+                  placeholder={t("The sample sentence the designed voice reads in its preview.")}
                 />
               </FormField>
               <div className="speech-note">
                 <Icon name="alert" size={14} />
                 <span>
-                  Designing generates a paid MiniMax preview sample ($30 per 1M characters). The preview text is capped
-                  at {MAX_PREVIEW_TEXT} characters.
+                  {t(
+                    'Designing generates a paid MiniMax preview sample ($30 per 1M characters). The preview text is capped at {max} characters.',
+                    { max: MAX_PREVIEW_TEXT },
+                  )}
                 </span>
               </div>
               <button
@@ -327,10 +330,10 @@ export default function VoiceDesignPage() {
                 disabled={designing || !prompt.trim() || !previewText.trim()}
               >
                 {designing ? <Spinner size={16} /> : <Icon name="spark" size={16} />}
-                {designing ? 'Designing voice…' : 'Design voice'}
+                {designing ? t("Designing voice…") : t("Design voice")}
               </button>
               <span className="field-hint">
-                The designed voice and its preview are stored on the gateway. Pick it in the list to replay the sample.
+                {t("The designed voice and its preview are stored on the gateway. Pick it in the list to replay the sample.")}
               </span>
             </form>
           </section>
@@ -338,11 +341,11 @@ export default function VoiceDesignPage() {
           <section className="panel speech-history voice-design-studio">
             <div className="panel-head">
               <div>
-                <h2>Use a designed voice</h2>
+                <h2>{t("Use a designed voice")}</h2>
                 <p>
                   {selected
-                    ? 'Preview the sample, then read another piece of text with the selected voice.'
-                    : 'Design a voice, or select one from the list, to preview it and read new text.'}
+                    ? t("Preview the sample, then read another piece of text with the selected voice.")
+                    : t("Design a voice, or select one from the list, to preview it and read new text.")}
                 </p>
               </div>
             </div>
@@ -350,8 +353,8 @@ export default function VoiceDesignPage() {
             {designs.length === 0 ? (
               <EmptyState
                 icon="spark"
-                title="No designed voices"
-                description="Describe a voice on the left, generate its preview, and it will appear here so you can read new text with it."
+                title={t("No designed voices")}
+                description={t("Describe a voice on the left, generate its preview, and it will appear here so you can read new text with it.")}
               />
             ) : (
               <>
@@ -364,15 +367,15 @@ export default function VoiceDesignPage() {
                           {selected.model} · {selected.channel_name} · {relativeTime(selected.created_at)}
                         </div>
                       </div>
-                      <span className="badge badge-success">Selected</span>
+                      <span className="badge badge-success">{t("Selected")}</span>
                     </div>
                     <p className="voice-design-prompt">{selected.prompt}</p>
                     <div className="speech-voice-id mono">{selected.voice_id}</div>
                     {selected.preview_ready && selected.preview_url ? (
                       <div className="voice-design-preview">
-                        <span className="field-label">Preview</span>
+                        <span className="field-label">{t("Preview")}</span>
                         <audio className="speech-audio" controls preload="metadata" src={selected.preview_url}>
-                          Your browser cannot play this audio.
+                          {t("Your browser cannot play this audio.")}
                         </audio>
                       </div>
                     ) : null}
@@ -385,10 +388,12 @@ export default function VoiceDesignPage() {
                       }}
                     >
                       <FormField
-                        label="Read another text"
-                        hint={`${readText.length} / ${SPEECH_MAX_TEXT} characters${
-                          backgroundTask ? ' · will run in the background' : ''
-                        }`}
+                        label={t("Read another text")}
+                        hint={
+                          backgroundTask
+                            ? t('{n} / {max} characters · will run in the background', { n: readText.length, max: SPEECH_MAX_TEXT })
+                            : t('{n} / {max} characters', { n: readText.length, max: SPEECH_MAX_TEXT })
+                        }
                       >
                         <textarea
                           className="input textarea"
@@ -396,12 +401,12 @@ export default function VoiceDesignPage() {
                           maxLength={SPEECH_MAX_TEXT}
                           value={readText}
                           onChange={(event) => setReadText(event.target.value)}
-                          placeholder="Type the text this designed voice should read aloud…"
+                          placeholder={t("Type the text this designed voice should read aloud…")}
                         />
                       </FormField>
                       <div className="field">
                         <span className="param-head">
-                          <span className="field-label">Speed</span>
+                          <span className="field-label">{t("Speed")}</span>
                           <span className="param-value">{speed.toFixed(1)}×</span>
                         </span>
                         <input
@@ -414,8 +419,10 @@ export default function VoiceDesignPage() {
                           onChange={(event) => setSpeed(Number.parseFloat(event.target.value))}
                         />
                         <span className="field-hint">
-                          Text over {SPEECH_SYNC_LIMIT.toLocaleString()} characters is submitted as one asynchronous
-                          MiniMax task on the channel that owns the voice.
+                          {t(
+                            'Text over {n} characters is submitted as one asynchronous MiniMax task on the channel that owns the voice.',
+                            { n: SPEECH_SYNC_LIMIT.toLocaleString() },
+                          )}
                         </span>
                       </div>
                       <button
@@ -424,37 +431,37 @@ export default function VoiceDesignPage() {
                         disabled={speaking || !readText.trim()}
                       >
                         {speaking ? <Spinner size={16} /> : <Icon name="speech" size={16} />}
-                        {speaking ? 'Starting…' : backgroundTask ? 'Start background task' : 'Read with this voice'}
+                        {speaking ? t("Starting…") : backgroundTask ? t("Start background task") : t("Read with this voice")}
                       </button>
                     </form>
 
                     {clip ? (
                       <div className="voice-design-clip">
                         <div className="voice-design-clip-head">
-                          <span className="field-label">Generated speech</span>
+                          <span className="field-label">{t("Generated speech")}</span>
                           <span className="video-meta">
                             {clip.model}
                             {clip.status === 'succeeded' ? ` · ${formatSpeechDuration(clip.duration_ms)}` : ''} ·{' '}
-                            {clip.characters.toLocaleString()} characters · {statusLabel(clip.status)}
+                            {t('{n} characters', { n: clip.characters.toLocaleString() })} · {statusLabel(clip.status)}
                           </span>
                         </div>
                         {clip.status === 'succeeded' && clip.audio_ready && clip.content_url ? (
                           <>
                             <audio className="speech-audio" controls preload="metadata" src={clip.content_url}>
-                              Your browser cannot play this audio.
+                              {t("Your browser cannot play this audio.")}
                             </audio>
                             <div className="video-actions">
                               <a className="btn btn-sm btn-ghost" href={`${clip.content_url}?download=1`}>
-                                <Icon name="download" size={15} /> Download {(clip.format || 'mp3').toUpperCase()}
+                                <Icon name="download" size={15} /> {t('Download {format}', { format: (clip.format || 'mp3').toUpperCase() })}
                               </a>
                               <Link className="btn btn-sm btn-ghost" to="/speech">
-                                Open speech history
+                                {t("Open speech history")}
                               </Link>
                             </div>
                           </>
                         ) : clip.status === 'failed' ? (
                           <div className="speech-audio-missing">
-                            <Icon name="alert" size={14} /> {clip.error || 'Speech synthesis failed.'}
+                            <Icon name="alert" size={14} /> {clip.error || t("Speech synthesis failed.")}
                           </div>
                         ) : (
                           <div className="speech-task-state">
@@ -462,12 +469,13 @@ export default function VoiceDesignPage() {
                               <Spinner size={14} />
                               <span className="speech-task-label">
                                 {clip.status === 'queued'
-                                  ? 'Submitting the task…'
+                                  ? t('Submitting the task…')
                                   : clip.async
-                                    ? 'MiniMax is generating the full audio as one task…'
-                                    : `Synthesizing part ${Math.min(clip.done_chunks + 1, clip.total_chunks)} of ${
-                                        clip.total_chunks
-                                      }…`}
+                                    ? t('MiniMax is generating the full audio as one task…')
+                                    : t('Synthesizing part {current} of {total}…', {
+                                        current: Math.min(clip.done_chunks + 1, clip.total_chunks),
+                                        total: clip.total_chunks,
+                                      })}
                               </span>
                               {clip.async ? null : (
                                 <span className="speech-task-percent">{progressPercent(clip)}%</span>
@@ -477,8 +485,8 @@ export default function VoiceDesignPage() {
                               <div
                                 className="speech-progress speech-progress-indeterminate"
                                 role="progressbar"
-                                aria-valuetext="Waiting for MiniMax to finish the full audio"
-                                aria-label="Speech synthesis progress"
+                                aria-valuetext={t('Waiting for MiniMax to finish the full audio')}
+                                aria-label={t("Speech synthesis progress")}
                               >
                                 <span className="speech-progress-bar" />
                               </div>
@@ -489,7 +497,7 @@ export default function VoiceDesignPage() {
                                 aria-valuenow={progressPercent(clip)}
                                 aria-valuemin={0}
                                 aria-valuemax={100}
-                                aria-label="Speech synthesis progress"
+                                aria-label={t("Speech synthesis progress")}
                               >
                                 <span
                                   className="speech-progress-bar"
@@ -499,8 +507,8 @@ export default function VoiceDesignPage() {
                             )}
                             <span className="speech-task-note">
                               {clip.async
-                                ? 'This is one MiniMax task; refreshing the page or restarting the gateway keeps following it.'
-                                : 'This task keeps running in the background; the finished audio appears here automatically.'}
+                                ? t('This is one MiniMax task; refreshing the page or restarting the gateway keeps following it.')
+                                : t("This task keeps running in the background; the finished audio appears here automatically.")}
                             </span>
                           </div>
                         )}
@@ -511,8 +519,8 @@ export default function VoiceDesignPage() {
 
                 <div className="voice-design-list-head">
                   <div>
-                    <h2>Designed voices</h2>
-                    <p>{designs.length} in this workspace</p>
+                    <h2>{t("Designed voices")}</h2>
+                    <p>{t('{n} in this workspace', { n: designs.length })}</p>
                   </div>
                 </div>
                 <div className="speech-list">

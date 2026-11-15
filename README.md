@@ -17,7 +17,7 @@ A self-hosted model gateway written in Go, with a React admin console. It expose
 - **Usage accounting** — prompt/completion tokens and cost from per-channel input/output prices, request logs with status, upstream model, latency and error detail. Filtered request detail can be downloaded as CSV for finance reconciliation.
 - **Admin console** — dashboard with 7-day traffic, top models and recent requests; channel, model, API key and log pages.
 - **Playground** — select an existing gateway key and try any model it can access: multi-turn chat, editable system prompt, temperature and max output, streaming, stop, Markdown conversation export, and request IDs that link to the request log.
-- **Simple to operate** — one Go binary with the console embedded, SQLite storage, no Redis or Postgres, graceful shutdown.
+- **Simple to operate** — one Go binary with the console embedded, SQLite by default or PostgreSQL through `DATABASE_URL`, no Redis, graceful shutdown.
 - **Ship-ready basics** — Dockerfile, docker-compose example, Makefile and GitHub Actions CI.
 
 ## Quick start
@@ -31,7 +31,7 @@ make build
 
 Open <http://localhost:8080> and sign in with the development credentials `admin` / `admin123`.
 
-> Set `SECRET_KEY` and `ADMIN_PASSWORD` before exposing an instance. The admin password is only used when the database is first created.
+> For the explicitly enabled local test environment, start with `TEST_MODE=1` to use `admin` / `admin`. Set `SECRET_KEY` and `ADMIN_PASSWORD` before exposing an instance; the admin password is only used when the database is first created. See [中文测试环境使用说明](docs/zh-CN/usage.md).
 
 ### First request
 
@@ -78,7 +78,7 @@ X-RateLimit-Limit-Concurrency: 4
 X-RateLimit-Remaining-Concurrency: 3
 ```
 
-Rate-limit windows are kept in memory by the running gateway. Restarting the process resets them (daily spend and the total balance are read from the request log and SQLite, so they survive restarts), and multiple gateway replicas do not share counters.
+Rate-limit windows are kept in memory by the running gateway. Restarting the process resets them (daily spend and the total balance are read from the request log and the configured database, so they survive restarts), and multiple gateway replicas do not share counters.
 
 ### Anthropic channels
 
@@ -123,7 +123,7 @@ Then open **Speech** in the console to:
 4. for text up to 2,000 characters, press **Generate and play**: playback starts with the first audio chunk while MiniMax is still synthesizing. **Stop** aborts the browser read and the relay request, so nothing is saved for an unfinished generation. A completed clip is saved in history, where it can be replayed and downloaded;
 5. for longer text, press **Start background task** and follow the progress bar. The task and its finished parts survive a refresh or a gateway restart.
 
-Short text uses MiniMax streaming: the relay requests 16-bit mono PCM chunks from `POST /v1/t2a_v2`, exposes them as server-sent events on `POST /api/speech/stream`, and the browser schedules them through the Web Audio API. The finished stream is wrapped as WAV and stored through the same `speech_clips` path as a synchronous clip. Longer text is submitted to the provider's asynchronous long-text API as **one task**: the gateway calls `POST /v1/t2a_async_v2` once with the complete manuscript, stores the returned `task_id` in SQLite, and returns immediately. It follows that task with `GET /v1/query/t2a_async_query_v2`, and on success downloads the finished audio from `/v1/files/retrieve_content` into `DATA_DIR/speech/`. Refreshing the page, opening a new tab or restarting the gateway all reuse the stored task id, so they follow the same upstream task and keep the same download.
+Short text uses MiniMax streaming: the relay requests 16-bit mono PCM chunks from `POST /v1/t2a_v2`, exposes them as server-sent events on `POST /api/speech/stream`, and the browser schedules them through the Web Audio API. The finished stream is wrapped as WAV and stored through the same `speech_clips` path as a synchronous clip. Longer text is submitted to the provider's asynchronous long-text API as **one task**: the gateway calls `POST /v1/t2a_async_v2` once with the complete manuscript, stores the returned `task_id` in the configured database (SQLite or PostgreSQL), and returns immediately. It follows that task with `GET /v1/query/t2a_async_query_v2`, and on success downloads the finished audio from `/v1/files/retrieve_content` into `DATA_DIR/speech/`. Refreshing the page, opening a new tab or restarting the gateway all reuse the stored task id, so they follow the same upstream task and keep the same download.
 
 The Speech model picker lists public models whose ID starts with `speech-`; an alias keeps a `speech-` prefix to appear, for example `speech-my-voice=speech-2.8-hd`. Short text streams through `POST /v1/t2a_v2`; long text uses the asynchronous task described above. The browser receives the clip only through the authenticated `/api/speech/{id}/content` endpoint, so the upstream key and temporary provider URLs are never exposed. Speech generation is console-only: it is not metered per gateway key and does not appear in request logs. Databases from the earlier chunked long-text implementation are migrated in place: finished clips stay available, and jobs that were still running keep finishing with the legacy chunk runner.
 
@@ -173,15 +173,43 @@ docker run --rm -p 8080:8080 \
 
 For Compose, create a `.env` file containing `SECRET_KEY` and `ADMIN_PASSWORD` (see the configuration table), then run `docker compose up --build`. The compose file loads that file via `env_file` and refuses to start without it.
 
+### PostgreSQL (optional)
+
+SQLite stays the default and existing single-file installs need no changes. To use PostgreSQL, point `DATABASE_URL` at a database and leave `DATA_DIR` in place for videos, audio and cloned-voice previews:
+
+```bash
+read -rsp 'database password: ' PGPASSWORD; echo
+export PGPASSWORD
+export DATABASE_URL="postgres://relay@127.0.0.1:5432/exp_model_relay?sslmode=disable"
+export SECRET_KEY='replace-with-a-long-random-string'
+export ADMIN_PASSWORD='replace-me'
+./bin/gateway
+```
+
+The gateway creates its schema on first start and migrates it in place on later starts. The URL is never logged. A dedicated database such as `exp_model_relay` is recommended; do not commit a real connection string or password. To run PostgreSQL and the gateway with Compose:
+
+```bash
+cp .env.example .env
+# Fill in SECRET_KEY, ADMIN_PASSWORD, POSTGRES_* and PGPASSWORD, then set
+# DATABASE_URL=postgres://relay@postgres:5432/exp_model_relay?sslmode=disable
+docker compose -f docker-compose.postgres.yml up --build
+```
+
+The compose file reads everything from `.env`, so no credential value or credential-bearing URL is committed in the YAML itself.
+
+Switching an existing SQLite installation to PostgreSQL starts with an empty database; there is no automatic cross-backend data migration. Keep the SQLite data directory if you need to roll back.
+
 ## Configuration
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PORT` | `8080` | HTTP listen port. |
-| `DATA_DIR` | `./data` | Directory for `gateway.db`, downloaded videos, generated speech, music, cloned-voice previews and voice-design previews (created automatically). |
+| `DATA_DIR` | `./data` | Directory for `gateway.db` (SQLite), downloaded videos, generated speech, music, cloned-voice previews and voice-design previews (created automatically). |
+| `DATABASE_URL` | _(empty)_ | PostgreSQL URL (`postgres://` or `postgresql://`). When set, PostgreSQL replaces SQLite; the URL and its credentials are never logged. |
 | `SECRET_KEY` | `dev-secret-change-me` | Signs admin sessions and encrypts upstream API keys with AES-256-GCM. Use a stable secret. |
 | `ADMIN_USERNAME` | `admin` | Admin username created on first boot. |
-| `ADMIN_PASSWORD` | `admin123` | Admin password created on first boot (minimum 6 characters). |
+| `ADMIN_PASSWORD` | `admin123` | Admin password created on first boot (minimum 6 characters). In production always set a strong value. |
+| `TEST_MODE` | `false` | Explicitly enables the local test environment: defaults the initial admin account to `admin` / `admin`, opens the console in Chinese, and is **not** for production. |
 | `SESSION_TTL_HOURS` | `24` | Admin session lifetime. |
 | `REQUEST_TIMEOUT_SECONDS` | `300` | Timeout for non-streaming upstream requests. A timeout after the request may have reached the provider is booked as an unverified charge. |
 | `STREAM_TIMEOUT_SECONDS` | `1800` | Hard overall limit for a streaming request. It bounds how long a stream can hold a quota reservation. Set to `0` to disable the cap. |
@@ -272,7 +300,7 @@ Finite-quota keys are admitted against a balance that includes in-flight reserva
 available = quota - used_quota - SUM(pending reservation amounts)
 ```
 
-The reservation is created atomically in SQLite before the request is sent upstream, so two concurrent requests for the same key cannot spend the same balance. Before sending, the gateway computes a cost upper bound:
+The reservation is created atomically in the configured database before the request is sent upstream, so two concurrent requests for the same key cannot spend the same balance. Before sending, the gateway computes a cost upper bound:
 
 - Prompt tokens: the request body's byte length plus chat framing overhead. A token never encodes fewer than one byte, so this is a true upper bound (conservative for text and image payloads).
 - Completion tokens: the client's `max_tokens`/`max_completion_tokens` (the larger one) multiplied by `n`. When the client omits a limit and the key has a finite quota, the gateway injects `max_tokens = QUOTA_DEFAULT_OUTPUT_TOKENS` so the upstream cannot generate more than was reserved.
@@ -280,7 +308,7 @@ The reservation is created atomically in SQLite before the request is sent upstr
 
 If the upper bound does not fit in the available balance, the request is rejected with HTTP `429`, `type: insufficient_quota`, and a message stating the required and available amounts. Requests are never serialized globally; unrelated keys and requests that fit their own balance proceed concurrently.
 
-Every reservation is finalized exactly once, in one SQLite transaction that updates `used_quota` and writes the request log. A duplicate completion notification for the same reservation is ignored. The log records `cost_status`:
+Every reservation is finalized exactly once, in one database transaction that updates `used_quota` and writes the request log. A duplicate completion notification for the same reservation is ignored. The log records `cost_status`:
 
 | `cost_status` | Meaning |
 | --- | --- |
@@ -304,7 +332,7 @@ This is a single-node gateway, so a reservation found `pending` at startup canno
 2. marks the reservation `recovered` and the charge `unverified`,
 3. writes an error log explaining that the process restarted before completion.
 
-Settled charges are committed in SQLite and are not lost. In-flight holds are therefore never released for free and never lock a key forever. The admin ledger endpoint `GET /api/ledger` lists recent reservations and their states; the dashboard shows unverified spend separately from the note in the Spend card, and the Request logs page shows the cost basis for every call.
+Settled charges are committed in the configured database and are not lost. In-flight holds are therefore never released for free and never lock a key forever. The admin ledger endpoint `GET /api/ledger` lists recent reservations and their states; the dashboard shows unverified spend separately from the note in the Spend card, and the Request logs page shows the cost basis for every call.
 
 A key with quota `-1` is unlimited: it still gets reservations and records usage, but it is never rejected for balance. `rpm_limit: 0` means unlimited. Model allowlists and RPM limits are enforced before the reservation and are unchanged.
 
@@ -315,7 +343,7 @@ A key with quota `-1` is unlimited: it still gets reservations and records usage
 - A non-2xx upstream response during failover is treated as unbilled because no usage is reported. Providers that charge for rejected or failed requests cannot be detected from a non-2xx response; those charges are invisible to the gateway and must be reconciled with the provider.
 - Prompt upper bounds count the serialized body, so multimodal inputs and large JSON payloads reserve much more than their eventual token cost. This is deliberate: it keeps the hold conservative, and the unused amount is released at settlement.
 - `unverified` charges are conservative by design: when a timeout or cancellation happens after the request may have reached the provider, the reserved upper bound is charged instead of silently recording zero. Review them in Request logs; the gateway does not currently provide an automatic refund workflow.
-- The reservations are enforced with SQLite transactions on one node. Multi-node deployments would need a shared transactional store and are out of scope.
+- The reservations are enforced with database transactions on one node (SQLite serializes writers; PostgreSQL locks the token row). Multi-node deployments would also need shared rate-limit state and are out of scope.
 
 ## HTTP API
 
@@ -385,7 +413,7 @@ internal/config/       environment configuration
 internal/gateway/      relay, routing, OpenAI/Anthropic adapters, video tasks, speech synthesis, voice cloning, voice design, accounting
 internal/secretbox/    AES-GCM encryption for upstream keys
 internal/server/       HTTP API, middleware, static console
-internal/store/        SQLite schema and queries
+internal/store/        SQLite/PostgreSQL schema, queries and quota accounting
 web/                   React + TypeScript admin console (Vite)
 scripts/               development helpers
 docs/screenshots/      console screenshots used in this README
@@ -394,8 +422,8 @@ docs/screenshots/      console screenshots used in this README
 ## Security notes and limitations
 
 - This is a focused self-hosted gateway, not a hosted billing platform. There is **one admin account**; API keys do not belong to separate end users, and there is no registration, team or role system.
-- SQLite uses a single writer. It is a good fit for a small team or a single-node deployment; horizontal scaling would require an external database and shared rate-limit state, which are not implemented.
-- The default `SECRET_KEY` and `ADMIN_PASSWORD` are development values. Use a long random secret and a strong password, terminate TLS in front of the gateway, and treat `SECRET_KEY` as a credential.
+- SQLite uses a single writer and is the default for a single-node deployment. PostgreSQL is supported through `DATABASE_URL`; per-key reservations take a row lock so concurrent requests cannot overspend. Rate-limit windows and admin login throttling are still in memory, so multiple gateway replicas do not share them.
+- The default `SECRET_KEY` and `ADMIN_PASSWORD` are development values. `TEST_MODE=1` additionally enables `admin` / `admin`; it must only be used for a local test environment. Use a long random secret and a strong password, terminate TLS in front of the gateway, and treat `SECRET_KEY` as a credential.
 - Upstream channel URLs are configured by an authenticated admin. The gateway will fetch whatever URL is configured, so restrict admin access accordingly.
 - The Anthropic adapter translates text, image data URLs, tool calls and tool results. Remote image URLs are not converted. OpenAI's Responses API, audio, rerank and native Anthropic endpoints are out of scope.
 - MiniMax-H3 video tasks are managed from the admin console; there is no gateway-key video API and video generation is not charged against key quotas. Task history and downloaded MP4 files stay in `DATA_DIR` until removed manually.
@@ -408,7 +436,7 @@ docs/screenshots/      console screenshots used in this README
 
 ## Upgrading an existing installation
 
-The SQLite schema is migrated automatically on startup: the gateway adds `logs.cost_status`, `logs.reserved_cost`, `logs.reservation_id` and the `token_reservations` table when they are missing, along with the per-key limit columns (`tpm_limit`, `max_concurrency`, `daily_quota`), the `video_tasks`, `speech_clips`, `voice_clones` and `voice_designs` tables, and the speech task columns (`speed`, `status`, `error`, `total_chunks`, `done_chunks`, `upstream_task_id`, `upstream_file_id`). Existing speech clips become `succeeded` rows and are not deleted; an older in-flight chunked job keeps its chunk progress and finishes through the legacy runner. No manual database step is required.
+The SQLite and PostgreSQL schemas are migrated automatically on startup: the gateway adds `logs.cost_status`, `logs.reserved_cost`, `logs.reservation_id` and the `token_reservations` table when they are missing, along with the per-key limit columns (`tpm_limit`, `max_concurrency`, `daily_quota`), the `video_tasks`, `speech_clips`, `voice_clones`, `voice_designs` and `music_tasks` tables, and the speech task columns (`speed`, `status`, `error`, `total_chunks`, `done_chunks`, `upstream_task_id`, `upstream_file_id`). Existing speech clips become `succeeded` rows and are not deleted; an older in-flight chunked job keeps its chunk progress and finishes through the legacy runner. An empty PostgreSQL database is initialized with the same tables on first start; data is not copied between backends. No manual database step is required.
 
 Existing keys and channels keep their configuration. Because the previous version had no reservations, the first boot after the upgrade has no pending reservations to recover; settled historical costs remain as recorded. New optional environment variables (`STREAM_TIMEOUT_SECONDS`, `QUOTA_DEFAULT_OUTPUT_TOKENS`) default to the values in the table above. Restart the binary (or rebuild the Docker image) as usual.
 

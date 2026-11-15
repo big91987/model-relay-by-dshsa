@@ -8,6 +8,7 @@ import { relativeTime } from '../lib/format'
 import { SpeechStreamPlayer, type SpeechStreamProgress } from '../lib/speechStream'
 import { useToast } from '../lib/toast'
 import type { ModelInfo, SpeechClip, SpeechClipStatus, SpeechVoice, VoiceClone } from '../lib/types'
+import { t } from '../lib/i18n'
 
 const MAX_TEXT = 50000
 // Text longer than this is accepted as a background job instead of holding the
@@ -33,7 +34,7 @@ function isPending(clip: SpeechClip): boolean {
 }
 
 function formatDuration(durationMS: number): string {
-  if (!durationMS || durationMS <= 0) return 'Unknown length'
+  if (!durationMS || durationMS <= 0) return t("Unknown length")
   const seconds = Math.round(durationMS / 1000)
   const minutes = Math.floor(seconds / 60)
   return `${minutes}:${String(seconds % 60).padStart(2, '0')}`
@@ -114,13 +115,13 @@ async function recordingToWav(blob: Blob, context: AudioContext): Promise<{ blob
 function statusLabel(status: SpeechClipStatus): string {
   switch (status) {
     case 'queued':
-      return 'Queued'
+      return t("Queued")
     case 'running':
-      return 'Synthesizing'
+      return t("Synthesizing")
     case 'succeeded':
-      return 'Ready'
+      return t("Ready")
     case 'failed':
-      return 'Failed'
+      return t("Failed")
   }
 }
 
@@ -154,7 +155,7 @@ function SpeechCard({ clip }: { clip: SpeechClip }) {
           <div className="video-meta">
             {clip.model} ·{' '}
             {clip.status === 'succeeded' ? `${formatDuration(clip.duration_ms)} · ` : ''}
-            {clip.characters.toLocaleString()} characters{size ? ` · ${size}` : ''} · {relativeTime(clip.created_at)}
+            {t('{n} characters', { n: clip.characters.toLocaleString() })}{size ? ` · ${size}` : ''} · {relativeTime(clip.created_at)}
           </div>
         </div>
         <SpeechStatus status={clip.status} />
@@ -166,10 +167,13 @@ function SpeechCard({ clip }: { clip: SpeechClip }) {
             <Spinner size={14} />
             <span className="speech-task-label">
               {clip.status === 'queued'
-                ? 'Submitting the task…'
+                ? t('Submitting the task…')
                 : oneTask
-                  ? 'MiniMax is generating the full audio as one task…'
-                  : `Synthesizing part ${Math.min(clip.done_chunks + 1, clip.total_chunks)} of ${clip.total_chunks}…`}
+                  ? t('MiniMax is generating the full audio as one task…')
+                  : t('Synthesizing part {current} of {total}…', {
+                      current: Math.min(clip.done_chunks + 1, clip.total_chunks),
+                      total: clip.total_chunks,
+                    })}
             </span>
             {oneTask ? null : <span className="speech-task-percent">{percent}%</span>}
           </div>
@@ -177,8 +181,8 @@ function SpeechCard({ clip }: { clip: SpeechClip }) {
             <div
               className="speech-progress speech-progress-indeterminate"
               role="progressbar"
-              aria-valuetext="Waiting for MiniMax to finish the full audio"
-              aria-label="Speech synthesis progress"
+              aria-valuetext={t('Waiting for MiniMax to finish the full audio')}
+              aria-label={t("Speech synthesis progress")}
             >
               <span className="speech-progress-bar" />
             </div>
@@ -189,45 +193,45 @@ function SpeechCard({ clip }: { clip: SpeechClip }) {
               aria-valuenow={percent}
               aria-valuemin={0}
               aria-valuemax={100}
-              aria-label="Speech synthesis progress"
+              aria-label={t("Speech synthesis progress")}
             >
               <span className="speech-progress-bar" style={{ width: `${percent}%` }} />
             </div>
           )}
           <span className="speech-task-note">
             {oneTask
-              ? 'This is one MiniMax long-text task, tracked by its task id. Refresh, reopen the page or restart the gateway and it keeps following the same task.'
-              : 'This task keeps running in the background; refresh or leave the page and come back to download it.'}
+              ? t('This is one MiniMax long-text task, tracked by its task id. Refresh, reopen the page or restart the gateway and it keeps following the same task.')
+              : t("This task keeps running in the background; refresh or leave the page and come back to download it.")}
           </span>
         </div>
       ) : clip.status === 'failed' ? (
         <div className="speech-audio-missing">
-          <Icon name="alert" size={14} /> {clip.error || 'Speech synthesis failed.'}
+          <Icon name="alert" size={14} /> {clip.error || t("Speech synthesis failed.")}
         </div>
       ) : ready ? (
         <audio className="speech-audio" controls preload="metadata" src={clip.content_url}>
-          Your browser cannot play this audio.
+          {t("Your browser cannot play this audio.")}
         </audio>
       ) : (
         <div className="speech-audio-missing">
-          <Icon name="alert" size={14} /> The stored audio file is not available.
+          <Icon name="alert" size={14} /> {t("The stored audio file is not available.")}
         </div>
       )}
       <div className="video-actions">
         {ready ? (
           <a className="btn btn-sm btn-ghost" href={`${clip.content_url}?download=1`}>
-            <Icon name="download" size={15} /> Download {format}
+            <Icon name="download" size={15} /> {t('Download {format}', { format })}
           </a>
         ) : (
           <span className="video-meta">
             {clip.status === 'failed'
-              ? 'No audio to download'
+              ? t("No audio to download")
               : oneTask
-                ? 'One task will produce the full audio'
-                : `Audio will be ready after ${clip.total_chunks} parts`}
+                ? t('One task will produce the full audio')
+                : t('Audio will be ready after {parts} parts', { parts: clip.total_chunks })}
           </span>
         )}
-        <span className="video-meta">by {clip.channel_name}</span>
+        <span className="video-meta">{t('by {channel}', { channel: clip.channel_name })}</span>
       </div>
       <div className="speech-voice-id mono">{clip.voice_id}</div>
     </article>
@@ -257,10 +261,10 @@ function CloneCard({
         <div className="voice-clone-name">{clone.name || clone.voice_id}</div>
         {selected ? (
           <span className="badge badge-success">
-            <Icon name="check" size={12} /> Selected
+            <Icon name="check" size={12} /> {t("Selected")}
           </span>
         ) : (
-          <span className="badge badge-muted">Cloned</span>
+          <span className="badge badge-muted">{t("Cloned")}</span>
         )}
       </div>
       <div className="video-meta voice-clone-meta">
@@ -270,15 +274,15 @@ function CloneCard({
       <p className="speech-text">{clone.preview_text}</p>
       {ready ? (
         <audio className="speech-audio" controls preload="metadata" src={previewSrc}>
-          Your browser cannot play this preview.
+          {t("Your browser cannot play this preview.")}
         </audio>
       ) : (
         <div className="speech-note">
           <Icon name="alert" size={14} />
           <span>
-            The preview is not ready yet.
+            {t("The preview is not ready yet.")}
             <button className="link-button" onClick={onRegenerate} disabled={previewing}>
-              {previewing ? 'Generating…' : 'Generate preview'}
+              {previewing ? t("Generating…") : t("Generate preview")}
             </button>
           </span>
         </div>
@@ -286,11 +290,11 @@ function CloneCard({
       <div className="video-actions">
         <button className="btn btn-sm btn-ghost" onClick={onUse} disabled={selected}>
           {selected ? <Icon name="check" size={15} /> : <Icon name="speech" size={15} />}
-          {selected ? 'In use' : 'Use voice'}
+          {selected ? t("In use") : t("Use voice")}
         </button>
         {ready ? (
           <button className="btn btn-sm btn-ghost" onClick={onRegenerate} disabled={previewing}>
-            <Icon name="refresh" size={14} /> {previewing ? 'Generating…' : 'New preview'}
+            <Icon name="refresh" size={14} /> {previewing ? t("Generating…") : t("New preview")}
           </button>
         ) : null}
       </div>
@@ -370,7 +374,7 @@ export default function Speech() {
   const voiceGroups = useMemo(() => {
     const groups = new Map<string, SpeechVoice[]>()
     for (const voice of voices) {
-      const language = voice.language || 'Other'
+      const language = voice.language || t('Other')
       const list = groups.get(language) ?? []
       list.push(voice)
       groups.set(language, list)
@@ -385,14 +389,17 @@ export default function Speech() {
   )
 
   const voiceHint = voicesLoading
-    ? 'Loading system voices from MiniMax…'
+    ? t("Loading system voices from MiniMax…")
     : selectedClone
-      ? `Cloned from ${selectedClone.source_filename} on ${selectedClone.channel_name}. Listen to the preview, then generate speech with it.`
+      ? t('Cloned from {file} on {channel}. Listen to the preview, then generate speech with it.', {
+            file: selectedClone.source_filename,
+            channel: selectedClone.channel_name,
+          })
       : selectedVoice
-        ? `${selectedVoice.description ? `${selectedVoice.description} ` : ''}ID: ${selectedVoice.voice_id}`
+        ? `${selectedVoice.description ? `${selectedVoice.description} ` : ''}${t('ID: {id}', { id: selectedVoice.voice_id })}`
         : clones.length > 0
-          ? 'Choose a system voice or one of your cloned voices.'
-          : 'No system voices are available.'
+          ? t("Choose a system voice or one of your cloned voices.")
+          : t("No system voices are available.")
   const canClone = speechModels.length > 0 && !loading
 
   const cleanupRecording = useCallback(() => {
@@ -445,7 +452,7 @@ export default function Speech() {
         setTotal(speechResponse.total)
         setClones(cloneResponse.items)
       } catch (err) {
-        if (active) setError(err instanceof Error ? err.message : 'Failed to load text to speech')
+        if (active) setError(err instanceof Error ? err.message : t("Failed to load text to speech"))
       } finally {
         if (active) setLoading(false)
       }
@@ -491,7 +498,7 @@ export default function Speech() {
         if (!active) return
         setVoices([])
         setVoiceWarning('')
-        setVoiceError(err instanceof Error ? err.message : 'Failed to load system voices')
+        setVoiceError(err instanceof Error ? err.message : t("Failed to load system voices"))
         setVoiceId((previous) => clones.find((clone) => clone.voice_id === previous)?.voice_id ?? '')
       })
       .finally(() => {
@@ -574,11 +581,11 @@ export default function Speech() {
     setCloneError('')
     if (!file) return
     if (!SAMPLE_EXTENSIONS.includes(fileExtension(file.name))) {
-      setCloneError('Choose an mp3, m4a or wav recording.')
+      setCloneError(t("Choose an mp3, m4a or wav recording."))
       return
     }
     if (file.size > MAX_SAMPLE_BYTES) {
-      setCloneError('The recording must be 20 MB or smaller.')
+      setCloneError(t("The recording must be 20 MB or smaller."))
       return
     }
     const url = URL.createObjectURL(file)
@@ -604,7 +611,10 @@ export default function Speech() {
       if (discardRecordingRef.current) return
       if (prepared.duration < MIN_SAMPLE_SECONDS) {
         setRecordingError(
-          `The recording is ${prepared.duration.toFixed(1)} seconds; MiniMax needs at least ${MIN_SAMPLE_SECONDS}. Record again.`,
+          t('The recording is {seconds} seconds; MiniMax needs at least {min}. Record again.', {
+            seconds: prepared.duration.toFixed(1),
+            min: MIN_SAMPLE_SECONDS,
+          }),
         )
         setRecordingApplied(false)
         setCloneFile(null)
@@ -612,7 +622,7 @@ export default function Speech() {
         return
       }
       if (prepared.duration > MAX_SAMPLE_SECONDS) {
-        setRecordingError(`The recording is longer than ${MAX_SAMPLE_SECONDS / 60} minutes. Record again.`)
+        setRecordingError(t('The recording is longer than {minutes} minutes. Record again.', { minutes: MAX_SAMPLE_SECONDS / 60 }))
         setRecordingApplied(false)
         setCloneFile(null)
         setCloneSampleDuration(null)
@@ -625,7 +635,7 @@ export default function Speech() {
     } catch (err) {
       if (!discardRecordingRef.current) {
         setRecordingError(
-          err instanceof Error ? `Could not prepare the recording: ${err.message}` : 'Could not prepare the recording.',
+          err instanceof Error ? t('Could not prepare the recording: {message}', { message: err.message }) : t("Could not prepare the recording."),
         )
       }
     } finally {
@@ -635,7 +645,7 @@ export default function Speech() {
 
   const startRecording = async () => {
     if (!recordingSupported) {
-      setRecordingError('This browser cannot record audio. Upload a file instead.')
+      setRecordingError(t("This browser cannot record audio. Upload a file instead."))
       return
     }
     if (recordingStartingRef.current) return
@@ -682,7 +692,7 @@ export default function Speech() {
         if (discardRecordingRef.current) return
         const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' })
         if (blob.size === 0) {
-          setRecordingError('No audio was captured. Check your microphone and try again.')
+          setRecordingError(t("No audio was captured. Check your microphone and try again."))
           return
         }
         const url = URL.createObjectURL(blob)
@@ -710,7 +720,7 @@ export default function Speech() {
       }
       setRecording(false)
       setRecordingError(
-        err instanceof Error ? `Could not access the microphone: ${err.message}` : 'Could not access the microphone.',
+        err instanceof Error ? t('Could not access the microphone: {message}', { message: err.message }) : t("Could not access the microphone."),
       )
     } finally {
       recordingStartingRef.current = false
@@ -752,33 +762,33 @@ export default function Speech() {
 
   const submitClone = async () => {
     if (!cloneName.trim()) {
-      setCloneError('Give the cloned voice a name.')
+      setCloneError(t("Give the cloned voice a name."))
       return
     }
     if (!cloneFile) {
       setCloneError(
-        cloneSource === 'record' ? 'Record a sample or switch to uploading a file.' : 'Choose the sample recording to clone.',
+        cloneSource === 'record' ? t("Record a sample or switch to uploading a file.") : t("Choose the sample recording to clone."),
       )
       return
     }
     if (!SAMPLE_EXTENSIONS.includes(fileExtension(cloneFile.name))) {
-      setCloneError('Choose an mp3, m4a or wav recording.')
+      setCloneError(t("Choose an mp3, m4a or wav recording."))
       return
     }
     if (cloneFile.size > MAX_SAMPLE_BYTES) {
-      setCloneError('The recording must be 20 MB or smaller.')
+      setCloneError(t("The recording must be 20 MB or smaller."))
       return
     }
     if (!clonePreviewText.trim()) {
-      setCloneError('Enter the text to preview with the cloned voice.')
+      setCloneError(t("Enter the text to preview with the cloned voice."))
       return
     }
     if (!cloneModel) {
-      setCloneError('Choose a speech model for the preview.')
+      setCloneError(t("Choose a speech model for the preview."))
       return
     }
     if (!cloneAuthorized) {
-      setCloneError('Confirm that you have permission to use this recording.')
+      setCloneError(t("Confirm that you have permission to use this recording."))
       return
     }
     if (
@@ -786,7 +796,9 @@ export default function Speech() {
       (cloneSampleDuration < MIN_SAMPLE_SECONDS || cloneSampleDuration > MAX_SAMPLE_SECONDS)
     ) {
       setCloneError(
-        `The recording must be between 10 seconds and 5 minutes (detected ${Math.round(cloneSampleDuration)} s).`,
+        t('The recording must be between 10 seconds and 5 minutes (detected {seconds} s).', {
+          seconds: Math.round(cloneSampleDuration),
+        }),
       )
       return
     }
@@ -809,10 +821,10 @@ export default function Speech() {
       if (created.preview_warning) {
         toast.error(created.preview_warning)
       } else {
-        toast.success('Voice cloned. Listen to the preview, then generate speech with it.')
+        toast.success(t("Voice cloned. Listen to the preview, then generate speech with it."))
       }
     } catch (err) {
-      setCloneError(err instanceof Error ? err.message : 'Failed to clone the voice')
+      setCloneError(err instanceof Error ? err.message : t("Failed to clone the voice"))
     } finally {
       setCloneSubmitting(false)
     }
@@ -824,9 +836,9 @@ export default function Speech() {
       const updated = await api.previewVoiceClone(clone.id, clone.preview_text)
       setClones((previous) => previous.map((item) => (item.id === updated.id ? updated : item)))
       setPreviewNonces((previous) => ({ ...previous, [updated.id]: (previous[updated.id] ?? 0) + 1 }))
-      toast.success('Preview generated')
+      toast.success(t("Preview generated"))
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to generate a preview')
+      toast.error(err instanceof Error ? err.message : t("Failed to generate a preview"))
     } finally {
       setPreviewingCloneId(null)
     }
@@ -846,12 +858,12 @@ export default function Speech() {
       setTotal((previous) => previous + 1)
       setText('')
       if (isPending(clip)) {
-        toast.success('Long text submitted as one background task')
+        toast.success(t('Long text submitted as one background task'))
       } else {
-        toast.success('Speech generated')
+        toast.success(t("Speech generated"))
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to generate speech')
+      toast.error(err instanceof Error ? err.message : t("Failed to generate speech"))
     } finally {
       setSubmitting(false)
     }
@@ -884,7 +896,7 @@ export default function Speech() {
             setTotal((previous) => previous + 1)
             setText('')
             setPhase('playing')
-            toast.success('Speech generated')
+            toast.success(t("Speech generated"))
           },
           onPlaybackEnd: () => {
             if (player.isStopped) return
@@ -897,21 +909,21 @@ export default function Speech() {
         if (player.isStopped) return
         playerRef.current = null
         setLive(false)
-        toast.error(err instanceof Error ? err.message : 'Failed to generate speech')
+        toast.error(err instanceof Error ? err.message : t("Failed to generate speech"))
       })
   }
 
   const submit = () => {
     if (!model) {
-      toast.error('Add a MiniMax channel with a speech model first')
+      toast.error(t("Add a MiniMax channel with a speech model first"))
       return
     }
     if (!text.trim()) {
-      toast.error('Enter the text you want to hear')
+      toast.error(t("Enter the text you want to hear"))
       return
     }
     if (!voiceId) {
-      toast.error('Choose a voice')
+      toast.error(t("Choose a voice"))
       return
     }
     if (backgroundTask) {
@@ -929,23 +941,23 @@ export default function Speech() {
     setLive(false)
     setStreamNotice(
       clipSavedRef.current
-        ? 'Playback stopped. The completed clip is saved in the history below and can be replayed there.'
-        : 'Playback stopped before generation finished, so no clip was saved. Choose “Generate and play” to start again.',
+        ? t('Playback stopped. The completed clip is saved in the history below and can be replayed there.')
+        : t('Playback stopped before generation finished, so no clip was saved. Choose “Generate and play” to start again.'),
     )
   }
 
   return (
     <div className="page">
       <PageHeader
-        title="Text to speech"
-        subtitle="MiniMax speech synthesis from the console. Short text starts playing while it is still being synthesized; long text is submitted as one asynchronous task that survives a page refresh or a gateway restart."
+        title={t("Text to speech")}
+        subtitle={t('MiniMax speech synthesis from the console. Short text starts playing while it is still being synthesized; long text is submitted as one asynchronous task that survives a page refresh or a gateway restart.')}
         actions={
           <>
             <button className="btn btn-ghost" onClick={refresh} disabled={loading}>
-              <Icon name="refresh" size={16} /> Refresh
+              <Icon name="refresh" size={16} /> {t("Refresh")}
             </button>
             <button className="btn btn-primary" onClick={openCloneModal} disabled={!canClone}>
-              <Icon name="upload" size={16} /> Clone a voice
+              <Icon name="upload" size={16} /> {t("Clone a voice")}
             </button>
           </>
         }
@@ -954,25 +966,25 @@ export default function Speech() {
 
       {loading ? (
         <div className="page-loading">
-          <Spinner size={22} /> Loading text to speech…
+          <Spinner size={22} /> {t("Loading text to speech…")}
         </div>
       ) : (
         <div className="speech-layout">
           <section className="panel speech-create">
             <div className="panel-head">
               <div>
-                <h2>Generate speech</h2>
-                <p>Choose a voice and let MiniMax read your text aloud.</p>
+                <h2>{t("Generate speech")}</h2>
+                <p>{t("Choose a voice and let MiniMax read your text aloud.")}</p>
               </div>
             </div>
             {speechModels.length === 0 ? (
               <EmptyState
                 icon="speech"
-                title="No speech model"
-                description="Add a MiniMax channel with a speech model such as speech-2.8-hd, then come back here to generate speech. Fetch models on the channel adds the MiniMax speech family."
+                title={t("No speech model")}
+                description={t("Add a MiniMax channel with a speech model such as speech-2.8-hd, then come back here to generate speech. Fetch models on the channel adds the MiniMax speech family.")}
                 action={
                   <Link className="btn btn-primary" to="/channels">
-                    <Icon name="plus" size={16} /> Add a channel
+                    <Icon name="plus" size={16} /> {t("Add a channel")}
                   </Link>
                 }
               />
@@ -984,7 +996,7 @@ export default function Speech() {
                   void submit()
                 }}
               >
-                <FormField label="Model">
+                <FormField label={t("Model")}>
                   <select className="input" value={model} onChange={(event) => setModel(event.target.value)}>
                     {speechModels.map((item) => (
                       <option key={item.id} value={item.id}>
@@ -993,7 +1005,7 @@ export default function Speech() {
                     ))}
                   </select>
                 </FormField>
-                <FormField label="Voice" hint={voiceHint}>
+                <FormField label={t("Voice")} hint={voiceHint}>
                   <select
                     className="input"
                     value={voiceId}
@@ -1001,10 +1013,10 @@ export default function Speech() {
                     onChange={(event) => chooseVoice(event.target.value)}
                   >
                     {clones.length === 0 && voiceGroups.length === 0 ? (
-                      <option value="">{voicesLoading ? 'Loading voices…' : 'No voices available'}</option>
+                      <option value="">{voicesLoading ? t("Loading voices…") : t("No voices available")}</option>
                     ) : null}
                     {clones.length > 0 ? (
-                      <optgroup label="My cloned voices">
+                      <optgroup label={t("My cloned voices")}>
                         {clones.map((clone) => (
                           <option key={clone.voice_id} value={clone.voice_id}>
                             {clone.name || clone.voice_id}
@@ -1027,11 +1039,13 @@ export default function Speech() {
                   <div className="selected-clone">
                     <div className="selected-clone-head">
                       <span className="badge badge-success">
-                        <Icon name="check" size={12} /> Cloned voice
+                        <Icon name="check" size={12} /> {t("Cloned voice")}
                       </span>
                       <span className="video-meta">
-                        {formatDuration(selectedClone.preview_duration_ms)} preview ·{' '}
-                        {selectedClone.sample_format.toUpperCase()} sample
+                        {t('{duration} preview · {format} sample', {
+                          duration: formatDuration(selectedClone.preview_duration_ms),
+                          format: selectedClone.sample_format.toUpperCase(),
+                        })}
                       </span>
                     </div>
                     {selectedClone.preview_ready && selectedClone.preview_url ? (
@@ -1041,19 +1055,19 @@ export default function Speech() {
                         preload="metadata"
                         src={previewSrc(selectedClone)}
                       >
-                        Your browser cannot play this preview.
+                        {t("Your browser cannot play this preview.")}
                       </audio>
                     ) : (
                       <div className="speech-note">
                         <Icon name="alert" size={14} />
                         <span>
-                          This voice has no preview yet.
+                          {t("This voice has no preview yet.")}
                           <button
                             className="link-button"
                             onClick={() => void regeneratePreview(selectedClone)}
                             disabled={previewingCloneId === selectedClone.id}
                           >
-                            {previewingCloneId === selectedClone.id ? 'Generating…' : 'Generate preview'}
+                            {previewingCloneId === selectedClone.id ? t("Generating…") : t("Generate preview")}
                           </button>
                         </span>
                       </div>
@@ -1073,8 +1087,12 @@ export default function Speech() {
                   </div>
                 ) : null}
                 <FormField
-                  label="Text"
-                  hint={`${text.length} / ${MAX_TEXT} characters${backgroundTask ? ' · will run in the background' : ''}`}
+                  label={t("Text")}
+                  hint={
+                  backgroundTask
+                    ? t('{n} / {max} characters · will run in the background', { n: text.length, max: MAX_TEXT })
+                    : t('{n} / {max} characters', { n: text.length, max: MAX_TEXT })
+                }
                 >
                   <textarea
                     className="input textarea"
@@ -1082,12 +1100,12 @@ export default function Speech() {
                     maxLength={MAX_TEXT}
                     value={text}
                     onChange={(event) => setText(event.target.value)}
-                    placeholder="Type or paste the text you want MiniMax to read aloud. Longer text is submitted as one asynchronous task…"
+                    placeholder={t('Type or paste the text you want MiniMax to read aloud. Longer text is submitted as one asynchronous task…')}
                   />
                 </FormField>
                 <div className="field">
                   <span className="param-head">
-                    <span className="field-label">Speed</span>
+                    <span className="field-label">{t("Speed")}</span>
                     <span className="param-value">{speed.toFixed(1)}×</span>
                   </span>
                   <input
@@ -1099,7 +1117,7 @@ export default function Speech() {
                     value={speed}
                     onChange={(event) => setSpeed(Number.parseFloat(event.target.value))}
                   />
-                  <span className="field-hint">0.5× to 2×. The default is 1×.</span>
+                  <span className="field-hint">{t("0.5× to 2×. The default is 1×.")}</span>
                 </div>
                 {live ? (
                   <div className="speech-live">
@@ -1113,15 +1131,18 @@ export default function Speech() {
                       </span>
                       <div>
                         <div className="speech-live-title" role="status">
-                          {phase === 'streaming' ? 'Generating and playing…' : 'Playing generated audio…'}
+                          {phase === 'streaming' ? t('Generating and playing…') : t('Playing generated audio…')}
                         </div>
                         <div className="speech-live-meta">
-                          {formatClock(progress.played)} played · {formatClock(progress.generated)} received
+                          {t('{played} played · {generated} received', {
+                            played: formatClock(progress.played),
+                            generated: formatClock(progress.generated),
+                          })}
                         </div>
                       </div>
                     </div>
                     <button className="btn btn-sm btn-danger" type="button" onClick={stopPlayback}>
-                      <Icon name="stop" size={15} /> Stop
+                      <Icon name="stop" size={15} /> {t('Stop')}
                     </button>
                   </div>
                 ) : backgroundTask ? (
@@ -1131,11 +1152,11 @@ export default function Speech() {
                     disabled={submitting || !text.trim() || !voiceId}
                   >
                     {submitting ? <Spinner size={16} /> : <Icon name="speech" size={16} />}
-                    {submitting ? 'Starting…' : 'Start background task'}
+                    {submitting ? t("Starting…") : t("Start background task")}
                   </button>
                 ) : (
                   <button className="btn btn-primary btn-block" type="submit" disabled={!text.trim() || !voiceId}>
-                    <Icon name="speech" size={16} /> Generate and play
+                    <Icon name="speech" size={16} /> {t('Generate and play')}
                   </button>
                 )}
                 {streamNotice ? (
@@ -1144,10 +1165,10 @@ export default function Speech() {
                   </p>
                 ) : null}
                 <span className="field-hint">
-                  Short text streams: playback starts with the first chunk, and Stop cancels the request. Text over{' '}
-                  {SYNC_TEXT_LIMIT.toLocaleString()} characters is submitted as one asynchronous MiniMax task; the task
-                  id is saved on the gateway, so a refresh, a new tab or a gateway restart keeps following the same task
-                  and its download.
+                  {t(
+                    'Short text streams: playback starts with the first chunk, and Stop cancels the request. Text over {n} characters is submitted as one asynchronous MiniMax task; the task id is saved on the gateway, so a refresh, a new tab or a gateway restart keeps following the same task and its download.',
+                    { n: SYNC_TEXT_LIMIT.toLocaleString() },
+                  )}
                 </span>
               </form>
             )}
@@ -1157,22 +1178,24 @@ export default function Speech() {
             <section className="panel speech-clones">
               <div className="panel-head">
                 <div>
-                  <h2>Cloned voices</h2>
+                  <h2>{t("Cloned voices")}</h2>
                   <p>
                     {clones.length === 0
-                      ? 'No cloned voices yet'
-                      : `${clones.length} custom voice${clones.length === 1 ? '' : 's'} created from authorized samples`}
+                      ? t("No cloned voices yet")
+                      : clones.length === 1
+                      ? t('{count} custom voice created from authorized samples', { count: clones.length })
+                      : t('{count} custom voices created from authorized samples', { count: clones.length })}
                   </p>
                 </div>
               </div>
               {clones.length === 0 ? (
                 <EmptyState
                   icon="speech"
-                  title="No cloned voices yet"
-                  description="Upload a recording you are authorized to use. MiniMax clones it into a custom voice, the preview is kept here, and you can select it to read new text."
+                  title={t("No cloned voices yet")}
+                  description={t("Upload a recording you are authorized to use. MiniMax clones it into a custom voice, the preview is kept here, and you can select it to read new text.")}
                   action={
                     <button className="btn btn-primary" onClick={openCloneModal} disabled={!canClone}>
-                      <Icon name="upload" size={16} /> Clone a voice
+                      <Icon name="upload" size={16} /> {t("Clone a voice")}
                     </button>
                   }
                 />
@@ -1196,9 +1219,13 @@ export default function Speech() {
             <section className="panel speech-history">
               <div className="panel-head">
                 <div>
-                  <h2>Generated speech</h2>
+                  <h2>{t("Generated speech")}</h2>
                   <p>
-                    {total === 0 ? 'No speech yet' : `${total} clip${total === 1 ? '' : 's'} in this workspace`}
+                    {total === 0
+                      ? t('No speech yet')
+                      : total === 1
+                        ? t('{total} clip in this workspace', { total })
+                        : t('{total} clips in this workspace', { total })}
                     {pending ? ' · updating automatically' : ''}
                   </p>
                 </div>
@@ -1207,8 +1234,8 @@ export default function Speech() {
               {clips.length === 0 ? (
                 <EmptyState
                   icon="speech"
-                  title="No speech yet"
-                  description="Choose a system voice, enter some text, and generate your first clip. Long text continues in the background and appears here with live progress."
+                  title={t("No speech yet")}
+                  description={t("Choose a system voice, enter some text, and generate your first clip. Long text continues in the background and appears here with live progress.")}
                 />
               ) : (
                 <div className="speech-list">
@@ -1227,37 +1254,37 @@ export default function Speech() {
         onClose={() => {
           if (!cloneSubmitting) setCloneOpen(false)
         }}
-        title="Clone a voice"
-        subtitle="Create a custom MiniMax voice from a recording you are authorized to use, then preview it before speaking new text."
+        title={t("Clone a voice")}
+        subtitle={t("Create a custom MiniMax voice from a recording you are authorized to use, then preview it before speaking new text.")}
         width={640}
         footer={
           <>
             <button className="btn btn-ghost" onClick={() => setCloneOpen(false)} disabled={cloneSubmitting}>
-              Cancel
+              {t("Cancel")}
             </button>
             <button className="btn btn-primary" onClick={() => void submitClone()} disabled={cloneSubmitting}>
               {cloneSubmitting ? <Spinner size={15} /> : <Icon name="upload" size={15} />}
-              {cloneSubmitting ? 'Cloning voice…' : 'Clone voice'}
+              {cloneSubmitting ? t("Cloning voice…") : t("Clone voice")}
             </button>
           </>
         }
       >
         {cloneError ? <ErrorBanner message={cloneError} /> : null}
         <div className="speech-form">
-          <FormField label="Voice name" htmlFor="clone-name">
+          <FormField label={t("Voice name")} htmlFor="clone-name">
             <input
               id="clone-name"
               className="input"
               value={cloneName}
               maxLength={80}
               onChange={(event) => setCloneName(event.target.value)}
-              placeholder="My narration voice"
+              placeholder={t("My narration voice")}
             />
           </FormField>
           <div className="field">
-            <span className="field-label">Sample recording</span>
+            <span className="field-label">{t("Sample recording")}</span>
             {recordingSupported ? (
-              <div className="clone-source-tabs" role="tablist" aria-label="Sample source">
+              <div className="clone-source-tabs" role="tablist" aria-label={t("Sample source")}>
                 <button
                   type="button"
                   role="tab"
@@ -1266,7 +1293,7 @@ export default function Speech() {
                   onClick={() => switchCloneSource('upload')}
                   disabled={cloneSubmitting}
                 >
-                  <Icon name="upload" size={14} /> Upload a file
+                  <Icon name="upload" size={14} /> {t("Upload a file")}
                 </button>
                 <button
                   type="button"
@@ -1276,7 +1303,7 @@ export default function Speech() {
                   onClick={() => switchCloneSource('record')}
                   disabled={cloneSubmitting}
                 >
-                  <Icon name="mic" size={14} /> Record now
+                  <Icon name="mic" size={14} /> {t("Record now")}
                 </button>
               </div>
             ) : null}
@@ -1286,14 +1313,17 @@ export default function Speech() {
                   id="clone-file"
                   className="input file-input"
                   type="file"
-                  aria-label="Sample recording file"
+                  aria-label={t("Sample recording file")}
                   accept=".mp3,.m4a,.wav,audio/mpeg,audio/mp4,audio/wav"
                   onChange={(event) => pickCloneFile(event.target.files?.[0] ?? null)}
                 />
                 <span className="field-hint">
                   {cloneSampleDuration !== null
-                    ? `${cloneFile?.name ?? 'Recording'} · ${formatDuration(cloneSampleDuration * 1000)} · mp3, m4a or wav`
-                    : 'mp3, m4a or wav · 10 seconds to 5 minutes · up to 20 MB.'}
+                    ? t('{name} · {duration} · mp3, m4a or wav', {
+                          name: cloneFile?.name ?? t('Recording'),
+                          duration: formatDuration(cloneSampleDuration * 1000),
+                        })
+                    : t("mp3, m4a or wav · 10 seconds to 5 minutes · up to 20 MB.")}
                 </span>
               </>
             ) : (
@@ -1302,7 +1332,7 @@ export default function Speech() {
                   <>
                     <div className="recorder-live">
                       <span className="recorder-dot" />
-                      <span>Recording… {formatDuration(recordingSeconds * 1000)}</span>
+                      <span>{t('Recording… {duration}', { duration: formatDuration(recordingSeconds * 1000) })}</span>
                     </div>
                     <button
                       type="button"
@@ -1310,45 +1340,49 @@ export default function Speech() {
                       onClick={stopRecording}
                       disabled={recordingSeconds < MIN_SAMPLE_SECONDS}
                     >
-                      <Icon name="stop" size={15} /> Stop recording
+                      <Icon name="stop" size={15} /> {t("Stop recording")}
                     </button>
                     <span className="field-hint">
                       {recordingSeconds < MIN_SAMPLE_SECONDS
-                        ? `Keep recording for at least ${Math.ceil(MIN_SAMPLE_SECONDS - recordingSeconds)} more seconds.`
-                        : 'Stops automatically at 5 minutes. The recording stays on this page until you submit.'}
+                        ? t('Keep recording for at least {seconds} more seconds.', {
+                          seconds: Math.ceil(MIN_SAMPLE_SECONDS - recordingSeconds),
+                        })
+                        : t("Stops automatically at 5 minutes. The recording stays on this page until you submit.")}
                     </span>
                   </>
                 ) : preparingRecording ? (
                   <div className="recorder-preparing">
-                    <Spinner size={15} /> Preparing the recording…
+                    <Spinner size={15} /> {t("Preparing the recording…")}
                   </div>
                 ) : recordingApplied && cloneFile ? (
                   <>
                     <div className="recorder-ready">
-                      <Icon name="check" size={14} /> Recording ready ·{' '}
-                      {formatDuration((cloneSampleDuration ?? 0) * 1000)} · {formatBytes(cloneFile.size)}
+                      <Icon name="check" size={14} />{' '}
+                      {t('Recording ready · {duration} · {size}', {
+                        duration: formatDuration((cloneSampleDuration ?? 0) * 1000),
+                        size: formatBytes(cloneFile.size),
+                      })}
                     </div>
                     {recordingUrl ? <audio className="speech-audio" controls preload="metadata" src={recordingUrl} /> : null}
                     <div className="recorder-actions">
                       <button type="button" className="btn btn-ghost btn-sm" onClick={() => void startRecording()}>
-                        <Icon name="refresh" size={14} /> Re-record
+                        <Icon name="refresh" size={14} /> {t("Re-record")}
                       </button>
                       <button type="button" className="btn btn-ghost btn-sm" onClick={clearRecording}>
-                        <Icon name="trash" size={14} /> Remove
+                        <Icon name="trash" size={14} /> {t("Remove")}
                       </button>
                     </div>
                     <span className="field-hint">
-                      The recording is converted to WAV on this page and sent to MiniMax only when you submit.
+                      {t("The recording is converted to WAV on this page and sent to MiniMax only when you submit.")}
                     </span>
                   </>
                 ) : (
                   <>
                     <button type="button" className="btn btn-primary" onClick={() => void startRecording()}>
-                      <Icon name="mic" size={15} /> Start recording
+                      <Icon name="mic" size={15} /> {t("Start recording")}
                     </button>
                     <span className="field-hint">
-                      Allow microphone access, then record 10 seconds to 5 minutes. The recording is converted to WAV
-                      locally and uploaded only when you submit.
+                      {t("Allow microphone access, then record 10 seconds to 5 minutes. The recording is converted to WAV locally and uploaded only when you submit.")}
                     </span>
                   </>
                 )}
@@ -1362,11 +1396,11 @@ export default function Speech() {
             ) : null}
             {!recordingSupported ? (
               <span className="field-hint">
-                Recording needs microphone access and a secure (HTTPS or localhost) page; upload a file instead.
+                {t("Recording needs microphone access and a secure (HTTPS or localhost) page; upload a file instead.")}
               </span>
             ) : null}
           </div>
-          <FormField label="Preview model">
+          <FormField label={t("Preview model")}>
             <select
               className="input"
               value={cloneModel}
@@ -1380,8 +1414,11 @@ export default function Speech() {
             </select>
           </FormField>
           <FormField
-            label="Preview text"
-            hint={`${clonePreviewText.length} / ${MAX_PREVIEW_TEXT} characters. The new voice reads this text once so you can judge the result.`}
+            label={t("Preview text")}
+            hint={t('{count} / {max} characters. The new voice reads this text once so you can judge the result.', {
+              count: clonePreviewText.length,
+              max: MAX_PREVIEW_TEXT,
+            })}
           >
             <textarea
               className="input textarea"
@@ -1397,13 +1434,12 @@ export default function Speech() {
               checked={cloneAuthorized}
               onChange={(event) => setCloneAuthorized(event.target.checked)}
             />
-            I confirm I have permission to use this recording and clone this voice.
+            {t("I confirm I have permission to use this recording and clone this voice.")}
           </label>
           <div className="speech-note">
             <Icon name="shield" size={14} />
             <span>
-              Only upload a voice you own or have explicit permission to clone. The sample is sent to MiniMax for
-              cloning; the gateway keeps the generated preview and the voice metadata.
+              {t("Only upload a voice you own or have explicit permission to clone. The sample is sent to MiniMax for cloning; the gateway keeps the generated preview and the voice metadata.")}
             </span>
           </div>
         </div>

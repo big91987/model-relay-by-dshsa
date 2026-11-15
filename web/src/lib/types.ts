@@ -226,6 +226,8 @@ export interface ApiStatus {
   name: string
   version: string
   uptime_seconds: number
+  database: 'sqlite' | 'postgres'
+  test_mode: boolean
 }
 
 export type VideoTaskStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'

@@ -3867,3 +3867,42 @@ select.input {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent-soft);
 }
+
+/* ---------- local test environment ---------- */
+
+.login-test-hint {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 22px;
+  padding: 10px 13px;
+  border: 1px solid var(--accent-soft);
+  border-radius: 10px;
+  background: var(--accent-soft);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.login-test-hint strong {
+  font-size: 12.5px;
+}
+
+.login-test-hint span {
+  color: var(--muted);
+}
+
+.test-mode-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 32px;
+  border-bottom: 1px solid var(--border);
+  background: var(--accent-soft);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.test-mode-strip strong {
+  color: var(--text);
+}

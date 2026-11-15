@@ -21,6 +21,33 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
 
+  postgres:
+    name: Store tests against PostgreSQL
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: exp_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d exp_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test ./internal/store -count=1
+        env:
+          TEST_DATABASE_URL: postgres://postgres@127.0.0.1:5432/exp_ci?sslmode=disable
+
   web:
     name: Web typecheck, build and embedded binary
     runs-on: ubuntu-latest

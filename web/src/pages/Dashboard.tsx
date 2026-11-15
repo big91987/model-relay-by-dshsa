@@ -4,6 +4,7 @@ import { Icon, type IconName } from '../components/Icon'
 import { EmptyState, ErrorBanner, PageHeader, Spinner, StatusBadge } from '../components/ui'
 import { api } from '../lib/api'
 import { formatCompact, formatCost, formatDuration, formatNumber, formatTime, percent } from '../lib/format'
+import { currentLanguage, t } from '../lib/i18n'
 import type { Dashboard as DashboardData, DayStat } from '../lib/types'
 
 function StatCard({
@@ -36,11 +37,14 @@ function StatCard({
 function TrafficChart({ series }: { series: DayStat[] }) {
   const max = Math.max(1, ...series.map((day) => day.requests))
   return (
-    <div className="chart" role="img" aria-label="Requests per day for the last seven days">
+    <div className="chart" role="img" aria-label={t('Requests per day for the last seven days')}>
       {series.map((day) => {
         const rawHeight = (day.requests / max) * 100
         const height = day.requests === 0 ? 2 : Math.max(7, rawHeight)
-        const weekday = new Date(`${day.date}T00:00:00`).toLocaleDateString('en-US', { weekday: 'short' })
+        const weekday = new Date(`${day.date}T00:00:00`).toLocaleDateString(
+          currentLanguage() === 'zh' ? 'zh-CN' : 'en-US',
+          { weekday: 'short' },
+        )
         return (
           <div className="chart-col" key={day.date}>
             <div className="chart-value">{day.requests ? formatCompact(day.requests) : ''}</div>
@@ -48,7 +52,11 @@ function TrafficChart({ series }: { series: DayStat[] }) {
               <div
                 className="chart-bar"
                 style={{ height: `${height}%` }}
-                title={`${day.date}: ${formatNumber(day.requests)} requests, ${formatNumber(day.errors)} errors`}
+                title={t('{date}: {requests} requests, {errors} errors', {
+                  date: day.date,
+                  requests: formatNumber(day.requests),
+                  errors: formatNumber(day.errors),
+                })}
               >
                 {day.errors > 0 ? (
                   <div
@@ -79,7 +87,7 @@ export default function Dashboard() {
       setData(await api.dashboard())
       setError('')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load dashboard')
+      setError(err instanceof Error ? err.message : t('Failed to load dashboard'))
     } finally {
       setLoading(false)
       setRefreshing(false)
@@ -94,17 +102,17 @@ export default function Dashboard() {
     return (
       <div className="page-loading">
         <Spinner size={22} />
-        Loading dashboard…
+        {t('Loading dashboard…')}
       </div>
     )
   }
   if (!data) {
     return (
       <div className="page">
-        <PageHeader title="Dashboard" subtitle="Traffic and spend across your relay." />
-        <ErrorBanner message={error || 'Dashboard unavailable'} />
+        <PageHeader title={t('Dashboard')} subtitle={t('Traffic and spend across your relay.')} />
+        <ErrorBanner message={error || t('Dashboard unavailable')} />
         <button className="btn btn-primary" onClick={() => void load()}>
-          <Icon name="refresh" size={16} /> Try again
+          <Icon name="refresh" size={16} /> {t('Try again')}
         </button>
       </div>
     )
@@ -117,12 +125,12 @@ export default function Dashboard() {
   return (
     <div className="page">
       <PageHeader
-        title="Dashboard"
-        subtitle="Traffic, tokens and spend across every upstream channel."
+        title={t('Dashboard')}
+        subtitle={t('Traffic, tokens and spend across every upstream channel.')}
         actions={
           <button className="btn btn-ghost" onClick={() => void load(true)} disabled={refreshing}>
             <Icon name="refresh" size={16} className={refreshing ? 'spin' : undefined} />
-            Refresh
+            {t('Refresh')}
           </button>
         }
       />
@@ -130,31 +138,34 @@ export default function Dashboard() {
 
       <div className="stat-grid">
         <StatCard
-          label="Requests"
+          label={t('Requests')}
           value={formatNumber(totals.requests)}
-          hint={`${formatNumber(today.requests)} today`}
+          hint={t('{n} today', { n: formatNumber(today.requests) })}
           icon="activity"
         />
         <StatCard
-          label="Tokens"
+          label={t('Tokens')}
           value={formatCompact(totals.total_tokens)}
-          hint={`${formatCompact(today.total_tokens)} today`}
+          hint={t('{n} today', { n: formatCompact(today.total_tokens) })}
           icon="spark"
         />
         <StatCard
-          label="Spend"
+          label={t('Spend')}
           value={formatCost(totals.cost)}
           hint={
             totals.unverified_cost > 0
-              ? `${formatCost(today.cost)} today · ${formatCost(totals.unverified_cost)} unverified`
-              : `${formatCost(today.cost)} today`
+              ? t('{cost} today · {unverified} unverified', {
+                  cost: formatCost(today.cost),
+                  unverified: formatCost(totals.unverified_cost),
+                })
+              : t('{n} today', { n: formatCost(today.cost) })
           }
           icon="dollar"
         />
         <StatCard
-          label="Error rate"
-          value={totals.requests ? `${errorRate.toFixed(1)}%` : '—'}
-          hint={`${formatNumber(totals.errors)} failed requests`}
+          label={t('Error rate')}
+          value={totals.requests ? `${errorRate.toFixed(1)}%` : "—"}
+          hint={t('{n} failed requests', { n: formatNumber(totals.errors) })}
           icon="alert"
           tone={errorRate > 5 ? 'danger' : undefined}
         />
@@ -164,33 +175,33 @@ export default function Dashboard() {
         <section className="panel chart-panel">
           <div className="panel-head">
             <div>
-              <h2>Traffic</h2>
-              <p>Requests per day, last 7 days</p>
+              <h2>{t('Traffic')}</h2>
+              <p>{t('Requests per day, last 7 days')}</p>
             </div>
-            <span className="badge badge-muted">7 days</span>
+            <span className="badge badge-muted">{t('7 days')}</span>
           </div>
           <TrafficChart series={series} />
           <div className="chart-legend">
-            <span><span className="legend-swatch" /> Successful</span>
-            <span><span className="legend-swatch error" /> Failures (stacked on top)</span>
+            <span><span className="legend-swatch" /> {t('Successful')}</span>
+            <span><span className="legend-swatch error" /> {t('Failures (stacked on top)')}</span>
           </div>
         </section>
 
         <section className="panel">
           <div className="panel-head">
             <div>
-              <h2>Top models</h2>
-              <p>By successful requests this week</p>
+              <h2>{t('Top models')}</h2>
+              <p>{t('By successful requests this week')}</p>
             </div>
           </div>
           {top_models.length === 0 ? (
             <EmptyState
               icon="models"
-              title="No traffic yet"
-              description="Send your first request through the relay to populate this board."
+              title={t('No traffic yet')}
+              description={t('Send your first request through the relay to populate this board.')}
               action={
                 <Link className="btn btn-ghost" to="/tokens">
-                  Create an API key
+                  {t('Create an API key')}
                 </Link>
               }
             />
@@ -207,7 +218,7 @@ export default function Dashboard() {
                   </div>
                   <div className="model-stats">
                     <strong>{formatNumber(item.requests)}</strong>
-                    <span>{formatCompact(item.tokens)} tok</span>
+                    <span>{t('{n} tok', { n: formatCompact(item.tokens) })}</span>
                   </div>
                 </div>
               ))}
@@ -219,68 +230,68 @@ export default function Dashboard() {
       <div className="mini-grid">
         <div className="mini-card">
           <div className="mini-head">
-            <Icon name="channels" size={17} /> Channels
+            <Icon name="channels" size={17} /> {t('Channels')}
           </div>
           <div className="mini-value">
             {formatNumber(channels.active)}
-            <span> / {formatNumber(channels.total)} active</span>
+            <span> / {t('{n} active', { n: formatNumber(channels.total) })}</span>
           </div>
           <Link to="/channels">
-            Manage channels <Icon name="arrowRight" size={14} />
+            {t('Manage channels')} <Icon name="arrowRight" size={14} />
           </Link>
         </div>
         <div className="mini-card">
           <div className="mini-head">
-            <Icon name="key" size={17} /> API keys
+            <Icon name="key" size={17} /> {t('API keys')}
           </div>
           <div className="mini-value">
             {formatNumber(tokens.active)}
-            <span> / {formatNumber(tokens.total)} active</span>
+            <span> / {t('{n} active', { n: formatNumber(tokens.total) })}</span>
           </div>
           <Link to="/tokens">
-            Manage keys <Icon name="arrowRight" size={14} />
+            {t('Manage keys')} <Icon name="arrowRight" size={14} />
           </Link>
         </div>
         <div className="mini-card">
           <div className="mini-head">
-            <Icon name="shield" size={17} /> Average latency
+            <Icon name="shield" size={17} /> {t('Average latency')}
           </div>
           <div className="mini-value">
             {recent_logs.length
               ? formatDuration(Math.round(recent_logs.reduce((sum, item) => sum + item.latency_ms, 0) / recent_logs.length))
-              : '—'}
+              : "—"}
           </div>
-          <span className="mini-foot">Across recent requests</span>
+          <span className="mini-foot">{t('Across recent requests')}</span>
         </div>
       </div>
 
       <section className="panel">
         <div className="panel-head">
           <div>
-            <h2>Recent requests</h2>
-            <p>Latest relayed calls, newest first</p>
+            <h2>{t('Recent requests')}</h2>
+            <p>{t('Latest relayed calls, newest first')}</p>
           </div>
           <Link className="btn btn-ghost btn-sm" to="/logs">
-            View logs <Icon name="arrowRight" size={14} />
+            {t('View logs')} <Icon name="arrowRight" size={14} />
           </Link>
         </div>
         {recent_logs.length === 0 ? (
           <EmptyState
             icon="activity"
-            title="No requests recorded"
-            description="Once a key sends a chat completion, the request appears here."
+            title={t('No requests recorded')}
+            description={t('Once a key sends a chat completion, the request appears here.')}
           />
         ) : (
           <div className="table-wrap">
             <table className="table">
               <thead>
                 <tr>
-                  <th>Time</th>
-                  <th>Model</th>
-                  <th>Status</th>
-                  <th className="num">Tokens</th>
-                  <th className="num">Cost</th>
-                  <th className="num">Latency</th>
+                  <th>{t('Time')}</th>
+                  <th>{t('Model')}</th>
+                  <th>{t('Status')}</th>
+                  <th className="num">{t('Tokens')}</th>
+                  <th className="num">{t('Cost')}</th>
+                  <th className="num">{t('Latency')}</th>
                 </tr>
               </thead>
               <tbody>

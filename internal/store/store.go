@@ -1,4 +1,5 @@
-// Package store persists users, channels, gateway keys and request logs in SQLite.
+// Package store persists users, channels, gateway keys and request logs in
+// SQLite (the default, single-file deployment) or PostgreSQL (DATABASE_URL).
 package store
 
 import (
@@ -6,10 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/big91987/model-relay-by-dshsa/internal/auth"
 
+	"github.com/jackc/pgx/v5"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
 
@@ -38,12 +42,16 @@ func (e *InsufficientQuotaError) Error() string {
 	return "insufficient quota"
 }
 
-// Store wraps the SQLite database.
+// Store wraps the configured database. Exactly one backend is active per
+// process: SQLite for the default single-file deployment, or PostgreSQL when
+// DATABASE_URL is set.
 type Store struct {
-	db *sql.DB
+	db      *conn
+	dialect dialect
 }
 
-// Open opens (and migrates) the database at path.
+// Open opens (and migrates) the SQLite database at path. This is the original
+// single-file deployment mode and stays the default when DATABASE_URL is unset.
 func Open(path string) (*Store, error) {
 	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)"
 	db, err := sql.Open("sqlite", dsn)
@@ -58,7 +66,7 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
-	s := &Store{db: db}
+	s := &Store{db: &conn{DB: db, dialect: dialectSQLite}, dialect: dialectSQLite}
 	if err := s.migrate(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -66,10 +74,48 @@ func Open(path string) (*Store, error) {
 	return s, nil
 }
 
+// OpenPostgres opens (and migrates) a PostgreSQL database. databaseURL must be
+// a postgres:// or postgresql:// URL, for example the DATABASE_URL of a
+// dedicated exp_* database. The URL is never logged by this package.
+func OpenPostgres(databaseURL string) (*Store, error) {
+	if _, err := pgx.ParseConfig(databaseURL); err != nil {
+		// Do not wrap the driver error: it can echo the connection string,
+		// including the database password, into logs.
+		return nil, fmt.Errorf("invalid DATABASE_URL")
+	}
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("open postgres database: %w", err)
+	}
+	db.SetMaxOpenConns(20)
+	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(30 * time.Minute)
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ping postgres database: %w", err)
+	}
+	s := &Store{db: &conn{DB: db, dialect: dialectPostgres}, dialect: dialectPostgres}
+	if err := s.migrate(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// Backend reports the active database backend ("sqlite" or "postgres").
+func (s *Store) Backend() string { return s.dialect.String() }
+
 // Close closes the database.
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) migrate() error {
+	if s.dialect == dialectPostgres {
+		return s.migratePostgres()
+	}
+	return s.migrateSQLite()
+}
+
+func (s *Store) migrateSQLite() error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS users (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -316,8 +362,250 @@ func (s *Store) migrate() error {
 	return nil
 }
 
+// migratePostgres creates the same schema as migrateSQLite using PostgreSQL
+// types: BIGSERIAL ids, BIGINT timestamps and counters, DOUBLE PRECISION money
+// and costs. Existing SQLite installs are untouched; an empty PostgreSQL
+// database is initialized on first start and then migrated in place.
+func (s *Store) migratePostgres() error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS users (
+			id BIGSERIAL PRIMARY KEY,
+			username TEXT NOT NULL UNIQUE,
+			password_hash TEXT NOT NULL,
+			role TEXT NOT NULL DEFAULT 'admin',
+			status TEXT NOT NULL DEFAULT 'enabled',
+			created_at BIGINT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS channels (
+			id BIGSERIAL PRIMARY KEY,
+			name TEXT NOT NULL,
+			type TEXT NOT NULL,
+			base_url TEXT NOT NULL,
+			api_key TEXT NOT NULL,
+			api_key_hint TEXT NOT NULL DEFAULT '',
+			models TEXT NOT NULL DEFAULT '[]',
+			model_mapping TEXT NOT NULL DEFAULT '{}',
+			priority BIGINT NOT NULL DEFAULT 0,
+			weight BIGINT NOT NULL DEFAULT 1,
+			status TEXT NOT NULL DEFAULT 'enabled',
+			input_price DOUBLE PRECISION NOT NULL DEFAULT 0,
+			output_price DOUBLE PRECISION NOT NULL DEFAULT 0,
+			created_at BIGINT NOT NULL,
+			updated_at BIGINT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS tokens (
+			id BIGSERIAL PRIMARY KEY,
+			user_id BIGINT NOT NULL,
+			name TEXT NOT NULL,
+			key_hash TEXT NOT NULL UNIQUE,
+			key_prefix TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'active',
+			quota DOUBLE PRECISION NOT NULL DEFAULT -1,
+			used_quota DOUBLE PRECISION NOT NULL DEFAULT 0,
+			allowed_models TEXT NOT NULL DEFAULT '[]',
+			rpm_limit BIGINT NOT NULL DEFAULT 0,
+			tpm_limit BIGINT NOT NULL DEFAULT 0,
+			max_concurrency BIGINT NOT NULL DEFAULT 0,
+			daily_quota DOUBLE PRECISION NOT NULL DEFAULT 0,
+			expires_at BIGINT,
+			last_used_at BIGINT,
+			created_at BIGINT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS logs (
+			id BIGSERIAL PRIMARY KEY,
+			request_id TEXT NOT NULL,
+			user_id BIGINT NOT NULL DEFAULT 0,
+			token_id BIGINT NOT NULL DEFAULT 0,
+			channel_id BIGINT NOT NULL DEFAULT 0,
+			token_name TEXT NOT NULL DEFAULT '',
+			channel_name TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			upstream_model TEXT NOT NULL DEFAULT '',
+			prompt_tokens BIGINT NOT NULL DEFAULT 0,
+			completion_tokens BIGINT NOT NULL DEFAULT 0,
+			total_tokens BIGINT NOT NULL DEFAULT 0,
+			cost DOUBLE PRECISION NOT NULL DEFAULT 0,
+			reserved_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
+			cost_status TEXT NOT NULL DEFAULT 'actual',
+			reservation_id TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'success',
+			status_code BIGINT NOT NULL DEFAULT 0,
+			error TEXT NOT NULL DEFAULT '',
+			latency_ms BIGINT NOT NULL DEFAULT 0,
+			stream BIGINT NOT NULL DEFAULT 0,
+			created_at BIGINT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_logs_created_at ON logs(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_logs_token_id ON logs(token_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_logs_model ON logs(model)`,
+		`CREATE TABLE IF NOT EXISTS token_reservations (
+			id TEXT PRIMARY KEY,
+			token_id BIGINT NOT NULL,
+			token_name TEXT NOT NULL DEFAULT '',
+			request_id TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			reserved_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
+			settled_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
+			cost_status TEXT NOT NULL DEFAULT 'pending',
+			prompt_tokens BIGINT NOT NULL DEFAULT 0,
+			completion_tokens BIGINT NOT NULL DEFAULT 0,
+			model TEXT NOT NULL DEFAULT '',
+			upstream_model TEXT NOT NULL DEFAULT '',
+			channel_id BIGINT NOT NULL DEFAULT 0,
+			channel_name TEXT NOT NULL DEFAULT '',
+			stream BIGINT NOT NULL DEFAULT 0,
+			created_at BIGINT NOT NULL,
+			settled_at BIGINT,
+			expires_at BIGINT NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_reservations_token_status ON token_reservations(token_id, status)`,
+		`CREATE INDEX IF NOT EXISTS idx_reservations_status ON token_reservations(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_reservations_created_at ON token_reservations(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_logs_token_created_at ON logs(token_id, created_at)`,
+		`CREATE TABLE IF NOT EXISTS video_tasks (
+			id BIGSERIAL PRIMARY KEY,
+			upstream_task_id TEXT NOT NULL DEFAULT '',
+			channel_id BIGINT NOT NULL DEFAULT 0,
+			channel_name TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			upstream_model TEXT NOT NULL DEFAULT '',
+			prompt TEXT NOT NULL DEFAULT '',
+			mode TEXT NOT NULL DEFAULT 'text',
+			resolution TEXT NOT NULL DEFAULT '',
+			duration BIGINT NOT NULL DEFAULT 0,
+			ratio TEXT NOT NULL DEFAULT '',
+			status TEXT NOT NULL DEFAULT 'queued',
+			error TEXT NOT NULL DEFAULT '',
+			video_path TEXT NOT NULL DEFAULT '',
+			remote_url TEXT NOT NULL DEFAULT '',
+			created_at BIGINT NOT NULL,
+			updated_at BIGINT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_video_tasks_created_at ON video_tasks(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_video_tasks_status ON video_tasks(status)`,
+		`CREATE TABLE IF NOT EXISTS speech_clips (
+			id BIGSERIAL PRIMARY KEY,
+			channel_id BIGINT NOT NULL DEFAULT 0,
+			channel_name TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			upstream_model TEXT NOT NULL DEFAULT '',
+			voice_id TEXT NOT NULL DEFAULT '',
+			voice_name TEXT NOT NULL DEFAULT '',
+			text TEXT NOT NULL DEFAULT '',
+			speed DOUBLE PRECISION NOT NULL DEFAULT 1,
+			status TEXT NOT NULL DEFAULT 'succeeded',
+			error TEXT NOT NULL DEFAULT '',
+			total_chunks BIGINT NOT NULL DEFAULT 0,
+			done_chunks BIGINT NOT NULL DEFAULT 0,
+			upstream_task_id TEXT NOT NULL DEFAULT '',
+			upstream_file_id BIGINT NOT NULL DEFAULT 0,
+			format TEXT NOT NULL DEFAULT 'mp3',
+			audio_path TEXT NOT NULL DEFAULT '',
+			duration_ms BIGINT NOT NULL DEFAULT 0,
+			characters BIGINT NOT NULL DEFAULT 0,
+			size_bytes BIGINT NOT NULL DEFAULT 0,
+			created_at BIGINT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_speech_clips_created_at ON speech_clips(created_at)`,
+		`CREATE TABLE IF NOT EXISTS music_tasks (
+			id BIGSERIAL PRIMARY KEY,
+			channel_id BIGINT NOT NULL DEFAULT 0,
+			channel_name TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			upstream_model TEXT NOT NULL DEFAULT '',
+			prompt TEXT NOT NULL DEFAULT '',
+			lyrics TEXT NOT NULL DEFAULT '',
+			instrumental BIGINT NOT NULL DEFAULT 0,
+			format TEXT NOT NULL DEFAULT 'mp3',
+			status TEXT NOT NULL DEFAULT 'queued',
+			error TEXT NOT NULL DEFAULT '',
+			audio_path TEXT NOT NULL DEFAULT '',
+			remote_url TEXT NOT NULL DEFAULT '',
+			duration_ms BIGINT NOT NULL DEFAULT 0,
+			created_at BIGINT NOT NULL,
+			updated_at BIGINT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_music_tasks_created_at ON music_tasks(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_music_tasks_status ON music_tasks(status)`,
+		`CREATE TABLE IF NOT EXISTS voice_clones (
+			id BIGSERIAL PRIMARY KEY,
+			voice_id TEXT NOT NULL UNIQUE,
+			name TEXT NOT NULL DEFAULT '',
+			channel_id BIGINT NOT NULL DEFAULT 0,
+			channel_name TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			upstream_model TEXT NOT NULL DEFAULT '',
+			sample_format TEXT NOT NULL DEFAULT '',
+			sample_bytes BIGINT NOT NULL DEFAULT 0,
+			source_filename TEXT NOT NULL DEFAULT '',
+			preview_text TEXT NOT NULL DEFAULT '',
+			preview_path TEXT NOT NULL DEFAULT '',
+			preview_format TEXT NOT NULL DEFAULT '',
+			preview_duration_ms BIGINT NOT NULL DEFAULT 0,
+			preview_characters BIGINT NOT NULL DEFAULT 0,
+			authorized BIGINT NOT NULL DEFAULT 0,
+			created_at BIGINT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_voice_clones_created_at ON voice_clones(created_at)`,
+		`CREATE TABLE IF NOT EXISTS voice_designs (
+			id BIGSERIAL PRIMARY KEY,
+			channel_id BIGINT NOT NULL DEFAULT 0,
+			channel_name TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			upstream_model TEXT NOT NULL DEFAULT '',
+			voice_id TEXT NOT NULL DEFAULT '',
+			name TEXT NOT NULL DEFAULT '',
+			prompt TEXT NOT NULL DEFAULT '',
+			preview_text TEXT NOT NULL DEFAULT '',
+			preview_path TEXT NOT NULL DEFAULT '',
+			preview_format TEXT NOT NULL DEFAULT 'mp3',
+			preview_duration_ms BIGINT NOT NULL DEFAULT 0,
+			preview_characters BIGINT NOT NULL DEFAULT 0,
+			preview_size_bytes BIGINT NOT NULL DEFAULT 0,
+			created_at BIGINT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_voice_designs_created_at ON voice_designs(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_logs_request_id ON logs(request_id)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.Exec(stmt); err != nil {
+			return fmt.Errorf("migrate postgres database: %w", err)
+		}
+	}
+	// PostgreSQL supports ADD COLUMN IF NOT EXISTS, so legacy columns can be
+	// filled in without inspecting information_schema on every start.
+	for _, column := range []struct{ table, name, definition string }{
+		{"logs", "cost_status", `TEXT NOT NULL DEFAULT 'actual'`},
+		{"logs", "reserved_cost", `DOUBLE PRECISION NOT NULL DEFAULT 0`},
+		{"logs", "reservation_id", `TEXT NOT NULL DEFAULT ''`},
+		{"tokens", "tpm_limit", `BIGINT NOT NULL DEFAULT 0`},
+		{"tokens", "max_concurrency", `BIGINT NOT NULL DEFAULT 0`},
+		{"tokens", "daily_quota", `DOUBLE PRECISION NOT NULL DEFAULT 0`},
+		{"speech_clips", "speed", `DOUBLE PRECISION NOT NULL DEFAULT 1`},
+		{"speech_clips", "status", `TEXT NOT NULL DEFAULT 'succeeded'`},
+		{"speech_clips", "error", `TEXT NOT NULL DEFAULT ''`},
+		{"speech_clips", "total_chunks", `BIGINT NOT NULL DEFAULT 0`},
+		{"speech_clips", "done_chunks", `BIGINT NOT NULL DEFAULT 0`},
+		{"speech_clips", "upstream_task_id", `TEXT NOT NULL DEFAULT ''`},
+		{"speech_clips", "upstream_file_id", `BIGINT NOT NULL DEFAULT 0`},
+	} {
+		if err := s.ensureColumn(column.table, column.name, column.definition); err != nil {
+			return fmt.Errorf("migrate postgres database: %w", err)
+		}
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_speech_clips_status ON speech_clips(status)`); err != nil {
+		return fmt.Errorf("migrate postgres database: %w", err)
+	}
+	return nil
+}
+
 // ensureColumn adds a column to an existing table when it is missing.
 func (s *Store) ensureColumn(table, column, definition string) error {
+	if s.dialect == dialectPostgres {
+		definition = strings.ReplaceAll(definition, "REAL", "DOUBLE PRECISION")
+		_, err := s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN IF NOT EXISTS ` + column + ` ` + definition)
+		return err
+	}
 	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
 	if err != nil {
 		return err
@@ -358,6 +646,17 @@ type User struct {
 
 // EnsureAdmin creates the initial admin account when no user exists.
 func (s *Store) EnsureAdmin(username, password string) (bool, error) {
+	return s.ensureAdmin(username, password, false)
+}
+
+// EnsureTestAdmin creates the initial admin account for the explicitly
+// enabled local test environment. It is the only path that accepts a password
+// shorter than the production minimum (TEST_MODE uses admin/admin).
+func (s *Store) EnsureTestAdmin(username, password string) (bool, error) {
+	return s.ensureAdmin(username, password, true)
+}
+
+func (s *Store) ensureAdmin(username, password string, testMode bool) (bool, error) {
 	var count int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
 		return false, err
@@ -365,7 +664,11 @@ func (s *Store) EnsureAdmin(username, password string) (bool, error) {
 	if count > 0 {
 		return false, nil
 	}
-	hash, err := auth.HashPassword(password)
+	hashFn := auth.HashPassword
+	if testMode {
+		hashFn = auth.HashTestPassword
+	}
+	hash, err := hashFn(password)
 	if err != nil {
 		return false, err
 	}
@@ -462,14 +765,11 @@ func scanChannel(row interface{ Scan(dest ...any) error }) (*Channel, error) {
 func (s *Store) CreateChannel(c *Channel) error {
 	now := now()
 	c.CreatedAt, c.UpdatedAt = now, now
-	res, err := s.db.Exec(`INSERT INTO channels (name, type, base_url, api_key, api_key_hint, models, model_mapping, priority, weight, status, input_price, output_price, created_at, updated_at)
+	var err error
+	c.ID, err = s.insertStoreID(`INSERT INTO channels (name, type, base_url, api_key, api_key_hint, models, model_mapping, priority, weight, status, input_price, output_price, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.Name, c.Type, c.BaseURL, c.APIKeyEncrypted, c.APIKeyHint, encodeStrings(c.Models), encodeMap(c.ModelMapping),
 		c.Priority, c.Weight, c.Status, c.InputPrice, c.OutputPrice, c.CreatedAt, c.UpdatedAt)
-	if err != nil {
-		return err
-	}
-	c.ID, err = res.LastInsertId()
 	return err
 }
 
@@ -625,13 +925,10 @@ func scanToken(row interface{ Scan(dest ...any) error }) (*Token, error) {
 // CreateToken inserts a key.
 func (s *Store) CreateToken(t *Token) error {
 	t.CreatedAt = now()
-	res, err := s.db.Exec(`INSERT INTO tokens (user_id, name, key_hash, key_prefix, status, quota, used_quota, daily_quota, allowed_models, rpm_limit, tpm_limit, max_concurrency, expires_at, created_at)
+	var err error
+	t.ID, err = s.insertStoreID(`INSERT INTO tokens (user_id, name, key_hash, key_prefix, status, quota, used_quota, daily_quota, allowed_models, rpm_limit, tpm_limit, max_concurrency, expires_at, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.UserID, t.Name, t.KeyHash, t.KeyPrefix, t.Status, t.Quota, t.UsedQuota, t.DailyQuota, encodeStrings(t.AllowedModels), t.RPMLimit, t.TPMLimit, t.MaxConcurrency, t.ExpiresAt, t.CreatedAt)
-	if err != nil {
-		return err
-	}
-	t.ID, err = res.LastInsertId()
 	return err
 }
 
@@ -700,15 +997,12 @@ func (s *Store) InsertLog(l *Log) error {
 	if l.CostStatus == "" {
 		l.CostStatus = "actual"
 	}
-	res, err := s.db.Exec(`INSERT INTO logs (request_id, reservation_id, user_id, token_id, channel_id, token_name, channel_name, model, upstream_model,
+	var err error
+	l.ID, err = s.insertStoreID(`INSERT INTO logs (request_id, reservation_id, user_id, token_id, channel_id, token_name, channel_name, model, upstream_model,
 		prompt_tokens, completion_tokens, total_tokens, cost, reserved_cost, cost_status, status, status_code, error, latency_ms, stream, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		l.RequestID, l.ReservationID, l.UserID, l.TokenID, l.ChannelID, l.TokenName, l.ChannelName, l.Model, l.UpstreamModel,
-		l.PromptTokens, l.CompletionTokens, l.TotalTokens, l.Cost, l.ReservedCost, l.CostStatus, l.Status, l.StatusCode, l.Error, l.LatencyMS, l.Stream, l.CreatedAt)
-	if err != nil {
-		return err
-	}
-	l.ID, err = res.LastInsertId()
+		l.PromptTokens, l.CompletionTokens, l.TotalTokens, l.Cost, l.ReservedCost, l.CostStatus, l.Status, l.StatusCode, l.Error, l.LatencyMS, boolValue(l.Stream), l.CreatedAt)
 	return err
 }
 
@@ -938,15 +1232,12 @@ const videoTaskColumns = `id, upstream_task_id, channel_id, channel_name, model,
 func (s *Store) CreateVideoTask(v *VideoTask) error {
 	now := now()
 	v.CreatedAt, v.UpdatedAt = now, now
-	res, err := s.db.Exec(`INSERT INTO video_tasks (upstream_task_id, channel_id, channel_name, model, upstream_model, prompt, mode,
+	var err error
+	v.ID, err = s.insertStoreID(`INSERT INTO video_tasks (upstream_task_id, channel_id, channel_name, model, upstream_model, prompt, mode,
 		resolution, duration, ratio, status, error, video_path, remote_url, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		v.UpstreamTaskID, v.ChannelID, v.ChannelName, v.Model, v.UpstreamModel, v.Prompt, v.Mode,
 		v.Resolution, v.Duration, v.Ratio, v.Status, v.Error, v.VideoPath, v.RemoteURL, v.CreatedAt, v.UpdatedAt)
-	if err != nil {
-		return err
-	}
-	v.ID, err = res.LastInsertId()
 	return err
 }
 
@@ -1070,17 +1361,14 @@ func (s *Store) CreateSpeechClip(c *SpeechClip) error {
 		c.Speed = 1
 	}
 	c.CreatedAt = now()
-	res, err := s.db.Exec(`INSERT INTO speech_clips (channel_id, channel_name, model, upstream_model, voice_id, voice_name,
+	var err error
+	c.ID, err = s.insertStoreID(`INSERT INTO speech_clips (channel_id, channel_name, model, upstream_model, voice_id, voice_name,
 		text, speed, status, error, total_chunks, done_chunks, upstream_task_id, upstream_file_id, format, audio_path,
 		duration_ms, characters, size_bytes, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.ChannelID, c.ChannelName, c.Model, c.UpstreamModel, c.VoiceID, c.VoiceName,
 		c.Text, c.Speed, c.Status, c.Error, c.TotalChunks, c.DoneChunks, c.UpstreamTaskID, c.UpstreamFileID,
 		c.Format, c.AudioPath, c.DurationMS, c.Characters, c.SizeBytes, c.CreatedAt)
-	if err != nil {
-		return err
-	}
-	c.ID, err = res.LastInsertId()
 	return err
 }
 
@@ -1196,17 +1484,14 @@ const voiceCloneColumns = `id, voice_id, name, channel_id, channel_name, model, 
 // CreateVoiceClone inserts a cloned voice and sets its id.
 func (s *Store) CreateVoiceClone(c *VoiceClone) error {
 	c.CreatedAt = now()
-	res, err := s.db.Exec(`INSERT INTO voice_clones (voice_id, name, channel_id, channel_name, model,
+	var err error
+	c.ID, err = s.insertStoreID(`INSERT INTO voice_clones (voice_id, name, channel_id, channel_name, model,
 		upstream_model, sample_format, sample_bytes, source_filename, preview_text, preview_path,
 		preview_format, preview_duration_ms, preview_characters, authorized, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.VoiceID, c.Name, c.ChannelID, c.ChannelName, c.Model, c.UpstreamModel, c.SampleFormat,
 		c.SampleBytes, c.SourceFilename, c.PreviewText, c.PreviewPath, c.PreviewFormat,
 		c.PreviewDurationMS, c.PreviewCharacters, c.Authorized, c.CreatedAt)
-	if err != nil {
-		return err
-	}
-	c.ID, err = res.LastInsertId()
 	return err
 }
 
@@ -1294,15 +1579,12 @@ const voiceDesignColumns = `id, channel_id, channel_name, model, upstream_model,
 // CreateVoiceDesign inserts a designed voice and sets its id.
 func (s *Store) CreateVoiceDesign(v *VoiceDesign) error {
 	v.CreatedAt = now()
-	res, err := s.db.Exec(`INSERT INTO voice_designs (channel_id, channel_name, model, upstream_model, voice_id, name,
+	var err error
+	v.ID, err = s.insertStoreID(`INSERT INTO voice_designs (channel_id, channel_name, model, upstream_model, voice_id, name,
 		prompt, preview_text, preview_path, preview_format, preview_duration_ms, preview_characters, preview_size_bytes, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		v.ChannelID, v.ChannelName, v.Model, v.UpstreamModel, v.VoiceID, v.Name,
 		v.Prompt, v.PreviewText, v.PreviewPath, v.PreviewFormat, v.PreviewDurationMS, v.PreviewCharacters, v.PreviewSizeBytes, v.CreatedAt)
-	if err != nil {
-		return err
-	}
-	v.ID, err = res.LastInsertId()
 	return err
 }
 
@@ -1388,15 +1670,12 @@ const musicTaskColumns = `id, channel_id, channel_name, model, upstream_model, p
 func (s *Store) CreateMusicTask(m *MusicTask) error {
 	now := now()
 	m.CreatedAt, m.UpdatedAt = now, now
-	res, err := s.db.Exec(`INSERT INTO music_tasks (channel_id, channel_name, model, upstream_model, prompt, lyrics,
+	var err error
+	m.ID, err = s.insertStoreID(`INSERT INTO music_tasks (channel_id, channel_name, model, upstream_model, prompt, lyrics,
 		instrumental, format, status, error, audio_path, remote_url, duration_ms, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.ChannelID, m.ChannelName, m.Model, m.UpstreamModel, m.Prompt, m.Lyrics,
-		boolInt(m.Instrumental), m.Format, m.Status, m.Error, m.AudioPath, m.RemoteURL, m.DurationMS, m.CreatedAt, m.UpdatedAt)
-	if err != nil {
-		return err
-	}
-	m.ID, err = res.LastInsertId()
+		boolValue(m.Instrumental), m.Format, m.Status, m.Error, m.AudioPath, m.RemoteURL, m.DurationMS, m.CreatedAt, m.UpdatedAt)
 	return err
 }
 
@@ -1480,13 +1759,6 @@ func scanMusicTask(row interface{ Scan(dest ...any) error }) (*MusicTask, error)
 	return &m, nil
 }
 
-func boolInt(value bool) int {
-	if value {
-		return 1
-	}
-	return 0
-}
-
 // Totals aggregates request counts, token usage and spend.
 type Totals struct {
 	Requests         int64   `json:"requests"`
@@ -1550,9 +1822,15 @@ func (s *Store) GetDashboard() (*Dashboard, error) {
 	}
 	start := todayStart - 6*86400
 	byDay := map[string]*DayStat{}
-	rows, err := s.db.Query(`SELECT date(created_at, 'unixepoch'), COUNT(*), COALESCE(SUM(total_tokens), 0),
+	// SQLite stores unix seconds and formats them with date(); PostgreSQL
+	// needs an explicit UTC conversion so the dashboard keeps UTC day buckets.
+	dayExpr := `date(created_at, 'unixepoch')`
+	if s.dialect == dialectPostgres {
+		dayExpr = `to_char(to_timestamp(created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD')`
+	}
+	rows, err := s.db.Query(`SELECT `+dayExpr+`, COUNT(*), COALESCE(SUM(total_tokens), 0),
 		COALESCE(SUM(cost), 0), COALESCE(SUM(CASE WHEN status = 'success' THEN 0 ELSE 1 END), 0)
-		FROM logs WHERE created_at >= ? GROUP BY date(created_at, 'unixepoch')`, start)
+		FROM logs WHERE created_at >= ? GROUP BY `+dayExpr, start)
 	if err != nil {
 		return nil, err
 	}

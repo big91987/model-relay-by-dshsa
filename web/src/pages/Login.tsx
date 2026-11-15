@@ -2,6 +2,8 @@ import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { Navigate } from 'react-router-dom'
 import { useAuth } from '../lib/auth'
+import { t } from '../lib/i18n'
+import { isTestMode } from '../lib/runtime'
 import { ThemeSwitcher } from '../components/ThemeSwitcher'
 import { ErrorBanner, FormField, Spinner } from '../components/ui'
 
@@ -11,6 +13,7 @@ export default function Login() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const testMode = isTestMode()
 
   if (loading) {
     return (
@@ -29,7 +32,7 @@ export default function Login() {
     try {
       await login(username.trim(), password)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Sign in failed')
+      setError(err instanceof Error ? err.message : t('Sign in failed'))
     } finally {
       setBusy(false)
     }
@@ -46,14 +49,20 @@ export default function Login() {
         <div className="login-brand">
           <div className="brand-mark large">MR</div>
           <div>
-            <div className="brand-name">Model Relay</div>
-            <div className="brand-sub">OpenAI-compatible gateway</div>
+            <div className="brand-name">{t("Model Relay")}</div>
+            <div className="brand-sub">{t('OpenAI-compatible gateway')}</div>
           </div>
         </div>
-        <h1>Welcome back</h1>
-        <p className="login-lead">Sign in to manage providers, API keys and request traffic.</p>
+        <h1>{t('Welcome back')}</h1>
+        <p className="login-lead">{t('Sign in to manage providers, API keys and request traffic.')}</p>
+        {testMode ? (
+          <div className="login-test-hint" role="note">
+            <strong>{t('Local test environment')}</strong>
+            <span>{t('Default test account: admin / admin. Enabled by TEST_MODE; never use it in production.')}</span>
+          </div>
+        ) : null}
         <form onSubmit={submit} className="login-form">
-          <FormField label="Username" htmlFor="username">
+          <FormField label={t('Username')} htmlFor="username">
             <input
               id="username"
               className="input"
@@ -65,7 +74,7 @@ export default function Login() {
               placeholder="admin"
             />
           </FormField>
-          <FormField label="Password" htmlFor="password">
+          <FormField label={t('Password')} htmlFor="password">
             <input
               id="password"
               className="input"
@@ -74,18 +83,18 @@ export default function Login() {
               onChange={(event) => setPassword(event.target.value)}
               autoComplete="current-password"
               required
-              placeholder="Your password"
+              placeholder={t('Your password')}
             />
           </FormField>
           {error ? <ErrorBanner message={error} /> : null}
           <button className="btn btn-primary btn-block" type="submit" disabled={busy}>
             {busy ? <Spinner size={16} /> : null}
-            {busy ? 'Signing in…' : 'Sign in'}
+            {busy ? t('Signing in…') : t('Sign in')}
           </button>
         </form>
         <div className="login-foot">
           <span className="pulse-dot" />
-          Self-hosted · Keys stay on your infrastructure
+          {t('Self-hosted · Keys stay on your infrastructure')}
         </div>
       </div>
     </div>

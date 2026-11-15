@@ -34,15 +34,26 @@ func main() {
 	if cfg.UsingDefaultSecret {
 		logger.Warn("SECRET_KEY is not set; using an insecure development key. Set SECRET_KEY before exposing this instance.")
 	}
-	if cfg.UsingDefaultPassword {
+	if cfg.TestMode {
+		logger.Warn("TEST_MODE=1：已启用本地测试环境，初始管理员账号为 admin/admin。该模式仅用于本地验收，请勿在生产环境启用。")
+	} else if cfg.UsingDefaultPassword {
 		logger.Warn("ADMIN_PASSWORD is not set; the default development password is active. Set ADMIN_PASSWORD before exposing this instance.",
 			"username", cfg.AdminUsername)
 	}
 
-	st, err := store.Open(cfg.DBPath)
-	if err != nil {
-		logger.Error("open database failed", "error", err)
-		os.Exit(1)
+	var st *store.Store
+	if cfg.UsingPostgres() {
+		st, err = store.OpenPostgres(cfg.DatabaseURL)
+		if err != nil {
+			logger.Error("open postgres database failed", "error", err)
+			os.Exit(1)
+		}
+	} else {
+		st, err = store.Open(cfg.DBPath)
+		if err != nil {
+			logger.Error("open database failed", "error", err)
+			os.Exit(1)
+		}
 	}
 	defer st.Close()
 
@@ -62,7 +73,12 @@ func main() {
 			"count", len(recovered), "charged", amount)
 	}
 
-	created, err := st.EnsureAdmin(cfg.AdminUsername, cfg.AdminPassword)
+	var created bool
+	if cfg.TestMode {
+		created, err = st.EnsureTestAdmin(cfg.AdminUsername, cfg.AdminPassword)
+	} else {
+		created, err = st.EnsureAdmin(cfg.AdminUsername, cfg.AdminPassword)
+	}
 	if err != nil {
 		logger.Error("seed admin user failed", "error", err)
 		os.Exit(1)
@@ -91,7 +107,7 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("model relay started", "addr", httpServer.Addr, "version", cfg.Version, "data_dir", cfg.DataDir)
+		logger.Info("model relay started", "addr", httpServer.Addr, "version", cfg.Version, "data_dir", cfg.DataDir, "database", st.Backend())
 		errCh <- httpServer.ListenAndServe()
 	}()
 

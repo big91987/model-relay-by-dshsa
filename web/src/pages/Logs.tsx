@@ -14,6 +14,7 @@ import {
   parseLocalDateTime,
   percent,
 } from '../lib/format'
+import { t } from '../lib/i18n'
 import { useToast } from '../lib/toast'
 import type { LogItem, LogQuery, LogsResponse, Token } from '../lib/types'
 
@@ -33,9 +34,9 @@ function describePeriod(filters: Filters): string {
   const start = filters.start ? parseLocalDateTime(filters.start) : null
   const end = filters.end ? parseLocalDateTime(filters.end) : null
   if (start !== null && end !== null) return `${formatDateTime(start)} – ${formatDateTime(end)}`
-  if (start !== null) return `From ${formatDateTime(start)}`
-  if (end !== null) return `Until ${formatDateTime(end)}`
-  return 'All time'
+  if (start !== null) return t('From {date}', { date: formatDateTime(start) })
+  if (end !== null) return t('Until {date}', { date: formatDateTime(end) })
+  return t('All time')
 }
 
 function logQuery(filters: Filters): LogQuery {
@@ -73,7 +74,7 @@ export default function Logs() {
       setData(response)
       setError('')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load request logs')
+      setError(err instanceof Error ? err.message : t('Failed to load request logs'))
     } finally {
       setLoading(false)
     }
@@ -103,7 +104,7 @@ export default function Logs() {
     const start = next.start ? parseLocalDateTime(next.start) : null
     const end = next.end ? parseLocalDateTime(next.end) : null
     if (start !== null && end !== null && start > end) {
-      toast.error('The period start must not be after the period end')
+      toast.error(t('The period start must not be after the period end'))
       return null
     }
     return next
@@ -128,9 +129,9 @@ export default function Logs() {
   const copyRequestId = async (requestId: string) => {
     try {
       await navigator.clipboard.writeText(requestId)
-      toast.success('Request ID copied')
+      toast.success(t('Request ID copied'))
     } catch {
-      toast.error('Cannot access the clipboard; select and copy the value manually')
+      toast.error(t('Cannot access the clipboard; select and copy the value manually'))
     }
   }
 
@@ -151,9 +152,9 @@ export default function Logs() {
       link.click()
       link.remove()
       URL.revokeObjectURL(url)
-      toast.success(`Exported ${filename}`)
+      toast.success(t('Exported {filename}', { filename }))
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to export request logs')
+      toast.error(err instanceof Error ? err.message : t('Failed to export request logs'))
     } finally {
       setExporting(false)
     }
@@ -164,11 +165,11 @@ export default function Logs() {
   return (
     <div className="page">
       <PageHeader
-        title="Request logs"
-        subtitle="Every relayed call with tokens, cost, latency and upstream routing. Export the filtered detail as CSV for finance reconciliation."
+        title={t('Request logs')}
+        subtitle={t('Every relayed call with tokens, cost, latency and upstream routing. Export the filtered detail as CSV for finance reconciliation.')}
         actions={
           <button className="btn btn-ghost" type="button" onClick={() => void exportCsv()} disabled={exporting}>
-            <Icon name="download" size={16} /> {exporting ? 'Exporting…' : 'Export CSV'}
+            <Icon name="download" size={16} /> {exporting ? t('Exporting…') : t('Export CSV')}
           </button>
         }
       />
@@ -178,35 +179,35 @@ export default function Logs() {
         <form className="filters" onSubmit={applyFilters}>
           <input
             className="input"
-            placeholder="Filter by model"
+            placeholder={t('Filter by model')}
             value={draft.model}
             onChange={(event) => setDraft({ ...draft, model: event.target.value })}
-            aria-label="Filter by model"
+            aria-label={t('Filter by model')}
           />
           <input
             className="input"
-            placeholder="Filter by request ID"
+            placeholder={t('Filter by request ID')}
             value={draft.request_id}
             onChange={(event) => setDraft({ ...draft, request_id: event.target.value })}
-            aria-label="Filter by request ID"
+            aria-label={t('Filter by request ID')}
           />
           <select
             className="input"
             value={draft.status}
             onChange={(event) => setDraft({ ...draft, status: event.target.value })}
-            aria-label="Filter by status"
+            aria-label={t('Filter by status')}
           >
-            <option value="">All statuses</option>
-            <option value="success">Success</option>
-            <option value="error">Error</option>
+            <option value="">{t('All statuses')}</option>
+            <option value="success">{t('Success')}</option>
+            <option value="error">{t('Error')}</option>
           </select>
           <select
             className="input"
             value={draft.token_id}
             onChange={(event) => setDraft({ ...draft, token_id: event.target.value })}
-            aria-label="Filter by API key"
+            aria-label={t('Filter by API key')}
           >
-            <option value="">All API keys</option>
+            <option value="">{t('All API keys')}</option>
             {tokens.map((token) => (
               <option value={token.id} key={token.id}>
                 {token.name}
@@ -214,7 +215,7 @@ export default function Logs() {
             ))}
           </select>
           <label className="filter-date">
-            <span>Period from</span>
+            <span>{t('Period from')}</span>
             <input
               className="input"
               type="datetime-local"
@@ -223,7 +224,7 @@ export default function Logs() {
             />
           </label>
           <label className="filter-date">
-            <span>Period to</span>
+            <span>{t('Period to')}</span>
             <input
               className="input"
               type="datetime-local"
@@ -232,26 +233,26 @@ export default function Logs() {
             />
           </label>
           <button className="btn btn-primary btn-sm" type="submit">
-            <Icon name="search" size={15} /> Apply
+            <Icon name="search" size={15} /> {t('Apply')}
           </button>
           <button className="btn btn-ghost btn-sm" type="button" onClick={resetFilters}>
-            Reset
+            {t('Reset')}
           </button>
         </form>
       </section>
 
       {!loading && data ? (
-        <section className="panel cost-summary" aria-label="Cost total for the selected period">
+        <section className="panel cost-summary" aria-label={t('Cost total for the selected period')}>
           <div className="cost-summary-main">
-            <span className="cost-summary-label">Total cost</span>
+            <span className="cost-summary-label">{t('Total cost')}</span>
             <strong className="cost-summary-value">{formatCost(data.summary.cost)}</strong>
           </div>
           <div className="cost-summary-meta">
-            <span>{formatNumber(data.summary.requests)} requests</span>
+            <span>{t('{count} requests', { count: formatNumber(data.summary.requests) })}</span>
             <span>{describePeriod(filters)}</span>
             {data.summary.unverified_cost > 0 ? (
               <span className="cost-summary-unverified">
-                {formatCost(data.summary.unverified_cost)} unverified
+                {t('{cost} unverified', { cost: formatCost(data.summary.unverified_cost) })}
               </span>
             ) : null}
           </div>
@@ -259,31 +260,33 @@ export default function Logs() {
       ) : null}
 
       {!loading && data && data.summary.by_model.length > 0 ? (
-        <section className="panel cost-by-model" aria-label="Cost by model for the selected period">
+        <section className="panel cost-by-model" aria-label={t('Cost by model for the selected period')}>
           <div className="panel-head">
             <div>
-              <h2>Cost by model</h2>
-              <p>Same filters and period as the total above.</p>
+              <h2>{t('Cost by model')}</h2>
+              <p>{t('Same filters and period as the total above.')}</p>
             </div>
             <span className="badge badge-muted">
-              {formatNumber(data.summary.by_model.length)} {data.summary.by_model.length === 1 ? 'model' : 'models'}
+              {data.summary.by_model.length === 1
+                ? t('{count} model', { count: formatNumber(data.summary.by_model.length) })
+                : t('{count} models', { count: formatNumber(data.summary.by_model.length) })}
             </span>
           </div>
           <div className="table-wrap">
             <table className="table cost-by-model-table">
               <thead>
                 <tr>
-                  <th>Model</th>
-                  <th className="num">Requests</th>
-                  <th className="num">Share</th>
-                  <th className="num">Cost</th>
+                  <th>{t('Model')}</th>
+                  <th className="num">{t('Requests')}</th>
+                  <th className="num">{t('Share')}</th>
+                  <th className="num">{t('Cost')}</th>
                 </tr>
               </thead>
               <tbody>
                 {data.summary.by_model.map((item) => (
                   <tr key={item.model || '(unknown)'}>
                     <td>
-                      <div className="cell-title mono">{item.model || 'Unknown model'}</div>
+                      <div className="cell-title mono">{item.model || t('Unknown model')}</div>
                     </td>
                     <td className="num">{formatNumber(item.requests)}</td>
                     <td className="num muted">{percent(item.cost, data.summary.cost).toFixed(1)}%</td>
@@ -293,7 +296,7 @@ export default function Logs() {
                       </div>
                       {item.unverified_cost > 0 ? (
                         <div className="cell-sub cost-unverified">
-                          {formatCost(item.unverified_cost)} unverified
+                          {t('{cost} unverified', { cost: formatCost(item.unverified_cost) })}
                         </div>
                       ) : null}
                     </td>
@@ -307,14 +310,14 @@ export default function Logs() {
 
       {loading ? (
         <div className="page-loading">
-          <Spinner size={22} /> Loading request logs…
+          <Spinner size={22} /> {t('Loading request logs…')}
         </div>
       ) : !data || data.total === 0 ? (
         <section className="panel">
           <EmptyState
             icon="logs"
-            title="No requests match these filters"
-            description="Traffic appears here as soon as a key calls the relay. Adjust the filters or send a test request."
+            title={t('No requests match these filters')}
+            description={t('Traffic appears here as soon as a key calls the relay. Adjust the filters or send a test request.')}
           />
         </section>
       ) : (
@@ -323,14 +326,14 @@ export default function Logs() {
             <table className="table">
               <thead>
                 <tr>
-                  <th>Time</th>
-                  <th>Model</th>
-                  <th>API key</th>
-                  <th>Channel</th>
-                  <th>Status</th>
-                  <th className="num">Tokens</th>
-                  <th className="num">Cost</th>
-                  <th className="num">Latency</th>
+                  <th>{t('Time')}</th>
+                  <th>{t('Model')}</th>
+                  <th>{t('API key')}</th>
+                  <th>{t('Channel')}</th>
+                  <th>{t('Status')}</th>
+                  <th className="num">{t('Tokens')}</th>
+                  <th className="num">{t('Cost')}</th>
+                  <th className="num">{t('Latency')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -339,7 +342,7 @@ export default function Logs() {
                     key={log.id}
                     className={`clickable${log.status === 'error' ? ' row-error' : ''}`}
                     onClick={() => setSelected(log)}
-                    title="Open request detail"
+                    title={t('Open request detail')}
                   >
                     <td>
                       <div>{formatTime(log.created_at)}</div>
@@ -351,17 +354,20 @@ export default function Logs() {
                         {log.upstream_model && log.upstream_model !== log.model
                           ? `→ ${log.upstream_model}`
                           : log.stream
-                            ? 'streamed'
+                            ? t('streamed')
                             : ''}
                       </div>
                     </td>
-                    <td>{log.token_name || <span className="muted">—</span>}</td>
-                    <td>{log.channel_name || <span className="muted">—</span>}</td>
+                    <td>{log.token_name || <span className="muted">{t('—')}</span>}</td>
+                    <td>{log.channel_name || <span className="muted">{t('—')}</span>}</td>
                     <td><StatusBadge status={log.status} /></td>
                     <td className="num">
                       <div>{formatNumber(log.total_tokens)}</div>
                       <div className="cell-sub">
-                        {formatNumber(log.prompt_tokens)} in · {formatNumber(log.completion_tokens)} out
+                        {t('{input} in · {output} out', {
+                          input: formatNumber(log.prompt_tokens),
+                          output: formatNumber(log.completion_tokens),
+                        })}
                       </div>
                     </td>
                     <td className="num">
@@ -378,25 +384,28 @@ export default function Logs() {
           </div>
           <div className="table-foot">
             <span className="muted">
-              Showing {data.items.length} of {formatNumber(data.total)} requests
+              {t('Showing {shown} of {total} requests', {
+                shown: data.items.length,
+                total: formatNumber(data.total),
+              })}
             </span>
             <div className="pager">
               <button
                 className="icon-button"
                 disabled={page <= 1}
                 onClick={() => setPage((current) => Math.max(1, current - 1))}
-                aria-label="Previous page"
+                aria-label={t('Previous page')}
               >
                 <Icon name="chevronLeft" size={16} />
               </button>
               <span>
-                Page {page} / {totalPages}
+                {t('Page {page} / {total}', { page, total: totalPages })}
               </span>
               <button
                 className="icon-button"
                 disabled={page >= totalPages}
                 onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
-                aria-label="Next page"
+                aria-label={t('Next page')}
               >
                 <Icon name="chevronRight" size={16} />
               </button>
@@ -408,90 +417,90 @@ export default function Logs() {
       <Modal
         open={selected !== null}
         onClose={() => setSelected(null)}
-        title="Request detail"
+        title={t('Request detail')}
         subtitle={selected?.request_id}
         width={640}
         footer={
           <button className="btn btn-ghost" onClick={() => setSelected(null)}>
-            Close
+            {t('Close')}
           </button>
         }
       >
         {selected ? (
           <div className="detail-grid">
             <div>
-              <span>Time</span>
+              <span>{t('Time')}</span>
               <strong>{formatDateTime(selected.created_at)}</strong>
             </div>
             <div>
-              <span>Status</span>
+              <span>{t('Status')}</span>
               <strong className="detail-status">
                 <StatusBadge status={selected.status} />
                 <span className="muted">HTTP {selected.status_code}</span>
               </strong>
             </div>
             <div className="detail-wide">
-              <span>Request ID</span>
+              <span>{t('Request ID')}</span>
               <strong className="request-id-detail">
                 <code>{selected.request_id}</code>
                 <button className="link-button" type="button" onClick={() => void copyRequestId(selected.request_id)}>
-                  Copy
+                  {t('Copy')}
                 </button>
               </strong>
             </div>
             <div>
-              <span>Model</span>
+              <span>{t('Model')}</span>
               <strong className="mono">{selected.model}</strong>
             </div>
             <div>
-              <span>Upstream model</span>
-              <strong className="mono">{selected.upstream_model || '—'}</strong>
+              <span>{t('Upstream model')}</span>
+              <strong className="mono">{selected.upstream_model || t('—')}</strong>
             </div>
             <div>
-              <span>Channel</span>
-              <strong>{selected.channel_name || '—'}</strong>
+              <span>{t('Channel')}</span>
+              <strong>{selected.channel_name || t('—')}</strong>
             </div>
             <div>
-              <span>API key</span>
-              <strong>{selected.token_name || '—'}</strong>
+              <span>{t('API key')}</span>
+              <strong>{selected.token_name || t('—')}</strong>
             </div>
             <div>
-              <span>Prompt tokens</span>
+              <span>{t('Prompt tokens')}</span>
               <strong>{formatNumber(selected.prompt_tokens)}</strong>
             </div>
             <div>
-              <span>Completion tokens</span>
+              <span>{t('Completion tokens')}</span>
               <strong>{formatNumber(selected.completion_tokens)}</strong>
             </div>
             <div>
-              <span>Total tokens</span>
+              <span>{t('Total tokens')}</span>
               <strong>{formatNumber(selected.total_tokens)}</strong>
             </div>
             <div>
-              <span>Cost</span>
+              <span>{t('Cost')}</span>
               <strong>{formatCost(selected.cost)}</strong>
             </div>
             <div>
-              <span>Cost basis</span>
+              <span>{t('Cost basis')}</span>
               <strong className="detail-status">
                 <CostStatusBadge status={selected.cost_status} />
               </strong>
             </div>
             <div>
-              <span>Reserved for this request</span>
+              <span>{t('Reserved for this request')}</span>
               <strong>{formatCost(selected.reserved_cost)}</strong>
             </div>
             <div>
-              <span>Latency</span>
+              <span>{t('Latency')}</span>
               <strong>{formatDuration(selected.latency_ms)}</strong>
             </div>
             <div>
-              <span>Streaming</span>
-              <strong>{selected.stream ? 'Yes' : 'No'}</strong>
+              <span>{t('Streaming')}</span>
+              <strong>{selected.stream ? t('Yes') : t('No')}</strong>
             </div>
             {selected.error ? (
               <div className="detail-wide">
-                <span>Error</span>
+                <span>{t('Error')}</span>
                 <pre>{selected.error}</pre>
               </div>
             ) : null}

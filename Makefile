@@ -2,7 +2,7 @@ VERSION ?= 0.1.0
 BINARY := bin/gateway
 GO_FLAGS := -tags embed -trimpath
 
-.PHONY: all web build run dev test test-go test-web vet fmt clean docker
+.PHONY: all web build run dev test test-go test-web test-postgres vet fmt clean docker
 
 all: build
 
@@ -30,6 +30,11 @@ test-go:
 
 test-web:
 	cd web && pnpm typecheck
+
+## test-postgres: run the store suite against a disposable PostgreSQL database
+test-postgres:
+	@test -n "$$TEST_DATABASE_URL" || (echo "set TEST_DATABASE_URL to a disposable postgres:// URL" >&2; exit 1)
+	go test ./internal/store -count=1
 
 vet:
 	go vet ./...

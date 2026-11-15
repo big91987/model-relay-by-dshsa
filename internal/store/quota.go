@@ -69,10 +69,16 @@ func (s *Store) ReserveQuota(id string, tokenID int64, requestID, model string, 
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Lock the token row on PostgreSQL so concurrent reservations for the same
+	// key serialize; SQLite already serializes writers with one connection.
+	lock := ""
+	if s.dialect == dialectPostgres {
+		lock = " FOR UPDATE"
+	}
 	var quota, used float64
 	var status string
 	var expires sql.NullInt64
-	if err := tx.QueryRow(`SELECT quota, used_quota, status, expires_at FROM tokens WHERE id = ?`, tokenID).
+	if err := tx.QueryRow(`SELECT quota, used_quota, status, expires_at FROM tokens WHERE id = ?`+lock, tokenID).
 		Scan(&quota, &used, &status, &expires); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -159,7 +165,7 @@ func (s *Store) FinalizeReservation(id string, log *Log, cost float64, costStatu
 	log.CostStatus = costStatus
 	res, err := tx.Exec(`UPDATE token_reservations SET status = ?, settled_cost = ?, cost_status = ?, prompt_tokens = ?, completion_tokens = ?,
 		upstream_model = ?, channel_id = ?, channel_name = ?, stream = ?, settled_at = ? WHERE id = ? AND status = ?`,
-		status, cost, costStatus, log.PromptTokens, log.CompletionTokens, log.UpstreamModel, log.ChannelID, log.ChannelName, log.Stream, settledAt, id, ReservationPending)
+		status, cost, costStatus, log.PromptTokens, log.CompletionTokens, log.UpstreamModel, log.ChannelID, log.ChannelName, boolValue(log.Stream), settledAt, id, ReservationPending)
 	if err != nil {
 		return false, err
 	}
@@ -319,21 +325,21 @@ func scanReservation(row interface{ Scan(dest ...any) error }) (*Reservation, er
 	return &r, nil
 }
 
-func insertLogTx(tx *sql.Tx, l *Log) error {
+func insertLogTx(tx *tx, l *Log) error {
 	if l.CreatedAt == 0 {
 		l.CreatedAt = now()
 	}
 	if l.CostStatus == "" {
 		l.CostStatus = CostActual
 	}
-	res, err := tx.Exec(`INSERT INTO logs (request_id, reservation_id, user_id, token_id, channel_id, token_name, channel_name, model, upstream_model,
+	id, err := insertID(tx, tx.dialect, `INSERT INTO logs (request_id, reservation_id, user_id, token_id, channel_id, token_name, channel_name, model, upstream_model,
 		prompt_tokens, completion_tokens, total_tokens, cost, reserved_cost, cost_status, status, status_code, error, latency_ms, stream, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		l.RequestID, l.ReservationID, l.UserID, l.TokenID, l.ChannelID, l.TokenName, l.ChannelName, l.Model, l.UpstreamModel,
-		l.PromptTokens, l.CompletionTokens, l.TotalTokens, l.Cost, l.ReservedCost, l.CostStatus, l.Status, l.StatusCode, l.Error, l.LatencyMS, l.Stream, l.CreatedAt)
+		l.PromptTokens, l.CompletionTokens, l.TotalTokens, l.Cost, l.ReservedCost, l.CostStatus, l.Status, l.StatusCode, l.Error, l.LatencyMS, boolValue(l.Stream), l.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("insert request log: %w", err)
 	}
-	l.ID, err = res.LastInsertId()
-	return err
+	l.ID = id
+	return nil
 }

@@ -5,6 +5,7 @@ import { EmptyState, ErrorBanner, PageHeader, Spinner } from '../components/ui'
 import { api } from '../lib/api'
 import { channelTypeLabel, formatPrice } from '../lib/format'
 import type { ModelInfo } from '../lib/types'
+import { t } from '../lib/i18n'
 
 const FAVORITES_STORAGE_KEY = 'mr-favorite-models'
 
@@ -72,7 +73,7 @@ export default function Models() {
         if (active) setModels(response.data)
       })
       .catch((err: unknown) => {
-        if (active) setError(err instanceof Error ? err.message : 'Failed to load models')
+        if (active) setError(err instanceof Error ? err.message : t("Failed to load models"))
       })
       .finally(() => {
         if (active) setLoading(false)
@@ -107,19 +108,19 @@ export default function Models() {
   return (
     <div className="page">
       <PageHeader
-        title="Models"
-        subtitle="Public model identifiers exposed by your enabled channels."
+        title={t("Models")}
+        subtitle={t("Public model identifiers exposed by your enabled channels.")}
         actions={
           <>
             <button
               type="button"
               className="btn btn-ghost favorites-filter"
               aria-pressed={favoritesOnly}
-              title={favoritesOnly ? 'Show all models' : 'Show favorite models only'}
+              title={favoritesOnly ? t("Show all models") : t("Show favorite models only")}
               onClick={() => setFavoritesOnly((value) => !value)}
             >
               <Icon name="star" size={15} />
-              Favorites only
+              {t("Favorites only")}
               {favoriteCount > 0 ? (
                 <span className="favorites-filter-count">{favoriteCount}</span>
               ) : null}
@@ -128,7 +129,7 @@ export default function Models() {
               <Icon name="search" size={16} />
               <input
                 className="search-input"
-                placeholder="Search models or channels"
+                placeholder={t("Search models or channels")}
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
               />
@@ -140,17 +141,17 @@ export default function Models() {
 
       {loading ? (
         <div className="page-loading">
-          <Spinner size={22} /> Loading models…
+          <Spinner size={22} /> {t("Loading models…")}
         </div>
       ) : models.length === 0 ? (
         <section className="panel">
           <EmptyState
             icon="models"
-            title="No models available"
-            description="Add an enabled channel with at least one model to expose it through /v1/models."
+            title={t("No models available")}
+            description={t("Add an enabled channel with at least one model to expose it through /v1/models.")}
             action={
               <Link className="btn btn-primary" to="/channels">
-                <Icon name="plus" size={16} /> Add a channel
+                <Icon name="plus" size={16} /> {t("Add a channel")}
               </Link>
             }
           />
@@ -159,27 +160,34 @@ export default function Models() {
         <section className="panel">
           <div className="panel-head">
             <div>
-              <h2>Model catalog</h2>
+              <h2>{t("Model catalog")}</h2>
               <p>
-                {filtered.length} of {models.length} models
-                {favoritesOnly ? ' · favorites only' : ''}
-                {query ? ` matching “${search.trim()}”` : ''}
+                {t(
+                  favoritesOnly
+                    ? query
+                      ? '{shown} of {total} models · favorites only matching “{query}”'
+                      : '{shown} of {total} models · favorites only'
+                    : query
+                      ? '{shown} of {total} models matching “{query}”'
+                      : '{shown} of {total} models',
+                  { shown: filtered.length, total: models.length, query: search.trim() },
+                )}
               </p>
             </div>
-            <span className="badge badge-muted">{models.length} total</span>
+            <span className="badge badge-muted">{t('{count} total', { count: models.length })}</span>
           </div>
           <div className="table-wrap">
             <table className="table">
               <thead>
                 <tr>
                   <th className="favorite-col">
-                    <span className="sr-only">Favorite</span>
+                    <span className="sr-only">{t("Favorite")}</span>
                   </th>
-                  <th>Model</th>
-                  <th>Protocols</th>
-                  <th>Channels</th>
-                  <th className="num">Input / 1M</th>
-                  <th className="num">Output / 1M</th>
+                  <th>{t("Model")}</th>
+                  <th>{t("Protocols")}</th>
+                  <th>{t("Channels")}</th>
+                  <th className="num">{t("Input / 1M")}</th>
+                  <th className="num">{t("Output / 1M")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -194,10 +202,10 @@ export default function Models() {
                           aria-pressed={favorite}
                           aria-label={
                             favorite
-                              ? `Remove ${model.id} from favorites`
-                              : `Add ${model.id} to favorites`
+                              ? t('Remove {model} from favorites', { model: model.id })
+                              : t('Add {model} to favorites', { model: model.id })
                           }
-                          title={favorite ? 'Remove from favorites' : 'Add to favorites'}
+                          title={favorite ? t("Remove from favorites") : t("Add to favorites")}
                           onClick={() => toggleFavorite(model.id)}
                         >
                           <Icon name="star" size={16} />
@@ -205,7 +213,11 @@ export default function Models() {
                       </td>
                       <td>
                         <div className="cell-title mono">{model.id}</div>
-                        <div className="cell-sub">Served by {model.channels.length} channel{model.channels.length === 1 ? '' : 's'}</div>
+                        <div className="cell-sub">
+                          {model.channels.length === 1
+                            ? t('Served by {count} channel', { count: model.channels.length })
+                            : t('Served by {count} channels', { count: model.channels.length })}
+                        </div>
                       </td>
                       <td>
                         <div className="chip-row">
@@ -226,10 +238,10 @@ export default function Models() {
                         </div>
                       </td>
                       <td className="num">
-                        {isMediaModel(model) ? <span className="muted">Not metered</span> : formatPrice(model.input_price)}
+                        {isMediaModel(model) ? <span className="muted">{t("Not metered")}</span> : formatPrice(model.input_price)}
                       </td>
                       <td className="num">
-                        {isMediaModel(model) ? <span className="muted">Not metered</span> : formatPrice(model.output_price)}
+                        {isMediaModel(model) ? <span className="muted">{t("Not metered")}</span> : formatPrice(model.output_price)}
                       </td>
                     </tr>
                   )
@@ -241,30 +253,30 @@ export default function Models() {
             favoritesOnly && favoriteCount === 0 ? (
               <EmptyState
                 icon="star"
-                title="No favorite models yet"
-                description="Star the models you use most, then use Favorites only to filter the catalog."
+                title={t("No favorite models yet")}
+                description={t("Star the models you use most, then use Favorites only to filter the catalog.")}
                 action={
                   <button type="button" className="btn btn-ghost btn-sm" onClick={showAllModels}>
-                    Show all models
+                    {t("Show all models")}
                   </button>
                 }
               />
             ) : favoritesOnly ? (
               <EmptyState
                 icon="search"
-                title="No matching favorite models"
-                description="Try a different model or channel name, or show all models."
+                title={t("No matching favorite models")}
+                description={t("Try a different model or channel name, or show all models.")}
                 action={
                   <button type="button" className="btn btn-ghost btn-sm" onClick={showAllModels}>
-                    Show all models
+                    {t("Show all models")}
                   </button>
                 }
               />
             ) : (
               <EmptyState
                 icon="search"
-                title="No matching models"
-                description="Try a different model or channel name."
+                title={t("No matching models")}
+                description={t("Try a different model or channel name.")}
               />
             )
           ) : null}

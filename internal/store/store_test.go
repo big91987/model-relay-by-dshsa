@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"math"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -11,8 +12,16 @@ import (
 	"github.com/big91987/model-relay-by-dshsa/internal/auth"
 )
 
+// testStore returns an isolated SQLite database, or an isolated PostgreSQL
+// schema when TEST_DATABASE_URL points at a disposable database. The same
+// CRUD and accounting tests then exercise both backends.
 func testStore(t *testing.T) *Store {
 	t.Helper()
+	if base := os.Getenv("TEST_DATABASE_URL"); base != "" {
+		s, cleanup := openTestPostgres(t, base)
+		t.Cleanup(cleanup)
+		return s
+	}
 	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -37,6 +46,56 @@ func TestEnsureAdmin(t *testing.T) {
 	}
 	if !auth.VerifyPassword(user.PasswordHash, "admin-pass") {
 		t.Fatal("stored password hash does not verify")
+	}
+}
+
+func TestEnsureTestAdminAllowsShortTestPassword(t *testing.T) {
+	s := testStore(t)
+	if _, err := s.EnsureAdmin("admin", "admin"); err == nil {
+		t.Fatal("production EnsureAdmin must reject a password shorter than 6 characters")
+	}
+	created, err := s.EnsureTestAdmin("admin", "admin")
+	if err != nil || !created {
+		t.Fatalf("EnsureTestAdmin: created=%v err=%v", created, err)
+	}
+	user, err := s.GetUserByUsername("admin")
+	if err != nil {
+		t.Fatalf("GetUserByUsername: %v", err)
+	}
+	if !auth.VerifyPassword(user.PasswordHash, "admin") {
+		t.Fatal("admin/admin hash does not verify")
+	}
+}
+
+func TestMusicTaskAndAsyncSpeechColumns(t *testing.T) {
+	s := testStore(t)
+	speech := &SpeechClip{
+		Model: "speech-test", VoiceID: "voice-1", Text: "hello", Speed: 1,
+		Status: "running", UpstreamTaskID: "task-1", UpstreamFileID: 42, Format: "mp3",
+	}
+	if err := s.CreateSpeechClip(speech); err != nil {
+		t.Fatalf("CreateSpeechClip: %v", err)
+	}
+	gotSpeech, err := s.GetSpeechClip(speech.ID)
+	if err != nil {
+		t.Fatalf("GetSpeechClip: %v", err)
+	}
+	if gotSpeech.UpstreamTaskID != "task-1" || gotSpeech.UpstreamFileID != 42 {
+		t.Fatalf("async speech fields: %+v", gotSpeech)
+	}
+	music := &MusicTask{
+		Model: "music-3.0", Prompt: "warm synth", Lyrics: "la la",
+		Instrumental: true, Format: "mp3", Status: "queued",
+	}
+	if err := s.CreateMusicTask(music); err != nil {
+		t.Fatalf("CreateMusicTask: %v", err)
+	}
+	gotMusic, err := s.GetMusicTask(music.ID)
+	if err != nil {
+		t.Fatalf("GetMusicTask: %v", err)
+	}
+	if !gotMusic.Instrumental || gotMusic.Prompt != "warm synth" || gotMusic.Lyrics != "la la" {
+		t.Fatalf("music task: %+v", gotMusic)
 	}
 }
 
@@ -248,6 +307,9 @@ func TestListLogsByRequestID(t *testing.T) {
 
 func TestSpeechClipBackgroundJobMigration(t *testing.T) {
 	s := testStore(t)
+	if s.dialect != dialectSQLite {
+		t.Skip("SQLite schema-migration test")
+	}
 	if _, err := s.db.Exec(`DROP TABLE speech_clips`); err != nil {
 		t.Fatalf("drop speech_clips: %v", err)
 	}

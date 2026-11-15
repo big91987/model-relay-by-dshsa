@@ -1,0 +1,43 @@
+# PostgreSQL deployment example. Keep the default docker-compose.yml for the
+# original single-file SQLite setup.
+#
+# .env must define the database settings (see .env.example), including a
+# DATABASE_URL reachable from the gateway container, for example:
+#   DATABASE_URL=postgres://relay@postgres:5432/exp_model_relay?sslmode=disable
+services:
+  postgres:
+    image: postgres:16-alpine
+    # Passing the file avoids putting a password value or a credential URL in
+    # this committed compose file.
+    env_file:
+      - .env
+    volumes:
+      - relay-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: .
+      args:
+        VERSION: 0.1.0
+    image: model-relay:0.1.0
+    ports:
+      - "8080:8080"
+    # .env also carries SECRET_KEY, ADMIN_PASSWORD, TEST_MODE and DATABASE_URL.
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - relay-data:/data
+    restart: unless-stopped
+
+volumes:
+  relay-data:
+  relay-pg:

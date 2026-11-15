@@ -2,33 +2,35 @@ import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
 import { useAuth } from '../lib/auth'
+import { t } from '../lib/i18n'
+import { databaseBackend, isTestMode } from '../lib/runtime'
 import { Icon, type IconName } from './Icon'
 import { ThemeSwitcher } from './ThemeSwitcher'
 
 const navigation: { to: string; label: string; icon: IconName }[] = [
-  { to: '/dashboard', label: 'Dashboard', icon: 'dashboard' },
-  { to: '/playground', label: 'Playground', icon: 'spark' },
-  { to: '/channels', label: 'Channels', icon: 'channels' },
-  { to: '/models', label: 'Models', icon: 'models' },
-  { to: '/videos', label: 'Video', icon: 'video' },
-  { to: '/speech', label: 'Speech', icon: 'speech' },
-  { to: '/voice-design', label: 'Voice design', icon: 'spark' },
+  { to: '/dashboard', label: t("Dashboard"), icon: 'dashboard' },
+  { to: '/playground', label: t("Playground"), icon: 'spark' },
+  { to: '/channels', label: t("Channels"), icon: 'channels' },
+  { to: '/models', label: t("Models"), icon: 'models' },
+  { to: '/videos', label: t("Video"), icon: 'video' },
+  { to: '/speech', label: t("Speech"), icon: 'speech' },
+  { to: '/voice-design', label: t("Voice design"), icon: 'spark' },
   { to: '/music', label: 'Music', icon: 'music' },
-  { to: '/tokens', label: 'API keys', icon: 'key' },
-  { to: '/logs', label: 'Logs', icon: 'logs' },
+  { to: '/tokens', label: t("API keys"), icon: 'key' },
+  { to: '/logs', label: t("Logs"), icon: 'logs' },
 ]
 
 const titles: Record<string, string> = {
-  '/dashboard': 'Dashboard',
-  '/playground': 'Playground',
-  '/channels': 'Channels',
-  '/models': 'Models',
-  '/videos': 'Video generation',
-  '/speech': 'Text to speech',
-  '/voice-design': 'Voice design',
+  '/dashboard': t("Dashboard"),
+  '/playground': t("Playground"),
+  '/channels': t("Channels"),
+  '/models': t("Models"),
+  '/videos': t("Video generation"),
+  '/speech': t("Text to speech"),
+  '/voice-design': t("Voice design"),
   '/music': 'Music generation',
-  '/tokens': 'API keys',
-  '/logs': 'Logs',
+  '/tokens': t("API keys"),
+  '/logs': t("Logs"),
 }
 
 export function AppLayout() {
@@ -61,7 +63,7 @@ export function AppLayout() {
     }
   }
 
-  const title = titles[location.pathname] ?? 'Console'
+  const title = t(titles[location.pathname] ?? t("Console"))
   const initial = user?.username?.charAt(0).toUpperCase() ?? 'A'
 
   return (
@@ -70,11 +72,11 @@ export function AppLayout() {
         <div className="sidebar-brand">
           <div className="brand-mark">MR</div>
           <div>
-            <div className="brand-name">Model Relay</div>
-            <div className="brand-sub">Gateway console</div>
+            <div className="brand-name">{t("Model Relay")}</div>
+            <div className="brand-sub">{t('Gateway console')}</div>
           </div>
         </div>
-        <nav className="nav" aria-label="Main navigation">
+        <nav className="nav" aria-label={t('Main navigation')}>
           {navigation.map((item) => (
             <NavLink
               key={item.to}
@@ -82,22 +84,22 @@ export function AppLayout() {
               className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}
             >
               <Icon name={item.icon} size={18} />
-              <span>{item.label}</span>
+              <span>{t(item.label)}</span>
             </NavLink>
           ))}
         </nav>
         <div className="sidebar-footer">
           <div className="sidebar-status">
             <span className="pulse-dot" />
-            Gateway operational
+            {t('Gateway operational')}
           </div>
-          <div className="sidebar-version">Model Relay {version ? `v${version}` : ''}</div>
+          <div className="sidebar-version">{t("Model Relay")} {version ? `v${version}` : ''}</div>
         </div>
       </aside>
       <div className="main-column">
         <header className="topbar">
           <div className="topbar-title">
-            <span className="topbar-root">Console</span>
+            <span className="topbar-root">{t('Console')}</span>
             <span className="topbar-sep">/</span>
             <span>{title}</span>
           </div>
@@ -111,13 +113,23 @@ export function AppLayout() {
               className="icon-button"
               onClick={handleSignOut}
               disabled={signingOut}
-              title="Sign out"
-              aria-label="Sign out"
+              title={t('Sign out')}
+              aria-label={t('Sign out')}
             >
               <Icon name="logout" size={18} />
             </button>
           </div>
         </header>
+        {isTestMode() ? (
+          <div className="test-mode-strip" role="note">
+            <span className="pulse-dot" />
+            <strong>{t('Test environment')}</strong>
+            <span>
+              {t('Database backend')}: {databaseBackend() === 'postgres' ? t('PostgreSQL (DATABASE_URL)') : t('SQLite (default)')}
+            </span>
+            <span>{t('The console opened in Chinese because TEST_MODE is enabled.')}</span>
+          </div>
+        ) : null}
         <main className="content">
           <Outlet />
         </main>
