@@ -33,6 +33,20 @@ func HashPassword(password string) (string, error) {
 	if len(password) < 6 {
 		return "", errors.New("password must be at least 6 characters")
 	}
+	return hashPassword(password)
+}
+
+// HashTestPassword derives a password hash without the production length
+// policy. It exists only for the explicitly enabled TEST_MODE admin/admin
+// account and must never be used for a normal deployment.
+func HashTestPassword(password string) (string, error) {
+	if password == "" {
+		return "", errors.New("password must not be empty")
+	}
+	return hashPassword(password)
+}
+
+func hashPassword(password string) (string, error) {
 	salt := make([]byte, saltLen)
 	if _, err := rand.Read(salt); err != nil {
 		return "", err

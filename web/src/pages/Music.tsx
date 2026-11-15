@@ -6,6 +6,7 @@ import { api } from '../lib/api'
 import { relativeTime } from '../lib/format'
 import { useToast } from '../lib/toast'
 import type { ModelInfo, MusicTask, MusicTaskStatus } from '../lib/types'
+import { t } from '../lib/i18n'
 
 const MAX_PROMPT = 2000
 const MAX_LYRICS = 3500
@@ -17,13 +18,13 @@ function isMusicModel(model: ModelInfo): boolean {
 function statusLabel(status: MusicTaskStatus): string {
   switch (status) {
     case 'queued':
-      return 'Queued'
+      return t("Queued")
     case 'generating':
-      return 'Composing'
+      return t('Composing')
     case 'succeeded':
-      return 'Ready'
+      return t('Ready')
     case 'failed':
-      return 'Failed'
+      return t('Failed')
   }
 }
 
@@ -54,15 +55,15 @@ function MusicCard({ task }: { task: MusicTask }) {
         <div>
           <div className="music-model">{task.model}</div>
           <div className="music-meta">
-            {task.instrumental ? 'Instrumental' : 'Vocals'} · {format} · {formatSongDuration(task.duration_ms)} ·{' '}
-            {relativeTime(task.created_at)}
+            {task.instrumental ? t('Instrumental') : t('Vocals')} · {format} ·{' '}
+            {formatSongDuration(task.duration_ms)} · {relativeTime(task.created_at)}
           </div>
         </div>
         <MusicStatus status={task.status} />
       </div>
       {ready ? (
         <audio className="music-player" controls preload="metadata" src={task.content_url}>
-          Your browser cannot play this audio.
+          {t("Your browser cannot play this audio.")}
         </audio>
       ) : (
         <div className={`music-placeholder state-${task.status}`}>
@@ -75,25 +76,25 @@ function MusicCard({ task }: { task: MusicTask }) {
           )}
           <span>
             {task.status === 'failed'
-              ? 'Generation failed'
+              ? t('Generation failed')
               : task.status === 'succeeded'
                 ? task.error
-                  ? 'Generated, but not stored locally'
-                  : 'Song is being stored'
+                  ? t('Generated, but not stored locally')
+                  : t('Song is being stored')
                 : task.status === 'queued'
-                  ? 'Waiting to compose…'
-                  : 'Composing the song…'}
+                  ? t('Waiting to compose…')
+                  : t('Composing the song…')}
           </span>
         </div>
       )}
       <p className="music-prompt">{task.prompt}</p>
       {task.instrumental ? (
         <span className="music-instrumental">
-          <Icon name="music" size={13} /> Instrumental — no lyrics
+          <Icon name="music" size={13} /> {t('Instrumental — no lyrics')}
         </span>
       ) : (
         <details className="music-lyrics">
-          <summary>Lyrics</summary>
+          <summary>{t('Lyrics')}</summary>
           <pre>{task.lyrics}</pre>
         </details>
       )}
@@ -106,9 +107,9 @@ function MusicCard({ task }: { task: MusicTask }) {
       {ready ? (
         <div className="music-actions">
           <a className="btn btn-sm btn-ghost" href={`${task.content_url}?download=1`}>
-            <Icon name="download" size={15} /> Download {format}
+            <Icon name="download" size={15} /> {t('Download {format}', { format })}
           </a>
-          <span className="music-meta">by {task.channel_name}</span>
+          <span className="music-meta">{t('by {channel}', { channel: task.channel_name })}</span>
         </div>
       ) : null}
     </article>
@@ -147,7 +148,7 @@ export default function Music() {
         if (active) setModels(response.data)
       })
       .catch((err: unknown) => {
-        if (active) setError(err instanceof Error ? err.message : 'Failed to load models')
+        if (active) setError(err instanceof Error ? err.message : t('Failed to load models'))
       })
     api
       .music()
@@ -158,7 +159,7 @@ export default function Music() {
         }
       })
       .catch((err: unknown) => {
-        if (active) setError(err instanceof Error ? err.message : 'Failed to load music')
+        if (active) setError(err instanceof Error ? err.message : t('Failed to load music'))
       })
       .finally(() => {
         if (active) setLoading(false)
@@ -197,15 +198,15 @@ export default function Music() {
 
   const submit = async () => {
     if (!model) {
-      toast.error('Add a MiniMax Music channel first')
+      toast.error(t('Add a MiniMax Music channel first'))
       return
     }
     if (!prompt.trim()) {
-      toast.error('Describe the style and mood you want')
+      toast.error(t('Describe the style and mood you want'))
       return
     }
     if (!instrumental && !lyrics.trim()) {
-      toast.error('Add lyrics, or switch on instrumental')
+      toast.error(t('Add lyrics, or switch on instrumental'))
       return
     }
     setSubmitting(true)
@@ -219,9 +220,9 @@ export default function Music() {
       })
       setTasks((previous) => [task, ...previous])
       setTotal((previous) => previous + 1)
-      toast.success('Music generation started')
+      toast.success(t('Music generation started'))
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to start music generation')
+      toast.error(err instanceof Error ? err.message : t('Failed to start music generation'))
     } finally {
       setSubmitting(false)
     }
@@ -230,11 +231,11 @@ export default function Music() {
   return (
     <div className="page">
       <PageHeader
-        title="Music generation"
-        subtitle="Turn a style description and lyrics into a full song with MiniMax Music. Generation runs in the background; preview the audio and download it here when it finishes."
+        title={t('Music generation')}
+        subtitle={t('Turn a style description and lyrics into a full song with MiniMax Music. Generation runs in the background; preview the audio and download it here when it finishes.')}
         actions={
           <button className="btn btn-ghost" onClick={() => void refreshTasks()} disabled={loading}>
-            <Icon name="refresh" size={16} /> Refresh
+            <Icon name="refresh" size={16} /> {t("Refresh")}
           </button>
         }
       />
@@ -242,25 +243,25 @@ export default function Music() {
 
       {loading ? (
         <div className="page-loading">
-          <Spinner size={22} /> Loading music generation…
+          <Spinner size={22} /> {t('Loading music generation…')}
         </div>
       ) : (
         <div className="music-layout">
           <section className="panel music-create">
             <div className="panel-head">
               <div>
-                <h2>Compose a song</h2>
-                <p>Describe the sound, then write or paste the lyrics.</p>
+                <h2>{t('Compose a song')}</h2>
+                <p>{t('Describe the sound, then write or paste the lyrics.')}</p>
               </div>
             </div>
             {musicModels.length === 0 ? (
               <EmptyState
                 icon="music"
-                title="No music model"
-                description="Add a MiniMax Music channel with a text-to-music model such as music-3.0, then come back here to compose songs. Chat and video channels are not part of this workflow."
+                title={t('No music model')}
+                description={t('Add a MiniMax Music channel with a text-to-music model such as music-3.0, then come back here to compose songs. Chat and video channels are not part of this workflow.')}
                 action={
                   <Link className="btn btn-primary" to="/channels">
-                    <Icon name="plus" size={16} /> Add a channel
+                    <Icon name="plus" size={16} /> {t("Add a channel")}
                   </Link>
                 }
               />
@@ -272,7 +273,7 @@ export default function Music() {
                   void submit()
                 }}
               >
-                <FormField label="Model">
+                <FormField label={t('Model')}>
                   <select className="input" value={model} onChange={(event) => setModel(event.target.value)}>
                     {musicModels.map((item) => (
                       <option key={item.id} value={item.id}>
@@ -282,8 +283,11 @@ export default function Music() {
                   </select>
                 </FormField>
                 <FormField
-                  label="Style description"
-                  hint={`${prompt.length} / ${MAX_PROMPT} characters — genre, mood, instruments and setting.`}
+                  label={t('Style description')}
+                  hint={t('{n} / {max} characters — genre, mood, instruments and setting.', {
+                    n: prompt.length,
+                    max: MAX_PROMPT,
+                  })}
                 >
                   <textarea
                     className="input textarea"
@@ -291,15 +295,18 @@ export default function Music() {
                     maxLength={MAX_PROMPT}
                     value={prompt}
                     onChange={(event) => setPrompt(event.target.value)}
-                    placeholder="Indie folk, melancholic, introspective, rainy night, fingerpicked guitar…"
+                    placeholder={t('Indie folk, melancholic, introspective, rainy night, fingerpicked guitar…')}
                   />
                 </FormField>
                 <FormField
-                  label="Lyrics"
+                  label={t('Lyrics')}
                   hint={
                     instrumental
-                      ? 'Instrumental songs do not use lyrics.'
-                      : `${lyrics.length} / ${MAX_LYRICS} characters — structure tags like [verse] and [chorus] are supported.`
+                      ? t('Instrumental songs do not use lyrics.')
+                      : t('{n} / {max} characters — structure tags like [verse] and [chorus] are supported.', {
+                          n: lyrics.length,
+                          max: MAX_LYRICS,
+                        })
                   }
                 >
                   <textarea
@@ -309,7 +316,7 @@ export default function Music() {
                     value={lyrics}
                     disabled={instrumental}
                     onChange={(event) => setLyrics(event.target.value)}
-                    placeholder={'[verse]\nStreetlights flicker, the night breeze sighs\n\n[chorus]\nCarry me home through the rain'}
+                    placeholder={t('[verse]\n街灯闪烁，夜风轻叹\n\n[chorus]\n带我穿过雨幕回家')}
                   />
                 </FormField>
                 <label className="checkbox">
@@ -318,9 +325,9 @@ export default function Music() {
                     checked={instrumental}
                     onChange={(event) => setInstrumental(event.target.checked)}
                   />
-                  Instrumental (no vocals)
+                  {t('Instrumental (no vocals)')}
                 </label>
-                <FormField label="Download format">
+                <FormField label={t('Download format')}>
                   <select className="input" value={format} onChange={(event) => setFormat(event.target.value)}>
                     <option value="mp3">MP3</option>
                     <option value="wav">WAV</option>
@@ -328,10 +335,10 @@ export default function Music() {
                 </FormField>
                 <button className="btn btn-primary btn-block" type="submit" disabled={submitting || !canSubmit}>
                   {submitting ? <Spinner size={16} /> : <Icon name="music" size={16} />}
-                  Generate music
+                  {t('Generate music')}
                 </button>
                 <span className="field-hint">
-                  A song usually takes a few minutes. You can leave this page; generation keeps running.
+                  {t('A song usually takes a few minutes. You can leave this page; generation keeps running.')}
                 </span>
               </form>
             )}
@@ -340,10 +347,13 @@ export default function Music() {
           <section className="panel music-history">
             <div className="panel-head">
               <div>
-                <h2>Recent songs</h2>
+                <h2>{t('Recent songs')}</h2>
                 <p>
-                  {total === 0 ? 'No songs yet' : `${total} song${total === 1 ? '' : 's'} in this workspace`}
-                  {pending ? ' · updating automatically' : ''}
+                  {total === 0
+                    ? t('No songs yet')
+                    : pending
+                      ? t('{total} songs in this workspace · updating automatically', { total })
+                      : t('{total} songs in this workspace', { total })}
                 </p>
               </div>
               {pending ? <Spinner size={16} /> : null}
@@ -351,8 +361,8 @@ export default function Music() {
             {tasks.length === 0 ? (
               <EmptyState
                 icon="music"
-                title="No songs yet"
-                description="Describe a style and add lyrics to compose your first song. Previews and downloads appear here when a song is ready."
+                title={t('No songs yet')}
+                description={t('Describe a style and add lyrics to compose your first song. Previews and downloads appear here when a song is ready.')}
               />
             ) : (
               <div className="music-list">

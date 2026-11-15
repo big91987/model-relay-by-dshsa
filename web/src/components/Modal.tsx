@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
+import { t } from '../lib/i18n'
 import { Icon } from './Icon'
 
 export function Modal({
@@ -49,7 +50,7 @@ export function Modal({
             <h2>{title}</h2>
             {subtitle ? <p>{subtitle}</p> : null}
           </div>
-          <button className="icon-button" onClick={onClose} aria-label="Close dialog">
+          <button className="icon-button" onClick={onClose} aria-label={t('Close dialog')}>
             <Icon name="x" size={18} />
           </button>
         </div>

@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { t } from '../lib/i18n'
 import { Icon, type IconName } from './Icon'
 
 export function PageHeader({
@@ -22,14 +23,14 @@ export function PageHeader({
 }
 
 export function Spinner({ size = 16 }: { size?: number }) {
-  return <span className="spinner" style={{ width: size, height: size }} aria-label="Loading" />
+  return <span className="spinner" style={{ width: size, height: size }} aria-label={t('Loading')} />
 }
 
 export function StatusBadge({ status }: { status: string }) {
   let tone: 'success' | 'danger' | 'muted' = 'muted'
   if (status === 'success' || status === 'enabled' || status === 'active') tone = 'success'
   if (status === 'error' || status === 'disabled') tone = 'danger'
-  const label = status ? status.charAt(0).toUpperCase() + status.slice(1) : 'Unknown'
+  const label = t(status ? status.charAt(0).toUpperCase() + status.slice(1) : "Unknown")
   return (
     <span className={`badge badge-${tone}`}>
       <span className={`badge-dot badge-dot-${tone}`} />
@@ -39,18 +40,18 @@ export function StatusBadge({ status }: { status: string }) {
 }
 
 const costStatusLabels: Record<string, string> = {
-  actual: 'Actual',
-  estimated: 'Estimated',
-  unverified: 'Unverified',
-  free: 'No charge',
-  pending: 'Pending',
+  actual: t("Actual"),
+  estimated: t("Estimated"),
+  unverified: t("Unverified"),
+  free: t("No charge"),
+  pending: t("Pending"),
 }
 
 export function CostStatusBadge({ status }: { status: string }) {
   let tone: 'success' | 'danger' | 'muted' = 'muted'
   if (status === 'actual') tone = 'success'
   if (status === 'unverified') tone = 'danger'
-  const label = costStatusLabels[status] ?? status
+  const label = costStatusLabels[status] ? t(costStatusLabels[status]) : status
   return (
     <span className={`badge badge-${tone}`}>
       <span className={`badge-dot badge-dot-${tone}`} />

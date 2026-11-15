@@ -5,6 +5,7 @@ import { Icon } from '../components/Icon'
 import { EmptyState, ErrorBanner, FormField, PageHeader, Spinner } from '../components/ui'
 import { api } from '../lib/api'
 import { relativeTime } from '../lib/format'
+import { t } from '../lib/i18n'
 import { useToast } from '../lib/toast'
 import type { ModelInfo, VideoTask, VideoTaskStatus } from '../lib/types'
 
@@ -56,15 +57,15 @@ function defaultResolutionFor(model: ModelInfo | undefined): string {
 function statusLabel(status: VideoTaskStatus): string {
   switch (status) {
     case 'queued':
-      return 'Queued'
+      return t('Queued')
     case 'running':
-      return 'Generating'
+      return t('Generating')
     case 'succeeded':
-      return 'Succeeded'
+      return t('Succeeded')
     case 'failed':
-      return 'Failed'
+      return t('Failed')
     case 'cancelled':
-      return 'Cancelled'
+      return t('Cancelled')
   }
 }
 
@@ -80,7 +81,7 @@ function VideoStatus({ status }: { status: VideoTaskStatus }) {
 }
 
 function modeLabel(task: VideoTask): string {
-  return task.mode === 'first_frame' ? 'First frame' : 'Text to video'
+  return task.mode === 'first_frame' ? t('First frame') : t('Text to video')
 }
 
 function VideoCard({ task }: { task: VideoTask }) {
@@ -89,7 +90,7 @@ function VideoCard({ task }: { task: VideoTask }) {
     <article className="video-card">
       {ready ? (
         <video className="video-preview" controls preload="metadata" playsInline src={task.content_url}>
-          Your browser cannot play this video.
+          {t('Your browser cannot play this video.')}
         </video>
       ) : (
         <div className={`video-preview video-placeholder state-${task.status}`}>
@@ -102,12 +103,12 @@ function VideoCard({ task }: { task: VideoTask }) {
           )}
           <span>
             {task.status === 'failed' || task.status === 'cancelled'
-              ? 'Generation failed'
+              ? t('Generation failed')
               : task.status === 'succeeded'
                 ? task.error
-                  ? 'Generated, but not stored locally'
-                  : 'Video is being downloaded'
-                : 'Generating video…'}
+                  ? t('Generated, but not stored locally')
+                  : t('Video is being downloaded')
+                : t('Generating video…')}
           </span>
         </div>
       )}
@@ -115,7 +116,8 @@ function VideoCard({ task }: { task: VideoTask }) {
         <div>
           <div className="video-model">{task.model}</div>
           <div className="video-meta">
-            {modeLabel(task)} · {task.resolution} · {task.duration}s · {task.ratio} · {relativeTime(task.created_at)}
+            {modeLabel(task)} · {task.resolution} · {t('{n}s', { n: task.duration })} · {task.ratio} ·{' '}
+            {relativeTime(task.created_at)}
           </div>
         </div>
         <VideoStatus status={task.status} />
@@ -130,9 +132,9 @@ function VideoCard({ task }: { task: VideoTask }) {
       {ready ? (
         <div className="video-actions">
           <a className="btn btn-sm btn-ghost" href={`${task.content_url}?download=1`}>
-            <Icon name="download" size={15} /> Download MP4
+            <Icon name="download" size={15} /> {t('Download MP4')}
           </a>
-          <span className="video-meta">by {task.channel_name}</span>
+          <span className="video-meta">{t('by {channel}', { channel: task.channel_name })}</span>
         </div>
       ) : null}
     </article>
@@ -175,7 +177,7 @@ export default function Videos() {
         if (active) setModels(response.data)
       })
       .catch((err: unknown) => {
-        if (active) setError(err instanceof Error ? err.message : 'Failed to load models')
+        if (active) setError(err instanceof Error ? err.message : t('Failed to load models'))
       })
     api
       .videos()
@@ -186,7 +188,7 @@ export default function Videos() {
         }
       })
       .catch((err: unknown) => {
-        if (active) setError(err instanceof Error ? err.message : 'Failed to load videos')
+        if (active) setError(err instanceof Error ? err.message : t('Failed to load videos'))
       })
       .finally(() => {
         if (active) setLoading(false)
@@ -235,11 +237,11 @@ export default function Videos() {
     event.target.value = ''
     if (!file) return
     if (!file.type.startsWith('image/')) {
-      toast.error('Choose an image file for the first frame')
+      toast.error(t('Choose an image file for the first frame'))
       return
     }
     if (file.size > MAX_FRAME_BYTES) {
-      toast.error('The first frame must be 30 MB or smaller')
+      toast.error(t('The first frame must be 30 MB or smaller'))
       return
     }
     const reader = new FileReader()
@@ -249,7 +251,7 @@ export default function Videos() {
       setFrameName(file.name)
       setRatio('adaptive')
     }
-    reader.onerror = () => toast.error('Could not read that image')
+    reader.onerror = () => toast.error(t('Could not read that image'))
     reader.readAsDataURL(file)
   }
 
@@ -261,11 +263,11 @@ export default function Videos() {
 
   const submit = async () => {
     if (!model) {
-      toast.error('Add a MiniMax or Seedance video channel first')
+      toast.error(t('Add a MiniMax or Seedance video channel first'))
       return
     }
     if (!prompt.trim()) {
-      toast.error('Describe the video you want to generate')
+      toast.error(t('Describe the video you want to generate'))
       return
     }
     setSubmitting(true)
@@ -282,9 +284,9 @@ export default function Videos() {
       setTotal((previous) => previous + 1)
       setPrompt('')
       removeFrame()
-      toast.success('Video generation started')
+      toast.success(t('Video generation started'))
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to start video generation')
+      toast.error(err instanceof Error ? err.message : t('Failed to start video generation'))
     } finally {
       setSubmitting(false)
     }
@@ -293,11 +295,13 @@ export default function Videos() {
   return (
     <div className="page">
       <PageHeader
-        title="Video generation"
-        subtitle="MiniMax-H3 and Seedance (Volcano Ark) text-to-video and first-frame image-to-video. Generation runs asynchronously; previews and downloads appear here when a task finishes."
+        title={t('Video generation')}
+        subtitle={t(
+          'MiniMax-H3 and Seedance (Volcano Ark) text-to-video and first-frame image-to-video. Generation runs asynchronously; previews and downloads appear here when a task finishes.',
+        )}
         actions={
           <button className="btn btn-ghost" onClick={() => void refreshTasks()} disabled={loading}>
-            <Icon name="refresh" size={16} /> Refresh
+            <Icon name="refresh" size={16} /> {t('Refresh')}
           </button>
         }
       />
@@ -305,25 +309,27 @@ export default function Videos() {
 
       {loading ? (
         <div className="page-loading">
-          <Spinner size={22} /> Loading video generation…
+          <Spinner size={22} /> {t('Loading video generation…')}
         </div>
       ) : (
         <div className="video-layout">
           <section className="panel video-create">
             <div className="panel-head">
               <div>
-                <h2>Create a video</h2>
-                <p>Describe a shot, or bring a first-frame image to life.</p>
+                <h2>{t('Create a video')}</h2>
+                <p>{t('Describe a shot, or bring a first-frame image to life.')}</p>
               </div>
             </div>
             {videoModels.length === 0 ? (
               <EmptyState
                 icon="video"
-                title="No video model"
-                description="Add or import a MiniMax-H3 or Seedance model on a video channel, then come back here to generate videos. Other model families are not part of this video workflow."
+                title={t('No video model')}
+                description={t(
+                  'Add or import a MiniMax-H3 or Seedance model on a video channel, then come back here to generate videos. Other model families are not part of this video workflow.',
+                )}
                 action={
                   <Link className="btn btn-primary" to="/channels">
-                    <Icon name="plus" size={16} /> Add a channel
+                    <Icon name="plus" size={16} /> {t('Add a channel')}
                   </Link>
                 }
               />
@@ -335,7 +341,7 @@ export default function Videos() {
                   void submit()
                 }}
               >
-                <FormField label="Model">
+                <FormField label={t('Model')}>
                   <select className="input" value={model} onChange={(event) => setModel(event.target.value)}>
                     {videoModels.map((item) => (
                       <option key={item.id} value={item.id}>
@@ -344,18 +350,23 @@ export default function Videos() {
                     ))}
                   </select>
                 </FormField>
-                <FormField label="Prompt" hint={`${prompt.length} / ${MAX_PROMPT} characters`}>
+                <FormField
+                  label={t('Prompt')}
+                  hint={t('{n} / {max} characters', { n: prompt.length, max: MAX_PROMPT })}
+                >
                   <textarea
                     className="input textarea"
                     rows={5}
                     maxLength={MAX_PROMPT}
                     value={prompt}
                     onChange={(event) => setPrompt(event.target.value)}
-                    placeholder="A lighthouse on a stormy coast, waves crashing, slow cinematic push-in, dusk light…"
+                    placeholder={t(
+                      'A lighthouse on a stormy coast, waves crashing, slow cinematic push-in, dusk light…',
+                    )}
                   />
                 </FormField>
                 <div className="video-form-row">
-                  <FormField label="Resolution">
+                  <FormField label={t('Resolution')}>
                     <select className="input" value={resolution} onChange={(event) => setResolution(event.target.value)}>
                       {resolutionOptions.map((option) => (
                         <option key={option} value={option}>
@@ -364,7 +375,7 @@ export default function Videos() {
                       ))}
                     </select>
                   </FormField>
-                  <FormField label="Duration">
+                  <FormField label={t('Duration')}>
                     <select
                       className="input"
                       value={duration}
@@ -372,19 +383,15 @@ export default function Videos() {
                     >
                       {durationOptions.map((seconds) => (
                         <option key={seconds} value={seconds}>
-                          {seconds} seconds
+                          {t('{n} seconds', { n: seconds })}
                         </option>
                       ))}
                     </select>
                   </FormField>
                 </div>
                 <FormField
-                  label="Aspect ratio"
-                  hint={
-                    firstFrame
-                      ? 'Image-to-video adapts to the first frame.'
-                      : 'Required for text-to-video.'
-                  }
+                  label={t('Aspect ratio')}
+                  hint={firstFrame ? t('Image-to-video adapts to the first frame.') : t('Required for text-to-video.')}
                 >
                   <select
                     className="input"
@@ -392,7 +399,7 @@ export default function Videos() {
                     disabled={Boolean(firstFrame)}
                     onChange={(event) => setRatio(event.target.value)}
                   >
-                    {firstFrame ? <option value="adaptive">Adaptive (from first frame)</option> : null}
+                    {firstFrame ? <option value="adaptive">{t('Adaptive (from first frame)')}</option> : null}
                     {RATIOS.map((option) => (
                       <option key={option} value={option}>
                         {option}
@@ -401,21 +408,21 @@ export default function Videos() {
                   </select>
                 </FormField>
                 <div className="field">
-                  <span className="field-label">First frame (optional)</span>
+                  <span className="field-label">{t('First frame (optional)')}</span>
                   {firstFrame ? (
                     <div className="frame-preview">
-                      <img src={firstFrame} alt="Selected first frame" />
+                      <img src={firstFrame} alt={t('Selected first frame')} />
                       <div className="frame-preview-foot">
                         <span className="mono">{frameName}</span>
                         <button type="button" className="btn btn-sm btn-ghost" onClick={removeFrame}>
-                          <Icon name="x" size={14} /> Remove
+                          <Icon name="x" size={14} /> {t('Remove')}
                         </button>
                       </div>
                     </div>
                   ) : (
                     <label className="frame-drop">
                       <Icon name="upload" size={18} />
-                      <span>Choose an image</span>
+                      <span>{t('Choose an image')}</span>
                       <input
                         type="file"
                         accept="image/png,image/jpeg,image/webp,image/heic,image/heif"
@@ -425,15 +432,15 @@ export default function Videos() {
                     </label>
                   )}
                   <span className="field-hint">
-                    PNG, JPEG, WEBP, HEIC or HEIF up to 30 MB. Leave empty for text-to-video.
+                    {t('PNG, JPEG, WEBP, HEIC or HEIF up to 30 MB. Leave empty for text-to-video.')}
                   </span>
                 </div>
                 <button className="btn btn-primary btn-block" type="submit" disabled={submitting || !prompt.trim()}>
                   {submitting ? <Spinner size={16} /> : <Icon name="video" size={16} />}
-                  Generate video
+                  {t('Generate video')}
                 </button>
                 <span className="field-hint">
-                  Video generation usually takes a few minutes. You can leave this page; the task keeps running.
+                  {t('Video generation usually takes a few minutes. You can leave this page; the task keeps running.')}
                 </span>
               </form>
             )}
@@ -442,10 +449,15 @@ export default function Videos() {
           <section className="panel video-history">
             <div className="panel-head">
               <div>
-                <h2>Recent videos</h2>
+                <h2>{t('Recent videos')}</h2>
                 <p>
-                  {total === 0 ? 'No videos yet' : `${total} task${total === 1 ? '' : 's'} in this workspace`}
-                  {pending ? ' · updating automatically' : ''}
+                  {total === 0
+                    ? t('No videos yet')
+                    : pending
+                      ? t('{n} tasks in this workspace · updating automatically', { n: total })
+                      : total === 1
+                        ? t('{n} task in this workspace', { n: total })
+                        : t('{n} tasks in this workspace', { n: total })}
                 </p>
               </div>
               {pending ? <Spinner size={16} /> : null}
@@ -453,8 +465,10 @@ export default function Videos() {
             {tasks.length === 0 ? (
               <EmptyState
                 icon="video"
-                title="No videos yet"
-                description="Submit a prompt to generate your first video. MiniMax-H3 and Seedance text-to-video and first-frame image-to-video are supported."
+                title={t('No videos yet')}
+                description={t(
+                  'Submit a prompt to generate your first video. MiniMax-H3 and Seedance text-to-video and first-frame image-to-video are supported.',
+                )}
               />
             ) : (
               <div className="video-list">

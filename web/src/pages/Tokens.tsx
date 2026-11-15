@@ -4,6 +4,7 @@ import { Modal } from '../components/Modal'
 import { EmptyState, ErrorBanner, FormField, PageHeader, Spinner, StatusBadge } from '../components/ui'
 import { api } from '../lib/api'
 import { formatCost, formatTime, localDateTimeValue, parseLocalDateTime, relativeTime } from '../lib/format'
+import { t } from '../lib/i18n'
 import { useToast } from '../lib/toast'
 import type { Token, TokenInput, TokenStatus } from '../lib/types'
 
@@ -85,7 +86,7 @@ function payloadFromToken(token: Token, overrides: Partial<TokenInput> = {}): To
 }
 
 function quotaLabel(token: Token): string {
-  if (token.quota < 0) return 'Unlimited'
+  if (token.quota < 0) return t('Unlimited')
   return `${formatCost(token.used_quota)} / ${formatCost(token.quota)}`
 }
 
@@ -99,8 +100,8 @@ function limitsLabel(token: Token): string {
   const limits: string[] = []
   if (token.rpm_limit > 0) limits.push(`${token.rpm_limit} RPM`)
   if (token.tpm_limit > 0) limits.push(`${token.tpm_limit.toLocaleString()} TPM`)
-  if (token.max_concurrency > 0) limits.push(`${token.max_concurrency} concurrent`)
-  return limits.length > 0 ? limits.join(' · ') : 'Unlimited'
+  if (token.max_concurrency > 0) limits.push(t('{n} concurrent', { n: token.max_concurrency }))
+  return limits.length > 0 ? limits.join(' · ') : t('Unlimited')
 }
 
 export default function Tokens() {
@@ -122,7 +123,7 @@ export default function Tokens() {
       setTokens(response.data)
       setError('')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load API keys')
+      setError(err instanceof Error ? err.message : t('Failed to load API keys'))
     } finally {
       setLoading(false)
     }
@@ -151,19 +152,19 @@ export default function Tokens() {
   const submit = async () => {
     const payload = toPayload(form)
     if (!payload.name) {
-      toast.error('Key name is required')
+      toast.error(t('Key name is required'))
       return
     }
     if (!form.unlimited && !(Number.parseFloat(form.quota) >= 0)) {
-      toast.error('Enter a quota, or mark the key as unlimited')
+      toast.error(t('Enter a quota, or mark the key as unlimited'))
       return
     }
     if (payload.rpm_limit < 0 || payload.tpm_limit < 0 || payload.max_concurrency < 0) {
-      toast.error('Rate limits must be zero or greater')
+      toast.error(t('Rate limits must be zero or greater'))
       return
     }
     if (payload.daily_quota < 0) {
-      toast.error('Daily spend limit must be zero or greater')
+      toast.error(t('Daily spend limit must be zero or greater'))
       return
     }
     if (
@@ -172,25 +173,25 @@ export default function Tokens() {
       Number.isNaN(payload.max_concurrency) ||
       Number.isNaN(payload.daily_quota)
     ) {
-      toast.error('Limits must be valid numbers')
+      toast.error(t('Limits must be valid numbers'))
       return
     }
     setSaving(true)
     try {
       if (editing) {
         await api.updateToken(editing.id, payload)
-        toast.success(`API key “${payload.name}” updated`)
+        toast.success(t('API key “{name}” updated', { name: payload.name }))
         setModalOpen(false)
         await load()
       } else {
         const result = await api.createToken(payload)
         setModalOpen(false)
         setCreatedKey(result.key)
-        toast.success(`API key “${payload.name}” created`)
+        toast.success(t('API key “{name}” created', { name: payload.name }))
         await load()
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to save API key')
+      toast.error(err instanceof Error ? err.message : t('Failed to save API key'))
     } finally {
       setSaving(false)
     }
@@ -200,10 +201,10 @@ export default function Tokens() {
     const nextStatus: TokenStatus = token.status === 'active' ? 'disabled' : 'active'
     try {
       await api.updateToken(token.id, payloadFromToken(token, { status: nextStatus }))
-      toast.success(`API key ${nextStatus === 'active' ? 'enabled' : 'disabled'}`)
+      toast.success(t(nextStatus === 'active' ? "API key enabled" : "API key disabled"))
       await load()
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to update API key')
+      toast.error(err instanceof Error ? err.message : t('Failed to update API key'))
     }
   }
 
@@ -211,9 +212,9 @@ export default function Tokens() {
     if (!createdKey) return
     try {
       await navigator.clipboard.writeText(createdKey)
-      toast.success('Key copied to clipboard')
+      toast.success(t('Key copied to clipboard'))
     } catch {
-      toast.error('Could not copy automatically — select the key and copy it manually')
+      toast.error(t('Could not copy automatically — select the key and copy it manually'))
     }
   }
 
@@ -222,11 +223,11 @@ export default function Tokens() {
     setDeleting(true)
     try {
       await api.deleteToken(deleteTarget.id)
-      toast.success(`API key “${deleteTarget.name}” deleted`)
+      toast.success(t('API key “{name}” deleted', { name: deleteTarget.name }))
       setDeleteTarget(null)
       await load()
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to delete API key')
+      toast.error(err instanceof Error ? err.message : t('Failed to delete API key'))
     } finally {
       setDeleting(false)
     }
@@ -235,11 +236,11 @@ export default function Tokens() {
   return (
     <div className="page">
       <PageHeader
-        title="API keys"
-        subtitle="Gateway keys authenticate OpenAI-compatible clients. Set per-key balances, daily budgets, model access and rate limits."
+        title={t('API keys')}
+        subtitle={t('Gateway keys authenticate OpenAI-compatible clients. Set per-key balances, daily budgets, model access and rate limits.')}
         actions={
           <button className="btn btn-primary" onClick={openCreate}>
-            <Icon name="plus" size={16} /> Create key
+            <Icon name="plus" size={16} /> {t('Create key')}
           </button>
         }
       />
@@ -247,17 +248,17 @@ export default function Tokens() {
 
       {loading ? (
         <div className="page-loading">
-          <Spinner size={22} /> Loading API keys…
+          <Spinner size={22} /> {t('Loading API keys…')}
         </div>
       ) : tokens.length === 0 ? (
         <section className="panel">
           <EmptyState
             icon="key"
-            title="No API keys yet"
-            description="Create a key, then use it as the Bearer token for /v1/chat/completions."
+            title={t('No API keys yet')}
+            description={t('Create a key, then use it as the Bearer token for /v1/chat/completions.')}
             action={
               <button className="btn btn-primary" onClick={openCreate}>
-                <Icon name="plus" size={16} /> Create your first key
+                <Icon name="plus" size={16} /> {t('Create your first key')}
               </button>
             }
           />
@@ -268,13 +269,13 @@ export default function Tokens() {
             <table className="table">
               <thead>
                 <tr>
-                  <th>Key</th>
-                  <th>Status</th>
-                  <th>Quota</th>
-                  <th>Limits</th>
-                  <th>Last used</th>
-                  <th>Expires</th>
-                  <th className="right">Actions</th>
+                  <th>{t('Key')}</th>
+                  <th>{t('Status')}</th>
+                  <th>{t('Quota')}</th>
+                  <th>{t('Limits')}</th>
+                  <th>{t('Last used')}</th>
+                  <th>{t('Expires')}</th>
+                  <th className="right">{t('Actions')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -285,7 +286,7 @@ export default function Tokens() {
                       <div className="cell-sub mono">{token.key_prefix}…</div>
                       <div className="chip-row token-models">
                         {token.allowed_models.length === 0 ? (
-                          <span className="chip chip-muted">All models</span>
+                          <span className="chip chip-muted">{t('All models')}</span>
                         ) : (
                           token.allowed_models.slice(0, 2).map((model) => (
                             <span className="chip" key={model}>
@@ -304,7 +305,7 @@ export default function Tokens() {
                           className={`switch${token.status === 'active' ? ' on' : ''}`}
                           role="switch"
                           aria-checked={token.status === 'active'}
-                          aria-label={`Toggle ${token.name}`}
+                          aria-label={t('Toggle {name}', { name: token.name })}
                           onClick={() => void toggleStatus(token)}
                         >
                           <span />
@@ -321,11 +322,11 @@ export default function Tokens() {
                           </span>
                         ) : null}
                         {token.reserved_quota > 0 ? (
-                          <span className="quota-reserved">{formatCost(token.reserved_quota)} in flight</span>
+                          <span className="quota-reserved">{t('{cost} in flight', { cost: formatCost(token.reserved_quota) })}</span>
                         ) : null}
                         {token.daily_quota > 0 ? (
                           <span className="quota-daily">
-                            Today {formatCost(token.daily_used_quota)} / {formatCost(token.daily_quota)}
+                            {t('Today {used} / {quota}', { used: formatCost(token.daily_used_quota), quota: formatCost(token.daily_quota) })}
                           </span>
                         ) : null}
                       </div>
@@ -334,13 +335,13 @@ export default function Tokens() {
                       <span className="limits-label">{limitsLabel(token)}</span>
                     </td>
                     <td className="muted">{relativeTime(token.last_used_at)}</td>
-                    <td className="muted">{token.expires_at ? formatTime(token.expires_at) : 'Never'}</td>
+                    <td className="muted">{token.expires_at ? formatTime(token.expires_at) : t('Never')}</td>
                     <td className="right">
                       <div className="row-actions">
-                        <button className="icon-button" title="Edit key" onClick={() => openEdit(token)}>
+                        <button className="icon-button" title={t('Edit key')} onClick={() => openEdit(token)}>
                           <Icon name="edit" size={16} />
                         </button>
-                        <button className="icon-button danger" title="Delete key" onClick={() => setDeleteTarget(token)}>
+                        <button className="icon-button danger" title={t('Delete key')} onClick={() => setDeleteTarget(token)}>
                           <Icon name="trash" size={16} />
                         </button>
                       </div>
@@ -356,42 +357,42 @@ export default function Tokens() {
       <Modal
         open={modalOpen}
         onClose={() => setModalOpen(false)}
-        title={editing ? 'Edit API key' : 'Create API key'}
-        subtitle="Keys are stored as a hash; the plaintext value is shown only once at creation."
+        title={editing ? t('Edit API key') : t('Create API key')}
+        subtitle={t('Keys are stored as a hash; the plaintext value is shown only once at creation.')}
         width={600}
         footer={
           <>
             <button className="btn btn-ghost" onClick={() => setModalOpen(false)} disabled={saving}>
-              Cancel
+              {t('Cancel')}
             </button>
             <button className="btn btn-primary" onClick={() => void submit()} disabled={saving}>
               {saving ? <Spinner size={15} /> : null}
-              {editing ? 'Save changes' : 'Create key'}
+              {editing ? t('Save changes') : t('Create key')}
             </button>
           </>
         }
       >
         <div className="form-grid">
-          <FormField label="Name" htmlFor="token-name">
+          <FormField label={t('Name')} htmlFor="token-name">
             <input
               id="token-name"
               className="input"
               value={form.name}
               onChange={(event) => setField('name', event.target.value)}
-              placeholder="production-app"
+              placeholder={t('production-app')}
             />
           </FormField>
-          <FormField label="Status">
+          <FormField label={t('Status')}>
             <select
               className="input"
               value={form.status}
               onChange={(event) => setField('status', event.target.value as TokenStatus)}
             >
-              <option value="active">Active</option>
-              <option value="disabled">Disabled</option>
+              <option value="active">{t('Active')}</option>
+              <option value="disabled">{t('Disabled')}</option>
             </select>
           </FormField>
-          <FormField label="Quota (USD)" hint="Spend limit for this key. Mark unlimited for no cap.">
+          <FormField label={t('Quota (USD)')} hint={t('Spend limit for this key. Mark unlimited for no cap.')}>
             <div className="input-row">
               <input
                 className="input"
@@ -409,13 +410,13 @@ export default function Tokens() {
                   checked={form.unlimited}
                   onChange={(event) => setField('unlimited', event.target.checked)}
                 />
-                Unlimited
+                {t('Unlimited')}
               </label>
             </div>
           </FormField>
           <FormField
-            label="Daily spend limit (USD)"
-            hint="Budget for the current day, resets at local midnight. 0 means unlimited."
+            label={t('Daily spend limit (USD)')}
+            hint={t('Budget for the current day, resets at local midnight. 0 means unlimited.')}
           >
             <input
               className="input"
@@ -427,7 +428,7 @@ export default function Tokens() {
               placeholder="0"
             />
           </FormField>
-          <FormField label="Requests per minute (RPM)" hint="0 means unlimited.">
+          <FormField label={t('Requests per minute (RPM)')} hint={t('0 means unlimited.')}>
             <input
               className="input"
               type="number"
@@ -436,7 +437,7 @@ export default function Tokens() {
               onChange={(event) => setField('rpm_limit', event.target.value)}
             />
           </FormField>
-          <FormField label="Tokens per minute (TPM)" hint="Prompt and completion tokens. 0 means unlimited.">
+          <FormField label={t('Tokens per minute (TPM)')} hint={t('Prompt and completion tokens. 0 means unlimited.')}>
             <input
               className="input"
               type="number"
@@ -445,7 +446,7 @@ export default function Tokens() {
               onChange={(event) => setField('tpm_limit', event.target.value)}
             />
           </FormField>
-          <FormField label="Max concurrency" hint="Requests this key may have in flight. 0 means unlimited.">
+          <FormField label={t('Max concurrency')} hint={t('Requests this key may have in flight. 0 means unlimited.')}>
             <input
               className="input"
               type="number"
@@ -455,8 +456,8 @@ export default function Tokens() {
             />
           </FormField>
           <FormField
-            label="Allowed models"
-            hint="Comma separated. Leave empty to allow every model exposed by your channels."
+            label={t('Allowed models')}
+            hint={t('Comma separated. Leave empty to allow every model exposed by your channels.')}
             wide
           >
             <input
@@ -466,7 +467,7 @@ export default function Tokens() {
               placeholder="gpt-4o, claude-sonnet"
             />
           </FormField>
-          <FormField label="Expires at" hint="Leave empty for a key that never expires.">
+          <FormField label={t('Expires at')} hint={t('Leave empty for a key that never expires.')}>
             <input
               className="input"
               type="datetime-local"
@@ -480,45 +481,45 @@ export default function Tokens() {
       <Modal
         open={createdKey !== null}
         onClose={() => setCreatedKey(null)}
-        title="API key created"
-        subtitle="Copy this value now. The full key will not be shown again."
+        title={t('API key created')}
+        subtitle={t('Copy this value now. The full key will not be shown again.')}
         width={560}
         footer={
           <button className="btn btn-primary" onClick={() => setCreatedKey(null)}>
-            Done
+            {t('Done')}
           </button>
         }
       >
         <div className="key-reveal">
           <code>{createdKey}</code>
-          <button className="icon-button" onClick={() => void copyKey()} title="Copy key">
+          <button className="icon-button" onClick={() => void copyKey()} title={t('Copy key')}>
             <Icon name="copy" size={16} />
           </button>
         </div>
         <p className="modal-copy">
-          Use it as <code>Authorization: Bearer &lt;key&gt;</code> against the relay. Store it in your secret manager.
+          {t('Use it as')} <code>Authorization: Bearer &lt;key&gt;</code> {t('against the relay. Store it in your secret manager.')}
         </p>
       </Modal>
 
       <Modal
         open={deleteTarget !== null}
         onClose={() => setDeleteTarget(null)}
-        title="Delete API key"
-        subtitle={deleteTarget ? `“${deleteTarget.name}” will stop authenticating immediately.` : undefined}
+        title={t('Delete API key')}
+        subtitle={deleteTarget ? t('“{name}” will stop authenticating immediately.', { name: deleteTarget.name }) : undefined}
         width={440}
         footer={
           <>
             <button className="btn btn-ghost" onClick={() => setDeleteTarget(null)} disabled={deleting}>
-              Cancel
+              {t('Cancel')}
             </button>
             <button className="btn btn-danger" onClick={() => void confirmDelete()} disabled={deleting}>
               {deleting ? <Spinner size={15} /> : null}
-              Delete key
+              {t('Delete key')}
             </button>
           </>
         }
       >
-        <p className="modal-copy">Request logs keep their key name so historical spend stays readable.</p>
+        <p className="modal-copy">{t('Request logs keep their key name so historical spend stays readable.')}</p>
       </Modal>
     </div>
   )

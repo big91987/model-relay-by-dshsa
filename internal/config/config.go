@@ -3,17 +3,23 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
 // Config holds every runtime setting of the gateway.
 type Config struct {
-	Port           int
-	DataDir        string
-	DBPath         string
+	Port    int
+	DataDir string
+	// DBPath is the SQLite file used when DatabaseURL is empty.
+	DBPath string
+	// DatabaseURL selects PostgreSQL when non-empty. SQLite remains the default
+	// so existing single-file deployments keep working unchanged.
+	DatabaseURL    string
 	SecretKey      string
 	AdminUsername  string
 	AdminPassword  string
@@ -33,10 +39,18 @@ type Config struct {
 	MusicTimeout time.Duration
 	Version      string
 
+	// TestMode explicitly enables the local test environment: the initial admin
+	// account defaults to admin/admin and the console defaults to Chinese. It
+	// must never be enabled for a production deployment.
+	TestMode bool
+
 	// UsingDefaults reports settings still on insecure development defaults.
 	UsingDefaultSecret   bool
 	UsingDefaultPassword bool
 }
+
+// UsingPostgres reports whether PostgreSQL was selected through DATABASE_URL.
+func (c *Config) UsingPostgres() bool { return c.DatabaseURL != "" }
 
 // Load reads configuration from environment variables, applying safe defaults.
 func Load(version string) (*Config, error) {
@@ -54,6 +68,7 @@ func Load(version string) (*Config, error) {
 		SpeechPollInterval:       time.Duration(envInt("SPEECH_POLL_SECONDS", 5)) * time.Second,
 		MusicTimeout:             time.Duration(envInt("MUSIC_TIMEOUT_SECONDS", 600)) * time.Second,
 		Version:                  version,
+		TestMode:                 envBool("TEST_MODE", false),
 	}
 	if cfg.Port <= 0 || cfg.Port > 65535 {
 		return nil, fmt.Errorf("invalid PORT %d", cfg.Port)
@@ -64,17 +79,48 @@ func Load(version string) (*Config, error) {
 	if cfg.MusicTimeout <= 0 {
 		return nil, fmt.Errorf("MUSIC_TIMEOUT_SECONDS must be greater than zero")
 	}
+	if raw := os.Getenv("DATABASE_URL"); raw != "" {
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
+			return nil, fmt.Errorf("DATABASE_URL must be a postgres:// or postgresql:// URL with a host")
+		}
+		cfg.DatabaseURL = raw
+	}
 	if cfg.UsingDefaultSecret = cfg.SecretKey == ""; cfg.UsingDefaultSecret {
 		cfg.SecretKey = "dev-secret-change-me"
 	}
-	if cfg.UsingDefaultPassword = cfg.AdminPassword == ""; cfg.UsingDefaultPassword {
-		cfg.AdminPassword = "admin123"
+	if cfg.AdminPassword == "" {
+		cfg.UsingDefaultPassword = true
+		if cfg.TestMode {
+			// Only the explicitly enabled local test environment gets admin/admin.
+			cfg.AdminUsername = env("ADMIN_USERNAME", "admin")
+			cfg.AdminPassword = "admin"
+		} else {
+			// Preserve the original production default and its startup warning;
+			// existing single-file installs keep working without new variables.
+			cfg.AdminPassword = "admin123"
+		}
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
 	cfg.DBPath = filepath.Join(cfg.DataDir, "gateway.db")
 	return cfg, nil
+}
+
+func envBool(key string, fallback bool) bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	if v == "" {
+		return fallback
+	}
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 func env(key, fallback string) string {

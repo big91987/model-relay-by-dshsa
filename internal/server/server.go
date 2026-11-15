@@ -382,5 +382,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"name":           "Model Relay",
 		"version":        s.cfg.Version,
 		"uptime_seconds": int64(time.Since(s.started).Seconds()),
+		"database":       s.store.Backend(),
+		"test_mode":      s.cfg.TestMode,
 	})
 }

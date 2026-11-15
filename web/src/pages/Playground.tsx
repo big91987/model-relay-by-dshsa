@@ -8,6 +8,7 @@ import { api } from '../lib/api'
 import { GatewayRequestError, streamChatCompletion } from '../lib/gatewayChat'
 import type { ChatUsage } from '../lib/gatewayChat'
 import { formatCost, formatDuration, formatNumber, formatPrice, formatTime } from '../lib/format'
+import { t } from '../lib/i18n'
 import { useToast } from '../lib/toast'
 import type { ModelInfo, Token } from '../lib/types'
 
@@ -75,20 +76,28 @@ function exportTimestamp(date: Date): string {
 
 function conversationMarkdown(messages: ChatMessage[], exportedAt: Date): string {
   const sections: string[] = [
-    '# Playground conversation',
+    `# ${t('Playground conversation')}`,
     '',
-    `_Exported ${exportTimestamp(exportedAt)} (local time)._`,
+    `_${t('Exported {time} (local time).', { time: exportTimestamp(exportedAt) })}_`,
   ]
   for (const message of messages) {
     const content = message.content.trim()
     if (!content) continue
-    const role = message.role === 'user' ? 'User' : message.request ? `Assistant (${message.request.model})` : 'Assistant'
+    const role =
+      message.role === 'user'
+        ? t('User')
+        : message.request
+          ? t('Assistant ({model})', { model: message.request.model })
+          : t('Assistant')
     sections.push('', `## ${role}`, '', content)
     if (message.status === 'stopped') {
-      sections.push('', '> _Generation stopped before completion._')
+      sections.push('', `> _${t('Generation stopped before completion.')}_`)
     } else if (message.status === 'error') {
-      const detail = message.error ? `: ${message.error.replace(/\s+/g, ' ').trim()}` : ''
-      sections.push('', `> _Request failed${detail}._`)
+      const detail = message.error ? message.error.replace(/\s+/g, ' ').trim() : ''
+      sections.push(
+        '',
+        detail ? `> _${t('Request failed: {detail}.', { detail })}_` : `> _${t('Request failed.')}_`,
+      )
     }
   }
   return `${sections.join('\n')}\n`
@@ -148,7 +157,7 @@ export default function Playground() {
         return usable?.id ?? response.data.find((key) => key.status === 'active')?.id ?? response.data[0]?.id ?? null
       })
     } catch (error) {
-      setKeysError(error instanceof Error ? error.message : 'Failed to load gateway keys')
+      setKeysError(error instanceof Error ? error.message : t('Failed to load gateway keys'))
     } finally {
       setKeysLoading(false)
     }
@@ -168,7 +177,7 @@ export default function Playground() {
         setCatalogError('')
       })
       .catch((error: unknown) => {
-        if (active) setCatalogError(error instanceof Error ? error.message : 'Failed to load the model catalog')
+        if (active) setCatalogError(error instanceof Error ? error.message : t('Failed to load the model catalog'))
       })
     return () => {
       active = false
@@ -204,7 +213,7 @@ export default function Playground() {
         if (!active) return
         setModels([])
         setSelectedModel('')
-        setModelsError(error instanceof Error ? error.message : 'Failed to load models for this key')
+        setModelsError(error instanceof Error ? error.message : t('Failed to load models for this key'))
       })
       .finally(() => {
         if (active) setModelsLoading(false)
@@ -252,30 +261,42 @@ export default function Playground() {
   const turns = messages.filter((message) => message.role === 'user').length
 
   const temperatureHint = useMemo(() => {
-    if (!selectedInfo) return 'Range 0–2 for OpenAI-compatible models. Select a model to see its supported range.'
-    if (anthropicServed && selectedInfo.types.includes('openai')) {
-      return 'This model is served by both Anthropic and OpenAI channels; the temperature cap is 1 for compatibility.'
+    if (!selectedInfo) {
+      return t('Range 0–2 for OpenAI-compatible models. Select a model to see its supported range.')
     }
-    if (anthropicServed) return 'This model is served by an Anthropic channel, whose temperature range is 0–1.'
-    return 'This model is served by OpenAI-compatible channels, whose temperature range is 0–2.'
+    if (anthropicServed && selectedInfo.types.includes('openai')) {
+      return t(
+        'This model is served by both Anthropic and OpenAI channels; the temperature cap is 1 for compatibility.',
+      )
+    }
+    if (anthropicServed) {
+      return t('This model is served by an Anthropic channel, whose temperature range is 0–1.')
+    }
+    return t('This model is served by OpenAI-compatible channels, whose temperature range is 0–2.')
   }, [anthropicServed, selectedInfo])
 
   const emptyModelMessage = useMemo(() => {
     if (modelsError) return modelsError
     if (keysError) return keysError
     if (!keysLoading && keys.length === 0) {
-      return 'No gateway keys yet. Create one on the API keys page; the key secret stays on the server.'
+      return t('No gateway keys yet. Create one on the API keys page; the key secret stays on the server.')
     }
     if (!keyUsable) {
-      return keyExpired ? 'This gateway key has expired. Select another key.' : 'Select an active gateway key to load models.'
+      return keyExpired
+        ? t('This gateway key has expired. Select another key.')
+        : t('Select an active gateway key to load models.')
     }
     if (catalogError) {
-      return 'The relay reported no available models for this key. Check the key allowlist and enabled channels.'
+      return t(
+        'The relay reported no available models for this key. Check the key allowlist and enabled channels.',
+      )
     }
     if (catalog.length === 0) {
-      return 'The gateway has no available models. Add and enable a channel in Channels first.'
+      return t('The gateway has no available models. Add and enable a channel in Channels first.')
     }
-    return 'This key has no available models: its model allowlist may not match any enabled channel, or the channels are disabled.'
+    return t(
+      'This key has no available models: its model allowlist may not match any enabled channel, or the channels are disabled.',
+    )
   }, [modelsError, keysError, keysLoading, keys.length, keyUsable, keyExpired, catalog.length, catalogError])
 
   const patchAssistant = (id: string, patch: Partial<ChatMessage>) => {
@@ -284,7 +305,7 @@ export default function Playground() {
 
   const runCompletion = async (history: ChatMessage[]) => {
     if (selectedKeyId === null || selectedKey === null) {
-      setKeysError('Select a gateway key first.')
+      setKeysError(t('Select a gateway key first.'))
       return
     }
     if (!selectedModel) return
@@ -392,7 +413,9 @@ export default function Playground() {
       patchAssistant(assistantId, {
         content: received,
         status: 'error',
-        error: `Request failed: ${error instanceof Error ? error.message : String(error)}`,
+        error: t('Request failed: {error}', {
+          error: error instanceof Error ? error.message : String(error),
+        }),
         requestId,
         usage,
         latencyMs,
@@ -434,9 +457,9 @@ export default function Playground() {
   const copyRequestId = async (requestId: string) => {
     try {
       await navigator.clipboard.writeText(requestId)
-      toast.success('Request ID copied')
+      toast.success(t('Request ID copied'))
     } catch {
-      toast.error('Cannot access the clipboard; select and copy the value manually')
+      toast.error(t('Cannot access the clipboard; select and copy the value manually'))
     }
   }
 
@@ -460,7 +483,7 @@ export default function Playground() {
   const confirmClear = () => {
     setMessages([])
     setConfirm(null)
-    toast.success('Conversation cleared')
+    toast.success(t('Conversation cleared'))
   }
 
   const exportConversation = () => {
@@ -468,42 +491,44 @@ export default function Playground() {
     const exportedAt = new Date()
     const filename = `playground-conversation-${exportFileStem(exportedAt)}.md`
     downloadMarkdown(filename, conversationMarkdown(messages, exportedAt))
-    toast.success('Conversation exported as Markdown')
+    toast.success(t('Conversation exported as Markdown'))
   }
 
   const keyBadge = keysLoading ? (
-    <span className="badge badge-muted"><span className="badge-dot badge-dot-muted" />Loading</span>
+    <span className="badge badge-muted"><span className="badge-dot badge-dot-muted" />{t('Loading')}</span>
   ) : !selectedKey ? (
-    <span className="badge badge-muted"><span className="badge-dot badge-dot-muted" />No key</span>
+    <span className="badge badge-muted"><span className="badge-dot badge-dot-muted" />{t('No key')}</span>
   ) : keyExpired ? (
-    <span className="badge badge-danger"><span className="badge-dot badge-dot-danger" />Expired</span>
+    <span className="badge badge-danger"><span className="badge-dot badge-dot-danger" />{t('Expired')}</span>
   ) : selectedKey.status === 'active' ? (
-    <span className="badge badge-success"><span className="badge-dot badge-dot-success" />Active</span>
+    <span className="badge badge-success"><span className="badge-dot badge-dot-success" />{t('Active')}</span>
   ) : (
-    <span className="badge badge-danger"><span className="badge-dot badge-dot-danger" />Disabled</span>
+    <span className="badge badge-danger"><span className="badge-dot badge-dot-danger" />{t('Disabled')}</span>
   )
 
   return (
     <div className="page playground-page">
       <PageHeader
-        title="Playground"
-        subtitle="Pick an existing gateway key, choose a model and chat. The relay applies that key's model access, quota, rate limit and logs; the key secret never reaches the browser."
+        title={t('Playground')}
+        subtitle={t(
+          "Pick an existing gateway key, choose a model and chat. The relay applies that key's model access, quota, rate limit and logs; the key secret never reaches the browser.",
+        )}
         actions={
           <>
             <button
               className="btn btn-ghost"
               onClick={exportConversation}
               disabled={!canExport}
-              title="Download this conversation as a Markdown file"
+              title={t('Download this conversation as a Markdown file')}
             >
-              <Icon name="download" size={15} /> Export Markdown
+              <Icon name="download" size={15} /> {t('Export Markdown')}
             </button>
             <button
               className="btn btn-ghost"
               onClick={() => setConfirm({ kind: 'clear' })}
               disabled={messages.length === 0 || sending}
             >
-              <Icon name="trash" size={15} /> Clear conversation
+              <Icon name="trash" size={15} /> {t('Clear conversation')}
             </button>
           </>
         }
@@ -513,17 +538,26 @@ export default function Playground() {
         <section className="panel chat-panel">
           <div className="chat-head">
             <div className="chat-head-title">
-              <Icon name="spark" size={16} /> Conversation
+              <Icon name="spark" size={16} /> {t('Conversation')}
             </div>
             <div className="chat-head-meta">
               {sending ? (
                 <>
-                  <Spinner size={13} /> Generating…
+                  <Spinner size={13} /> {t('Generating…')}
                 </>
               ) : messages.length > 0 ? (
-                `${turns} turn${turns === 1 ? '' : 's'} · ${messages.length} message${messages.length === 1 ? '' : 's'}`
+                t(
+                  turns === 1
+                    ? messages.length === 1
+                      ? "{turns} turn · {messages} message"
+                      : "{turns} turn · {messages} messages"
+                    : messages.length === 1
+                      ? "{turns} turns · {messages} message"
+                      : "{turns} turns · {messages} messages",
+                  { turns, messages: messages.length },
+                )
               ) : (
-                'Not started'
+                t('Not started')
               )}
             </div>
           </div>
@@ -533,66 +567,72 @@ export default function Playground() {
               <div className="chat-empty-wrap">
                 {keysLoading ? (
                   <div className="page-loading">
-                    <Spinner size={18} /> Loading gateway keys…
+                    <Spinner size={18} /> {t('Loading gateway keys…')}
                   </div>
                 ) : keysError ? (
                   <EmptyState
                     icon="alert"
-                    title="Could not load gateway keys"
+                    title={t('Could not load gateway keys')}
                     description={keysError}
                     action={
                       <button className="btn btn-ghost" onClick={() => void loadKeys()}>
-                        <Icon name="refresh" size={15} /> Retry
+                        <Icon name="refresh" size={15} /> {t('Retry')}
                       </button>
                     }
                   />
                 ) : !selectedKey ? (
                   <EmptyState
                     icon="key"
-                    title="Create a gateway key first"
-                    description="Playground uses an existing key from API keys. The relay uses it server-side; the key secret is never sent to the browser."
+                    title={t('Create a gateway key first')}
+                    description={t(
+                      'Playground uses an existing key from API keys. The relay uses it server-side; the key secret is never sent to the browser.',
+                    )}
                     action={
                       <Link className="btn btn-primary" to="/tokens">
-                        <Icon name="key" size={15} /> Go to API keys
+                        <Icon name="key" size={15} /> {t('Go to API keys')}
                       </Link>
                     }
                   />
                 ) : !keyUsable ? (
                   <EmptyState
                     icon="alert"
-                    title={keyExpired ? 'This key has expired' : 'This key is disabled'}
-                    description="Select an active gateway key in the panel on the right, or update this key on the API keys page."
+                    title={keyExpired ? t('This key has expired') : t('This key is disabled')}
+                    description={t(
+                      'Select an active gateway key in the panel on the right, or update this key on the API keys page.',
+                    )}
                   />
                 ) : modelsLoading ? (
                   <div className="page-loading">
-                    <Spinner size={18} /> Loading models for this key…
+                    <Spinner size={18} /> {t('Loading models for this key…')}
                   </div>
                 ) : !modelReady ? (
                   <EmptyState
                     icon={modelsError ? 'alert' : 'models'}
-                    title={modelsError ? 'Could not load models' : 'No models available for this key'}
+                    title={modelsError ? t('Could not load models') : t('No models available for this key')}
                     description={emptyModelMessage}
                     action={
                       <button className="btn btn-ghost" onClick={() => setModelsRefresh((value) => value + 1)}>
-                        <Icon name="refresh" size={15} /> Retry
+                        <Icon name="refresh" size={15} /> {t('Retry')}
                       </button>
                     }
                   />
                 ) : (
                   <EmptyState
                     icon="spark"
-                    title="Start a real request"
-                    description="Pick a model and send a message. Responses stream in, keep multi-turn context, can be stopped, and can be traced in Logs by request ID."
+                    title={t('Start a real request')}
+                    description={t(
+                      'Pick a model and send a message. Responses stream in, keep multi-turn context, can be stopped, and can be traced in Logs by request ID.',
+                    )}
                   />
                 )}
               </div>
             ) : (
               messages.map((message, index) => {
                 const isLast = index === messages.length - 1
-                const roleLabel = message.role === 'user' ? 'You' : message.request?.model || 'Assistant'
+                const roleLabel = message.role === 'user' ? t('You') : message.request?.model || t('Assistant')
                 return (
                   <article className={`chat-message ${message.role === 'user' ? 'from-user' : 'from-assistant'}`} key={message.id}>
-                    <div className="chat-avatar">{message.role === 'user' ? 'You' : 'AI'}</div>
+                    <div className="chat-avatar">{message.role === 'user' ? t('You') : t('AI')}</div>
                     <div className="chat-body">
                       <div className="chat-role">{roleLabel}</div>
                       {message.content ? (
@@ -602,7 +642,7 @@ export default function Playground() {
                         </div>
                       ) : message.status === 'streaming' ? (
                         <div className="chat-thinking">
-                          <Spinner size={13} /> Waiting for the first chunk…
+                          <Spinner size={13} /> {t('Waiting for the first chunk…')}
                         </div>
                       ) : null}
 
@@ -615,7 +655,7 @@ export default function Playground() {
 
                       {message.status === 'stopped' ? (
                         <div className="chat-stopped-note">
-                          Generation stopped. Content already received may still be billed.
+                          {t('Generation stopped. Content already received may still be billed.')}
                         </div>
                       ) : null}
 
@@ -623,9 +663,12 @@ export default function Playground() {
                         <div className="chat-meta">
                           {message.request ? (
                             <span>
-                              key {message.request.keyName} · {message.request.model} · temp{' '}
-                              {message.request.temperature.toFixed(1)} · max output{' '}
-                              {message.request.maxTokens ?? 'default'}
+                              {t('key {key} · {model} · temp {temperature} · max output {maxTokens}', {
+                                key: message.request.keyName,
+                                model: message.request.model,
+                                temperature: message.request.temperature.toFixed(1),
+                                maxTokens: message.request.maxTokens ?? t('default'),
+                              })}
                             </span>
                           ) : null}
                           {message.latencyMs !== undefined ? (
@@ -638,28 +681,39 @@ export default function Playground() {
                               className={`usage-pill${message.usage.source === 'estimated' ? ' estimated' : ''}`}
                               title={
                                 message.usage.source === 'estimated'
-                                  ? 'The upstream did not report usage; the relay estimated it from the request and returned text.'
-                                  : 'Token usage reported by the upstream.'
+                                  ? t(
+                                      'The upstream did not report usage; the relay estimated it from the request and returned text.',
+                                    )
+                                  : t('Token usage reported by the upstream.')
                               }
                             >
-                              Tokens {formatNumber(message.usage.total)} ({formatNumber(message.usage.prompt)} in /{' '}
-                              {formatNumber(message.usage.completion)} out){message.usage.source === 'estimated' ? ' · estimated' : ''}
+                              {message.usage.source === 'estimated'
+                                ? t('Tokens {total} ({prompt} in / {completion} out) · estimated', {
+                                    total: formatNumber(message.usage.total),
+                                    prompt: formatNumber(message.usage.prompt),
+                                    completion: formatNumber(message.usage.completion),
+                                  })
+                                : t('Tokens {total} ({prompt} in / {completion} out)', {
+                                    total: formatNumber(message.usage.total),
+                                    prompt: formatNumber(message.usage.prompt),
+                                    completion: formatNumber(message.usage.completion),
+                                  })}
                             </span>
                           ) : (
-                            <span className="muted">Token usage unavailable for this response</span>
+                            <span className="muted">{t('Token usage unavailable for this response')}</span>
                           )}
                           {message.requestId ? (
                             <span className="request-id">
-                              Request <code>{message.requestId}</code>
+                              {t('Request')} <code>{message.requestId}</code>
                               <button
                                 className="link-button"
                                 type="button"
                                 onClick={() => void copyRequestId(message.requestId ?? '')}
                               >
-                                Copy
+                                {t('Copy')}
                               </button>
                               <Link className="link-button" to={`/logs?request_id=${encodeURIComponent(message.requestId)}`}>
-                                View log
+                                {t('View log')}
                               </Link>
                             </span>
                           ) : null}
@@ -674,13 +728,15 @@ export default function Playground() {
                             disabled={!canRetry}
                             title={
                               maxTokensInvalid
-                                ? 'Fix the max output value first'
-                                : 'Creates a new gateway request and may incur new charges'
+                                ? t('Fix the max output value first')
+                                : t('Creates a new gateway request and may incur new charges')
                             }
                           >
-                            <Icon name="refresh" size={14} /> Regenerate
+                            <Icon name="refresh" size={14} /> {t('Regenerate')}
                           </button>
-                          <span className="chat-action-hint">Sends a new request and may incur new charges.</span>
+                          <span className="chat-action-hint">
+                            {t('Sends a new request and may incur new charges.')}
+                          </span>
                         </div>
                       ) : null}
                     </div>
@@ -699,32 +755,32 @@ export default function Playground() {
               onKeyDown={handleComposerKeyDown}
               placeholder={
                 modelReady
-                  ? 'Type a message. Enter to send, Shift+Enter for a new line.'
-                  : 'Select a gateway key and model above.'
+                  ? t('Type a message. Enter to send, Shift+Enter for a new line.')
+                  : t('Select a gateway key and model above.')
               }
               disabled={!canType}
-              aria-label="Message"
+              aria-label={t('Message')}
             />
             <div className="composer-bar">
               <span className="composer-hint">
                 {maxTokensInvalid
-                  ? `Max output must be an integer between 1 and ${maxOutputTokens}.`
-                  : 'Requests go through this relay; this page never calls an upstream directly.'}
+                  ? t('Max output must be an integer between 1 and {max}.', { max: maxOutputTokens })
+                  : t('Requests go through this relay; this page never calls an upstream directly.')}
               </span>
               {sending ? (
                 <button className="btn btn-danger" onClick={stopGeneration}>
-                  <Icon name="stop" size={14} /> Stop generating
+                  <Icon name="stop" size={14} /> {t('Stop generating')}
                 </button>
               ) : (
                 <button className="btn btn-primary" onClick={sendMessage} disabled={!canSend}>
-                  <Icon name="send" size={15} /> Send
+                  <Icon name="send" size={15} /> {t('Send')}
                 </button>
               )}
             </div>
             <p className="composer-note">
-              Every send or regeneration creates a new gateway request and may incur charges. Provider billing
-              applies; the relay's cost display depends on configured channel prices. This page never retries
-              automatically.
+              {t(
+                "Every send or regeneration creates a new gateway request and may incur charges. Provider billing applies; the relay's cost display depends on configured channel prices. This page never retries automatically.",
+              )}
             </p>
           </div>
         </section>
@@ -732,7 +788,7 @@ export default function Playground() {
         <aside className="playground-side">
           <section className="panel side-panel">
             <div className="side-panel-head">
-              <h2>Gateway key</h2>
+              <h2>{t('Gateway key')}</h2>
               <div className="key-head-actions">
                 {keyBadge}
                 <button
@@ -740,62 +796,67 @@ export default function Playground() {
                   type="button"
                   onClick={() => void loadKeys()}
                   disabled={keysLoading || sending}
-                  title="Refresh API keys"
-                  aria-label="Refresh gateway keys"
+                  title={t('Refresh API keys')}
+                  aria-label={t('Refresh gateway keys')}
                 >
                   <Icon name="refresh" size={16} />
                 </button>
               </div>
             </div>
             <label className="field">
-              <span className="field-label">Use an existing key</span>
+              <span className="field-label">{t('Use an existing key')}</span>
               <select
                 className="input"
                 value={selectedKeyId ?? ''}
                 onChange={(event) => setSelectedKeyId(event.target.value ? Number(event.target.value) : null)}
                 disabled={keysLoading || sending || keys.length === 0}
-                aria-label="Gateway key"
+                aria-label={t('Gateway key')}
               >
                 {keys.length === 0 ? (
-                  <option value="">{keysLoading ? 'Loading keys…' : 'No gateway keys'}</option>
+                  <option value="">{keysLoading ? t('Loading keys…') : t('No gateway keys')}</option>
                 ) : (
                   keys.map((key) => (
                     <option value={key.id} key={key.id}>
-                      {key.name} · {key.key_prefix} · {key.status}
+                      {key.name} · {key.key_prefix} · {t(key.status.charAt(0).toUpperCase() + key.status.slice(1))}
                     </option>
                   ))
                 )}
               </select>
               <span className="field-hint">
-                The relay uses this key server-side; the browser never sees its secret. Model access, quota, RPM limit
-                and request logs apply.
+                {t(
+                  'The relay uses this key server-side; the browser never sees its secret. Model access, quota, RPM limit and request logs apply.',
+                )}
               </span>
             </label>
             {selectedKey ? (
               <div className="key-meta">
                 <div>
-                  <span>Quota</span>
+                  <span>{t('Quota')}</span>
                   <strong>
                     {selectedKey.quota < 0
-                      ? 'Unlimited'
+                      ? t('Unlimited')
                       : `${formatCost(selectedKey.used_quota)} / ${formatCost(selectedKey.quota)}`}
                   </strong>
                 </div>
                 <div>
-                  <span>Rate limit</span>
-                  <strong>{selectedKey.rpm_limit > 0 ? `${selectedKey.rpm_limit} / min` : 'Unlimited'}</strong>
-                </div>
-                <div>
-                  <span>Model access</span>
+                  <span>{t('Rate limit')}</span>
                   <strong>
-                    {selectedKey.allowed_models.length > 0
-                      ? `${selectedKey.allowed_models.length} allowed`
-                      : 'All models'}
+                    {selectedKey.rpm_limit > 0
+                      ? t('{rate} / min', { rate: selectedKey.rpm_limit })
+                      : t('Unlimited')}
                   </strong>
                 </div>
                 <div>
-                  <span>Expires</span>
-                  <strong>{selectedKey.expires_at ? formatTime(selectedKey.expires_at) : 'Never'}</strong>
+                  <span>{t('Model access')}</span>
+                  <strong>
+                    {selectedKey.allowed_models.length > 0
+                      ? t('{n} allowed', { n: selectedKey.allowed_models.length })
+                      : t('All models')}
+                  </strong>
+                </div>
+                <div>
+                  <span>{t('Expires')}</span>
+                  <strong>{selectedKey.expires_at ? formatTime(selectedKey.expires_at) : t('Never')}</strong>
                 </div>
               </div>
             ) : null}
@@ -806,17 +867,19 @@ export default function Playground() {
               </div>
             ) : null}
             <p className="side-note">
-              Manage keys in <Link to="/tokens">API keys</Link>.
+              <Link to="/tokens">{t('Manage keys in API keys.')}</Link>
             </p>
           </section>
 
           <section className="panel side-panel">
             <div className="side-panel-head">
-              <h2>Model</h2>
+              <h2>{t('Model')}</h2>
               {modelsLoading ? (
                 <Spinner size={13} />
               ) : modelReady ? (
-                <span className="badge badge-muted">{models.length} available</span>
+                <span className="badge badge-muted">
+                  {t('{n} available', { n: models.length })}
+                </span>
               ) : null}
             </div>
             <select
@@ -824,12 +887,14 @@ export default function Playground() {
               value={selectedModel}
               onChange={(event) => setSelectedModel(event.target.value)}
               disabled={!keyUsable || modelsLoading || sending}
-              aria-label="Model"
+              aria-label={t('Model')}
             >
               {modelsLoading ? (
-                <option value="">Loading models…</option>
+                <option value="">{t('Loading models…')}</option>
               ) : models.length === 0 ? (
-                <option value="">{keyUsable ? 'No models available' : 'Select an active gateway key'}</option>
+                <option value="">
+                  {keyUsable ? t('No models available') : t('Select an active gateway key')}
+                </option>
               ) : (
                 models.map((model) => (
                   <option value={model} key={model}>
@@ -860,45 +925,52 @@ export default function Playground() {
                 </div>
                 <div className="model-price">
                   {selectedInfo.input_price === 0 && selectedInfo.output_price === 0 ? (
-                    <>Cost price is not configured for this channel. Provider billing still applies.</>
+                    <>{t('Cost price is not configured for this channel. Provider billing still applies.')}</>
                   ) : (
                     <>
-                      Input {formatPrice(selectedInfo.input_price)} / 1M · Output{' '}
-                      {formatPrice(selectedInfo.output_price)} / 1M{' '}
-                      <span className="muted">(configured prices used for cost estimates)</span>
+                      {t('Input {input} / 1M · Output {output} / 1M', {
+                        input: formatPrice(selectedInfo.input_price),
+                        output: formatPrice(selectedInfo.output_price),
+                      })}{' '}
+                      <span className="muted">{t('(configured prices used for cost estimates)')}</span>
                     </>
                   )}
                 </div>
               </div>
             ) : null}
-            {catalogError ? <div className="field-hint">Failed to load the model catalog: {catalogError}</div> : null}
+            {catalogError ? (
+              <div className="field-hint">
+                {t('Failed to load the model catalog: {error}', { error: catalogError })}
+              </div>
+            ) : null}
             <p className="field-hint model-note">
-              Available models come from the key's model allowlist and enabled channels. Switching models only affects
-              the next request; the conversation is not resent automatically, and history stays in context.
+              {t(
+                "Available models come from the key's model allowlist and enabled channels. Switching models only affects the next request; the conversation is not resent automatically, and history stays in context.",
+              )}
             </p>
           </section>
 
           <section className="panel side-panel">
             <div className="side-panel-head">
-              <h2>Chat parameters</h2>
+              <h2>{t('Chat parameters')}</h2>
             </div>
             <label className="field">
-              <span className="field-label">System prompt</span>
+              <span className="field-label">{t('System prompt')}</span>
               <textarea
                 className="input textarea"
                 rows={3}
                 value={systemPrompt}
                 onChange={(event) => setSystemPrompt(event.target.value)}
-                placeholder="Optional. For example: You are a concise technical assistant."
+                placeholder={t('Optional. For example: You are a concise technical assistant.')}
                 disabled={sending}
-                aria-label="System prompt"
+                aria-label={t('System prompt')}
               />
-              <span className="field-hint">Changes apply from the next request.</span>
+              <span className="field-hint">{t('Changes apply from the next request.')}</span>
             </label>
 
             <div className="field">
               <div className="param-head">
-                <span className="field-label">Temperature</span>
+                <span className="field-label">{t('Temperature')}</span>
                 <span className="param-value">{temperature.toFixed(1)}</span>
               </div>
               <input
@@ -910,13 +982,13 @@ export default function Playground() {
                 value={temperature}
                 onChange={(event) => setTemperature(normalizedTemperature(Number(event.target.value), temperatureMax))}
                 disabled={sending}
-                aria-label="Temperature"
+                aria-label={t('Temperature')}
               />
               <span className="field-hint">{temperatureHint}</span>
             </div>
 
             <label className="field">
-              <span className="field-label">Max output tokens</span>
+              <span className="field-label">{t('Max output tokens')}</span>
               <input
                 className={`input${maxTokensInvalid ? ' input-invalid' : ''}`}
                 type="number"
@@ -925,21 +997,24 @@ export default function Playground() {
                 step={1}
                 value={maxTokens}
                 onChange={(event) => setMaxTokens(event.target.value)}
-                placeholder="Leave empty for the default"
+                placeholder={t('Leave empty for the default')}
                 disabled={sending}
-                aria-label="Maximum output tokens"
+                aria-label={t('Maximum output tokens')}
               />
               <span className="field-hint">
-                1–{maxOutputTokens}, or empty for the model/relay default. The exact model limit is enforced by the
-                upstream; if exceeded, its error is shown here.
+                {t(
+                  '1–{max}, or empty for the model/relay default. The exact model limit is enforced by the upstream; if exceeded, its error is shown here.',
+                  { max: maxOutputTokens },
+                )}
               </span>
             </label>
 
             <div className="param-info">
               <Icon name="shield" size={14} />
               <span>
-                Parameter ranges follow the selected model's channel protocol. If the model rejects a parameter, the
-                upstream error is shown in the conversation.
+                {t(
+                  "Parameter ranges follow the selected model's channel protocol. If the model rejects a parameter, the upstream error is shown in the conversation.",
+                )}
               </span>
             </div>
           </section>
@@ -949,63 +1024,70 @@ export default function Playground() {
       <Modal
         open={confirm?.kind === 'retry'}
         onClose={() => setConfirm(null)}
-        title="Send this turn again?"
-        subtitle="This creates a new gateway request and may incur new charges."
+        title={t('Send this turn again?')}
+        subtitle={t('This creates a new gateway request and may incur new charges.')}
         footer={
           <>
             <button className="btn btn-ghost" onClick={() => setConfirm(null)}>
-              Cancel
+              {t('Cancel')}
             </button>
             <button className="btn btn-primary" onClick={confirmRetry} disabled={!canRetry}>
-              Send new request
+              {t('Send new request')}
             </button>
           </>
         }
       >
         <p className="modal-copy">
-          The last user message will be sent again and the current assistant reply will be replaced. The request uses
-          the page's current settings:
+          {t(
+            "The last user message will be sent again and the current assistant reply will be replaced. The request uses the page's current settings:",
+          )}
         </p>
         <div className="confirm-params">
           <div>
-            <span>Model</span>
-            <strong className="mono">{selectedModel || '—'}</strong>
+            <span>{t('Model')}</span>
+            <strong className="mono">{selectedModel || "—"}</strong>
           </div>
           <div>
-            <span>Temperature</span>
+            <span>{t('Temperature')}</span>
             <strong>{temperature.toFixed(1)}</strong>
           </div>
           <div>
-            <span>Max output</span>
-            <strong>{maxTokensValue ?? 'Default'}</strong>
+            <span>{t('Max output')}</span>
+            <strong>{maxTokensValue ?? t('Default')}</strong>
           </div>
         </div>
         {retryMessage?.status === 'stopped' ? (
-          <p className="modal-copy">The previous generation was stopped; the new request starts from scratch.</p>
+          <p className="modal-copy">
+            {t('The previous generation was stopped; the new request starts from scratch.')}
+          </p>
         ) : null}
         <p className="modal-copy">
-          Nothing is retried automatically. A request is sent only after you click “Send new request”.
+          {t('Nothing is retried automatically. A request is sent only after you click “{action}”.', {
+            action: t('Send new request'),
+          })}
         </p>
       </Modal>
 
       <Modal
         open={confirm?.kind === 'clear'}
         onClose={() => setConfirm(null)}
-        title="Clear this conversation?"
-        subtitle="The system prompt and parameters are kept."
+        title={t('Clear this conversation?')}
+        subtitle={t('The system prompt and parameters are kept.')}
         footer={
           <>
             <button className="btn btn-ghost" onClick={() => setConfirm(null)}>
-              Cancel
+              {t('Cancel')}
             </button>
             <button className="btn btn-danger" onClick={confirmClear}>
-              Clear conversation
+              {t('Clear conversation')}
             </button>
           </>
         }
       >
         <p className="modal-copy">
-          All messages on this page will be removed. Existing request logs and charges remain available in Logs.
+          {t(
+            'All messages on this page will be removed. Existing request logs and charges remain available in Logs.',
+          )}
         </p>
       </Modal>
     </div>

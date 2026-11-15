@@ -6,6 +6,7 @@ import { api } from '../lib/api'
 import { channelTypeLabel } from '../lib/format'
 import { useToast } from '../lib/toast'
 import type { Channel, ChannelInput, ChannelStatus, ChannelType, UpstreamModelsInput } from '../lib/types'
+import { t } from '../lib/i18n'
 
 interface ChannelFormState {
   name: string
@@ -119,7 +120,7 @@ export default function Channels() {
       setChannels(response.data)
       setError('')
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load channels')
+      setError(err instanceof Error ? err.message : t("Failed to load channels"))
     } finally {
       setLoading(false)
     }
@@ -173,7 +174,7 @@ export default function Channels() {
 
   const fetchUpstreamModels = async () => {
     if (!canFetchModels) {
-      toast.error('Enter the base URL and API key before fetching models')
+      toast.error(t("Enter the base URL and API key before fetching models"))
       return
     }
     const requestID = modelFetchRequest.current + 1
@@ -195,7 +196,7 @@ export default function Channels() {
       if (modelFetchRequest.current !== requestID) return
       setUpstreamModels(null)
       setSelectedModels([])
-      setModelsError(err instanceof Error ? err.message : 'Failed to fetch models from the upstream provider')
+      setModelsError(err instanceof Error ? err.message : t("Failed to fetch models from the upstream provider"))
     } finally {
       if (modelFetchRequest.current === requestID) setFetchingModels(false)
     }
@@ -214,47 +215,47 @@ export default function Channels() {
   const importSelectedModels = () => {
     const additions = selectedModels.filter((model) => !currentModels.includes(model))
     if (additions.length === 0) {
-      toast.error('The selected models are already in the list')
+      toast.error(t("The selected models are already in the list"))
       return
     }
     const trimmed = form.models.trim()
     const separator = !trimmed ? '' : /[\n,]\s*$/.test(form.models) ? ' ' : ', '
     setField('models', trimmed + separator + additions.join(', '))
     setSelectedModels([])
-    toast.success(`Imported ${additions.length} model${additions.length === 1 ? '' : 's'}`)
+    toast.success(t('Imported {count} models', { count: additions.length }))
   }
 
   const submit = async () => {
     const payload = toPayload(form)
     if (!payload.name) {
-      toast.error('Channel name is required')
+      toast.error(t("Channel name is required"))
       return
     }
     if (!payload.base_url) {
-      toast.error('Base URL is required')
+      toast.error(t("Base URL is required"))
       return
     }
     if (!editing && !payload.api_key) {
-      toast.error('API key is required for a new channel')
+      toast.error(t("API key is required for a new channel"))
       return
     }
     if (payload.models.length === 0 && Object.keys(payload.model_mapping).length === 0) {
-      toast.error('Add at least one model or a model mapping')
+      toast.error(t("Add at least one model or a model mapping"))
       return
     }
     setSaving(true)
     try {
       if (editing) {
         await api.updateChannel(editing.id, payload)
-        toast.success(`Channel “${payload.name}” updated`)
+        toast.success(t('Channel “{name}” updated', { name: payload.name }))
       } else {
         await api.createChannel(payload)
-        toast.success(`Channel “${payload.name}” created`)
+        toast.success(t('Channel “{name}” created', { name: payload.name }))
       }
       setModalOpen(false)
       await load()
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to save channel')
+      toast.error(err instanceof Error ? err.message : t("Failed to save channel"))
     } finally {
       setSaving(false)
     }
@@ -267,7 +268,7 @@ export default function Channels() {
       toast.success(`Channel ${nextStatus}`)
       await load()
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to update channel')
+      toast.error(err instanceof Error ? err.message : t("Failed to update channel"))
     }
   }
 
@@ -276,14 +277,18 @@ export default function Channels() {
     try {
       const result = await api.testChannel(channel.id)
       if (result.ok) {
-        toast.success(`Connected to ${channel.name} in ${result.latency_ms} ms`)
+        toast.success(t('Connected to {name} in {ms} ms', { name: channel.name, ms: result.latency_ms }))
       } else {
         toast.error(
-          `${channel.name} failed${result.status_code ? ` (HTTP ${result.status_code})` : ''}: ${result.message}`,
+          t('Connection to {name} failed{status}: {message}', {
+            name: channel.name,
+            status: result.status_code ? ` (HTTP ${result.status_code})` : '',
+            message: result.message,
+          }),
         )
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Connection test failed')
+      toast.error(err instanceof Error ? err.message : t("Connection test failed"))
     } finally {
       setTesting(null)
     }
@@ -294,11 +299,11 @@ export default function Channels() {
     setDeleting(true)
     try {
       await api.deleteChannel(deleteTarget.id)
-      toast.success(`Channel “${deleteTarget.name}” deleted`)
+      toast.success(t('Channel “{name}” deleted', { name: deleteTarget.name }))
       setDeleteTarget(null)
       await load()
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to delete channel')
+      toast.error(err instanceof Error ? err.message : t("Failed to delete channel"))
     } finally {
       setDeleting(false)
     }
@@ -307,11 +312,11 @@ export default function Channels() {
   return (
     <div className="page">
       <PageHeader
-        title="Channels"
-        subtitle="Upstream providers that power your relay. Higher priority wins; equal priorities load-balance by weight."
+        title={t("Channels")}
+        subtitle={t("Upstream providers that power your relay. Higher priority wins; equal priorities load-balance by weight.")}
         actions={
           <button className="btn btn-primary" onClick={openCreate}>
-            <Icon name="plus" size={16} /> Add channel
+            <Icon name="plus" size={16} /> {t("Add channel")}
           </button>
         }
       />
@@ -319,17 +324,17 @@ export default function Channels() {
 
       {loading ? (
         <div className="page-loading">
-          <Spinner size={22} /> Loading channels…
+          <Spinner size={22} /> {t("Loading channels…")}
         </div>
       ) : channels.length === 0 ? (
         <section className="panel">
           <EmptyState
             icon="channels"
-            title="No upstream channels"
-            description="Add an OpenAI-compatible, Anthropic, MiniMax or Seedance video provider to start serving models."
+            title={t("No upstream channels")}
+            description={t("Add an OpenAI-compatible, Anthropic, MiniMax or Seedance video provider to start serving models.")}
             action={
               <button className="btn btn-primary" onClick={openCreate}>
-                <Icon name="plus" size={16} /> Add your first channel
+                <Icon name="plus" size={16} /> {t("Add your first channel")}
               </button>
             }
           />
@@ -340,13 +345,13 @@ export default function Channels() {
             <table className="table">
               <thead>
                 <tr>
-                  <th>Channel</th>
-                  <th>Type</th>
-                  <th>Models</th>
-                  <th>Routing</th>
-                  <th>Price / 1M</th>
-                  <th>Status</th>
-                  <th className="right">Actions</th>
+                  <th>{t("Channel")}</th>
+                  <th>{t("Type")}</th>
+                  <th>{t("Models")}</th>
+                  <th>{t("Routing")}</th>
+                  <th>{t("Price / 1M")}</th>
+                  <th>{t("Status")}</th>
+                  <th className="right">{t("Actions")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -358,7 +363,7 @@ export default function Channels() {
                       <td>
                         <div className="cell-title">{channel.name}</div>
                         <div className="cell-sub mono">{channel.base_url}</div>
-                        <div className="cell-sub">Key {channel.api_key_hint}</div>
+                        <div className="cell-sub">{t("Key")} {channel.api_key_hint}</div>
                       </td>
                       <td>
                         <span className={`type-badge type-${channel.type}`}>
@@ -382,7 +387,7 @@ export default function Channels() {
                       </td>
                       <td>
                         {isMediaProtocol(channel.type) ? (
-                          <span className="muted">Not metered</span>
+                          <span className="muted">{t("Not metered")}</span>
                         ) : (
                           <div className="price-cell">
                             <span>${channel.input_price.toFixed(2)}</span>
@@ -396,7 +401,7 @@ export default function Channels() {
                             className={`switch${channel.status === 'enabled' ? ' on' : ''}`}
                             role="switch"
                             aria-checked={channel.status === 'enabled'}
-                            aria-label={`Toggle ${channel.name}`}
+                            aria-label={t('Toggle {name}', { name: channel.name })}
                             onClick={() => void toggleStatus(channel)}
                           >
                             <span />
@@ -408,18 +413,18 @@ export default function Channels() {
                         <div className="row-actions">
                           <button
                             className="icon-button"
-                            title="Test connection"
+                            title={t("Test connection")}
                             onClick={() => void testConnection(channel)}
                             disabled={testing === channel.id}
                           >
                             {testing === channel.id ? <Spinner size={15} /> : <Icon name="test" size={16} />}
                           </button>
-                          <button className="icon-button" title="Edit channel" onClick={() => openEdit(channel)}>
+                          <button className="icon-button" title={t("Edit channel")} onClick={() => openEdit(channel)}>
                             <Icon name="edit" size={16} />
                           </button>
                           <button
                             className="icon-button danger"
-                            title="Delete channel"
+                            title={t("Delete channel")}
                             onClick={() => setDeleteTarget(channel)}
                           >
                             <Icon name="trash" size={16} />
@@ -438,56 +443,56 @@ export default function Channels() {
       <Modal
         open={modalOpen}
         onClose={() => setModalOpen(false)}
-        title={editing ? 'Edit channel' : 'Add channel'}
-        subtitle="Providers are called with their native protocol; the relay exposes a single OpenAI-compatible API."
+        title={editing ? t("Edit channel") : t("Add channel")}
+        subtitle={t("Providers are called with their native protocol; the relay exposes a single OpenAI-compatible API.")}
         width={700}
         footer={
           <>
             <button className="btn btn-ghost" onClick={() => setModalOpen(false)} disabled={saving}>
-              Cancel
+              {t("Cancel")}
             </button>
             <button className="btn btn-primary" onClick={() => void submit()} disabled={saving}>
               {saving ? <Spinner size={15} /> : null}
-              {editing ? 'Save changes' : 'Create channel'}
+              {editing ? t("Save changes") : t("Create channel")}
             </button>
           </>
         }
       >
         <div className="form-grid">
-          <FormField label="Name" htmlFor="channel-name">
+          <FormField label={t("Name")} htmlFor="channel-name">
             <input
               id="channel-name"
               className="input"
               value={form.name}
               onChange={(event) => setField('name', event.target.value)}
-              placeholder="OpenAI production"
+              placeholder={t("OpenAI production")}
             />
           </FormField>
-          <FormField label="Protocol">
+          <FormField label={t("Protocol")}>
             <select
               className="input"
               value={form.type}
               onChange={(event) => setField('type', event.target.value as ChannelType)}
             >
-              <option value="openai">OpenAI-compatible</option>
-              <option value="anthropic">Anthropic Messages</option>
-              <option value="minimax">MiniMax (video and speech)</option>
-              <option value="seedance">Seedance (Volcano Ark, video)</option>
-              <option value="minimax-music">MiniMax Music (audio)</option>
+              <option value="openai">{t("OpenAI-compatible")}</option>
+              <option value="anthropic">{t("Anthropic Messages")}</option>
+              <option value="minimax">{t("MiniMax (video and speech)")}</option>
+              <option value="seedance">{t("Seedance (Volcano Ark, video)")}</option>
+              <option value="minimax-music">{t('MiniMax Music (audio)')}</option>
             </select>
           </FormField>
           <FormField
-            label="Base URL"
+            label={t("Base URL")}
             htmlFor="channel-url"
             wide
             hint={
               form.type === 'minimax'
-                ? 'MiniMax API root, e.g. https://api.minimax.io or https://api.minimaxi.com'
+                ? t("MiniMax API root, e.g. https://api.minimax.io or https://api.minimaxi.com")
                 : form.type === 'minimax-music'
-                  ? 'MiniMax API root, e.g. https://api.minimax.io or https://api.minimaxi.com'
+                  ? t("MiniMax API root, e.g. https://api.minimax.io or https://api.minimaxi.com")
                   : form.type === 'seedance'
-                    ? 'Volcano Ark API root including the version path, e.g. https://ark.cn-beijing.volces.com/api/v3'
-                    : 'Include the API version path, e.g. https://api.openai.com/v1'
+                    ? t("Volcano Ark API root including the version path, e.g. https://ark.cn-beijing.volces.com/api/v3")
+                    : t("Include the API version path, e.g. https://api.openai.com/v1")
             }
           >
             <input
@@ -507,10 +512,14 @@ export default function Channels() {
             />
           </FormField>
           <FormField
-            label="API key"
+            label={t("API key")}
             htmlFor="channel-key"
             wide
-            hint={editing ? `Leave blank to keep the current key (${editing.api_key_hint})` : 'Encrypted at rest with SECRET_KEY'}
+            hint={
+              editing
+                ? t('Leave blank to keep the current key ({hint})', { hint: editing.api_key_hint })
+                : t('Encrypted at rest with SECRET_KEY')
+            }
           >
             <input
               id="channel-key"
@@ -523,16 +532,16 @@ export default function Channels() {
             />
           </FormField>
           <FormField
-            label="Models"
+            label={t("Models")}
             htmlFor="channel-models"
             hint={
               form.type === 'minimax'
-                ? 'MiniMax models, e.g. MiniMax-H3 or speech-2.8-hd. Fetch the live list and keep your manual entries.'
+                ? t("MiniMax models, e.g. MiniMax-H3 or speech-2.8-hd. Fetch the live list and keep your manual entries.")
                 : form.type === 'minimax-music'
-                  ? 'MiniMax Music models, e.g. music-3.0. Fetch the live list and keep your manual entries.'
+                  ? t('MiniMax Music models, e.g. music-3.0. Fetch the live list and keep your manual entries.')
                   : form.type === 'seedance'
-                    ? 'Seedance model IDs, e.g. doubao-seedance-1-0-pro-250528. Fetch the live list and keep your manual entries.'
-                    : 'Upstream model names, separated by commas or new lines. Importing keeps your manual entries.'
+                    ? t("Seedance model IDs, e.g. doubao-seedance-1-0-pro-250528. Fetch the live list and keep your manual entries.")
+                    : t("Upstream model names, separated by commas or new lines. Importing keeps your manual entries.")
             }
             action={
               <button
@@ -542,12 +551,12 @@ export default function Channels() {
                 disabled={fetchingModels || !canFetchModels}
                 title={
                   canFetchModels
-                    ? 'Fetch the model list from the upstream provider'
-                    : 'Enter the base URL and API key first'
+                    ? t("Fetch the model list from the upstream provider")
+                    : t("Enter the base URL and API key first")
                 }
               >
                 {fetchingModels ? <Spinner size={13} /> : <Icon name="refresh" size={13} />}
-                {fetchingModels ? 'Fetching…' : 'Fetch models'}
+                {fetchingModels ? t("Fetching…") : t("Fetch models")}
               </button>
             }
           >
@@ -569,9 +578,9 @@ export default function Channels() {
             />
           </FormField>
           <FormField
-            label="Model mapping"
+            label={t("Model mapping")}
             htmlFor="channel-mapping"
-            hint="Optional aliases as public=upstream, one per line."
+            hint={t("Optional aliases as public=upstream, one per line.")}
           >
             <textarea
               id="channel-mapping"
@@ -594,7 +603,7 @@ export default function Channels() {
             <div className="field wide">
               <ErrorBanner message={modelsError} />
               <span className="field-hint">
-                Your current models and aliases were not changed. Check the base URL and API key, then try again.
+                {t('Your current models and aliases were not changed. Check the base URL and API key, then try again.')}
               </span>
             </div>
           ) : upstreamModels !== null ? (
@@ -602,22 +611,25 @@ export default function Channels() {
               <div className="model-picker">
                 <div className="model-picker-head">
                   <div className="model-picker-heading">
-                    <span className="model-picker-title">Upstream models</span>
+                    <span className="model-picker-title">{t("Upstream models")}</span>
                     <span className="model-picker-sub">
                       {upstreamModels.length === 0
-                        ? 'No models returned'
-                        : `${upstreamModels.length} fetched · ${importableModels.length} not added`}
+                        ? t("No models returned")
+                        : t('{fetched} fetched · {remaining} not added', {
+                            fetched: upstreamModels.length,
+                            remaining: importableModels.length,
+                          })}
                     </span>
                   </div>
                   {importableModels.length > 0 ? (
                     <button type="button" className="btn btn-ghost btn-xs" onClick={toggleAllModels}>
-                      {allImportableSelected ? 'Clear selection' : 'Select all'}
+                      {allImportableSelected ? t("Clear selection") : t("Select all")}
                     </button>
                   ) : null}
                 </div>
                 {upstreamModels.length === 0 ? (
                   <p className="model-picker-empty">
-                    The upstream provider returned an empty model list. You can still enter model names manually.
+                    {t("The upstream provider returned an empty model list. You can still enter model names manually.")}
                   </p>
                 ) : (
                   <div className="model-picker-list">
@@ -636,14 +648,14 @@ export default function Channels() {
                             onChange={() => toggleModel(model)}
                           />
                           <span className="model-option-name">{model}</span>
-                          {alreadyAdded ? <span className="model-option-tag">added</span> : null}
+                          {alreadyAdded ? <span className="model-option-tag">{t("added")}</span> : null}
                         </label>
                       )
                     })}
                   </div>
                 )}
                 <div className="model-picker-foot">
-                  <span className="field-hint">Aliases in model mapping are left untouched.</span>
+                  <span className="field-hint">{t("Aliases in model mapping are left untouched.")}</span>
                   <button
                     type="button"
                     className="btn btn-primary btn-xs"
@@ -651,13 +663,15 @@ export default function Channels() {
                     disabled={selectedModels.length === 0}
                   >
                     <Icon name="plus" size={13} />
-                    {selectedModels.length > 0 ? `Add ${selectedModels.length} selected` : 'Add selected'}
+                    {selectedModels.length > 0
+                      ? t('Add {count} selected', { count: selectedModels.length })
+                      : t('Add selected')}
                   </button>
                 </div>
               </div>
             </div>
           ) : null}
-          <FormField label="Priority" htmlFor="channel-priority" hint="Higher priority is tried first.">
+          <FormField label={t("Priority")} htmlFor="channel-priority" hint={t("Higher priority is tried first.")}>
             <input
               id="channel-priority"
               className="input"
@@ -667,7 +681,7 @@ export default function Channels() {
               onChange={(event) => setField('priority', event.target.value)}
             />
           </FormField>
-          <FormField label="Weight" htmlFor="channel-weight" hint="Load-balancing weight among equal priorities.">
+          <FormField label={t("Weight")} htmlFor="channel-weight" hint={t("Load-balancing weight among equal priorities.")}>
             <input
               id="channel-weight"
               className="input"
@@ -679,7 +693,7 @@ export default function Channels() {
           </FormField>
           {!isMediaProtocol(form.type) ? (
             <>
-              <FormField label="Input price" htmlFor="channel-input-price" hint="USD per 1M prompt tokens.">
+              <FormField label={t("Input price")} htmlFor="channel-input-price" hint={t("USD per 1M prompt tokens.")}>
                 <input
                   id="channel-input-price"
                   className="input"
@@ -690,7 +704,7 @@ export default function Channels() {
                   onChange={(event) => setField('input_price', event.target.value)}
                 />
               </FormField>
-              <FormField label="Output price" htmlFor="channel-output-price" hint="USD per 1M completion tokens.">
+              <FormField label={t("Output price")} htmlFor="channel-output-price" hint={t("USD per 1M completion tokens.")}>
                 <input
                   id="channel-output-price"
                   className="input"
@@ -703,14 +717,14 @@ export default function Channels() {
               </FormField>
             </>
           ) : null}
-          <FormField label="Status">
+          <FormField label={t("Status")}>
             <select
               className="input"
               value={form.status}
               onChange={(event) => setField('status', event.target.value as ChannelStatus)}
             >
-              <option value="enabled">Enabled</option>
-              <option value="disabled">Disabled</option>
+              <option value="enabled">{t("Enabled")}</option>
+              <option value="disabled">{t("Disabled")}</option>
             </select>
           </FormField>
         </div>
@@ -719,23 +733,23 @@ export default function Channels() {
       <Modal
         open={deleteTarget !== null}
         onClose={() => setDeleteTarget(null)}
-        title="Delete channel"
-        subtitle={deleteTarget ? `“${deleteTarget.name}” will stop serving requests immediately.` : undefined}
+        title={t("Delete channel")}
+        subtitle={deleteTarget ? t('“{name}” will stop serving requests immediately.', { name: deleteTarget.name }) : undefined}
         width={440}
         footer={
           <>
             <button className="btn btn-ghost" onClick={() => setDeleteTarget(null)} disabled={deleting}>
-              Cancel
+              {t("Cancel")}
             </button>
             <button className="btn btn-danger" onClick={() => void confirmDelete()} disabled={deleting}>
               {deleting ? <Spinner size={15} /> : null}
-              Delete channel
+              {t("Delete channel")}
             </button>
           </>
         }
       >
         <p className="modal-copy">
-          Past request logs keep their channel name and pricing snapshot. This action cannot be undone.
+          {t("Past request logs keep their channel name and pricing snapshot. This action cannot be undone.")}
         </p>
       </Modal>
     </div>

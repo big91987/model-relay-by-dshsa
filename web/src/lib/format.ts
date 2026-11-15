@@ -1,9 +1,15 @@
+import { currentLanguage, t } from './i18n'
+
+function locale(): string {
+  return currentLanguage() === 'zh' ? 'zh-CN' : 'en-US'
+}
+
 export function formatNumber(value: number): string {
-  return new Intl.NumberFormat('en-US').format(value)
+  return new Intl.NumberFormat(locale()).format(value)
 }
 
 export function formatCompact(value: number): string {
-  return new Intl.NumberFormat('en-US', {
+  return new Intl.NumberFormat(locale(), {
     notation: 'compact',
     maximumFractionDigits: 1,
   }).format(value)
@@ -29,7 +35,7 @@ export function channelTypeLabel(type: string): string {
 }
 
 export function formatTime(epoch: number): string {
-  return new Date(epoch * 1000).toLocaleString('en-US', {
+  return new Date(epoch * 1000).toLocaleString(locale(), {
     month: 'short',
     day: 'numeric',
     hour: '2-digit',
@@ -38,7 +44,7 @@ export function formatTime(epoch: number): string {
 }
 
 export function formatDateTime(epoch: number): string {
-  return new Date(epoch * 1000).toLocaleString('en-US', {
+  return new Date(epoch * 1000).toLocaleString(locale(), {
     year: 'numeric',
     month: 'short',
     day: 'numeric',
@@ -49,15 +55,15 @@ export function formatDateTime(epoch: number): string {
 }
 
 export function relativeTime(epoch: number | null): string {
-  if (!epoch) return 'Never'
+  if (!epoch) return t('Never')
   const seconds = Math.max(0, Math.floor(Date.now() / 1000) - epoch)
-  if (seconds < 60) return 'Just now'
+  if (seconds < 60) return t('Just now')
   const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
+  if (minutes < 60) return t('{n}m ago', { n: minutes })
   const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
+  if (hours < 24) return t('{n}h ago', { n: hours })
   const days = Math.floor(hours / 24)
-  if (days < 30) return `${days}d ago`
+  if (days < 30) return t('{n}d ago', { n: days })
   return formatTime(epoch)
 }
 
