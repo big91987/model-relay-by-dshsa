@@ -7,6 +7,10 @@ import type {
   LogsResponse,
   LogQuery,
   ModelInfo,
+  SpeechClip,
+  SpeechClipsResponse,
+  SpeechInput,
+  SpeechVoiceCatalog,
   TestResult,
   Token,
   TokenInput,
@@ -138,6 +142,16 @@ export const api = {
   },
   createVideo(input: VideoInput) {
     return request<VideoTask>('/api/videos', { method: 'POST', ...jsonBody(input) })
+  },
+  speech() {
+    return request<SpeechClipsResponse>('/api/speech?page_size=50')
+  },
+  speechVoices(model?: string) {
+    const query = model ? `?model=${encodeURIComponent(model)}` : ''
+    return request<SpeechVoiceCatalog>(`/api/speech/voices${query}`)
+  },
+  createSpeech(input: SpeechInput) {
+    return request<SpeechClip>('/api/speech', { method: 'POST', ...jsonBody(input) })
   },
   playgroundModels(tokenId: number) {
     return request<{ data: { id: string }[] }>(`/api/playground/models?token_id=${tokenId}`)

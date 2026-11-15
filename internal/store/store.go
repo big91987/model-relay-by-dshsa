@@ -186,6 +186,28 @@ func (s *Store) migrate() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_video_tasks_created_at ON video_tasks(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_video_tasks_status ON video_tasks(status)`,
+		`CREATE TABLE IF NOT EXISTS speech_clips (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			channel_id INTEGER NOT NULL DEFAULT 0,
+			channel_name TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			upstream_model TEXT NOT NULL DEFAULT '',
+			voice_id TEXT NOT NULL DEFAULT '',
+			voice_name TEXT NOT NULL DEFAULT '',
+			text TEXT NOT NULL DEFAULT '',
+			speed REAL NOT NULL DEFAULT 1,
+			status TEXT NOT NULL DEFAULT 'succeeded',
+			error TEXT NOT NULL DEFAULT '',
+			total_chunks INTEGER NOT NULL DEFAULT 0,
+			done_chunks INTEGER NOT NULL DEFAULT 0,
+			format TEXT NOT NULL DEFAULT 'mp3',
+			audio_path TEXT NOT NULL DEFAULT '',
+			duration_ms INTEGER NOT NULL DEFAULT 0,
+			characters INTEGER NOT NULL DEFAULT 0,
+			size_bytes INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_speech_clips_created_at ON speech_clips(created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_logs_request_id ON logs(request_id)`,
 	}
 	for _, stmt := range stmts {
@@ -212,6 +234,22 @@ func (s *Store) migrate() error {
 		if err := s.ensureColumn("tokens", column.name, column.definition); err != nil {
 			return fmt.Errorf("migrate database: %w", err)
 		}
+	}
+	// speech_clips predates background jobs: older rows hold finished clips and
+	// keep the 'succeeded' default once these columns are added.
+	for _, column := range []struct{ name, definition string }{
+		{"speed", `REAL NOT NULL DEFAULT 1`},
+		{"status", `TEXT NOT NULL DEFAULT 'succeeded'`},
+		{"error", `TEXT NOT NULL DEFAULT ''`},
+		{"total_chunks", `INTEGER NOT NULL DEFAULT 0`},
+		{"done_chunks", `INTEGER NOT NULL DEFAULT 0`},
+	} {
+		if err := s.ensureColumn("speech_clips", column.name, column.definition); err != nil {
+			return fmt.Errorf("migrate database: %w", err)
+		}
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_speech_clips_status ON speech_clips(status)`); err != nil {
+		return fmt.Errorf("migrate database: %w", err)
 	}
 	return nil
 }
@@ -810,6 +848,137 @@ func scanVideoTask(row interface{ Scan(dest ...any) error }) (*VideoTask, error)
 		return nil, err
 	}
 	return &v, nil
+}
+
+// SpeechClip is one MiniMax text-to-speech synthesis. Short text finishes as a
+// single request; long text is stored as a queued background job and filled in
+// chunk by chunk until the merged audio is ready.
+type SpeechClip struct {
+	ID            int64   `json:"id"`
+	ChannelID     int64   `json:"channel_id"`
+	ChannelName   string  `json:"channel_name"`
+	Model         string  `json:"model"`
+	UpstreamModel string  `json:"upstream_model"`
+	VoiceID       string  `json:"voice_id"`
+	VoiceName     string  `json:"voice_name"`
+	Text          string  `json:"text"`
+	Speed         float64 `json:"speed"`
+	Status        string  `json:"status"`
+	Error         string  `json:"error"`
+	TotalChunks   int     `json:"total_chunks"`
+	DoneChunks    int     `json:"done_chunks"`
+	Format        string  `json:"format"`
+	AudioPath     string  `json:"-"`
+	DurationMS    int64   `json:"duration_ms"`
+	Characters    int64   `json:"characters"`
+	SizeBytes     int64   `json:"size_bytes"`
+	CreatedAt     int64   `json:"created_at"`
+}
+
+const speechClipColumns = `id, channel_id, channel_name, model, upstream_model, voice_id, voice_name, text, speed,
+	status, error, total_chunks, done_chunks, format, audio_path, duration_ms, characters, size_bytes, created_at`
+
+// CreateSpeechClip inserts a generated speech clip or background job and sets
+// its id. An empty status means the clip is already complete.
+func (s *Store) CreateSpeechClip(c *SpeechClip) error {
+	if c.Status == "" {
+		c.Status = "succeeded"
+	}
+	if c.Speed == 0 {
+		c.Speed = 1
+	}
+	c.CreatedAt = now()
+	res, err := s.db.Exec(`INSERT INTO speech_clips (channel_id, channel_name, model, upstream_model, voice_id, voice_name,
+		text, speed, status, error, total_chunks, done_chunks, format, audio_path, duration_ms, characters, size_bytes, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		c.ChannelID, c.ChannelName, c.Model, c.UpstreamModel, c.VoiceID, c.VoiceName,
+		c.Text, c.Speed, c.Status, c.Error, c.TotalChunks, c.DoneChunks, c.Format, c.AudioPath,
+		c.DurationMS, c.Characters, c.SizeBytes, c.CreatedAt)
+	if err != nil {
+		return err
+	}
+	c.ID, err = res.LastInsertId()
+	return err
+}
+
+// UpdateSpeechClip persists the mutable state of a background speech job while
+// it advances, including partial progress and the final audio path.
+func (s *Store) UpdateSpeechClip(c *SpeechClip) error {
+	_, err := s.db.Exec(`UPDATE speech_clips SET channel_id=?, channel_name=?, upstream_model=?, status=?, error=?,
+		total_chunks=?, done_chunks=?, format=?, audio_path=?, duration_ms=?, characters=?, size_bytes=? WHERE id=?`,
+		c.ChannelID, c.ChannelName, c.UpstreamModel, c.Status, c.Error, c.TotalChunks, c.DoneChunks,
+		c.Format, c.AudioPath, c.DurationMS, c.Characters, c.SizeBytes, c.ID)
+	return err
+}
+
+// GetSpeechClip returns a speech clip by id.
+func (s *Store) GetSpeechClip(id int64) (*SpeechClip, error) {
+	row := s.db.QueryRow(`SELECT `+speechClipColumns+` FROM speech_clips WHERE id = ?`, id)
+	c, err := scanSpeechClip(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return c, err
+}
+
+// ListSpeechClips returns one page of speech clips, newest first, with the total count.
+func (s *Store) ListSpeechClips(page, pageSize int) ([]SpeechClip, int64, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	var total int64
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM speech_clips`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.Query(`SELECT `+speechClipColumns+` FROM speech_clips ORDER BY id DESC LIMIT ? OFFSET ?`,
+		pageSize, (page-1)*pageSize)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := make([]SpeechClip, 0)
+	for rows.Next() {
+		c, err := scanSpeechClip(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, *c)
+	}
+	return out, total, rows.Err()
+}
+
+// ListResumableSpeechClips returns background jobs that were still queued or
+// running when the gateway stopped, so they can continue after a restart.
+func (s *Store) ListResumableSpeechClips() ([]SpeechClip, error) {
+	rows, err := s.db.Query(`SELECT ` + speechClipColumns + ` FROM speech_clips
+		WHERE status IN ('queued', 'running') ORDER BY id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]SpeechClip, 0)
+	for rows.Next() {
+		c, err := scanSpeechClip(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *c)
+	}
+	return out, rows.Err()
+}
+
+func scanSpeechClip(row interface{ Scan(dest ...any) error }) (*SpeechClip, error) {
+	var c SpeechClip
+	err := row.Scan(&c.ID, &c.ChannelID, &c.ChannelName, &c.Model, &c.UpstreamModel, &c.VoiceID, &c.VoiceName,
+		&c.Text, &c.Speed, &c.Status, &c.Error, &c.TotalChunks, &c.DoneChunks, &c.Format, &c.AudioPath,
+		&c.DurationMS, &c.Characters, &c.SizeBytes, &c.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
 }
 
 // Totals aggregates request counts, token usage and spend.

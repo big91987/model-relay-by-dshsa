@@ -251,3 +251,56 @@ export interface VideosResponse {
   page: number
   page_size: number
 }
+
+export interface SpeechVoice {
+  voice_id: string
+  name: string
+  language: string
+  description: string
+}
+
+export interface SpeechVoiceCatalog {
+  voices: SpeechVoice[]
+  source: 'provider' | 'builtin'
+  warning?: string
+}
+
+export type SpeechClipStatus = 'queued' | 'running' | 'succeeded' | 'failed'
+
+export interface SpeechClip {
+  id: number
+  channel_id: number
+  channel_name: string
+  model: string
+  upstream_model: string
+  voice_id: string
+  voice_name: string
+  text: string
+  speed: number
+  status: SpeechClipStatus
+  error: string
+  total_chunks: number
+  done_chunks: number
+  format: string
+  duration_ms: number
+  characters: number
+  size_bytes: number
+  audio_ready: boolean
+  content_url?: string
+  created_at: number
+}
+
+export interface SpeechInput {
+  model: string
+  text: string
+  voice_id: string
+  voice_name: string
+  speed: number
+}
+
+export interface SpeechClipsResponse {
+  items: SpeechClip[]
+  total: number
+  page: number
+  page_size: number
+}

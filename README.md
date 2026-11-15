@@ -9,6 +9,7 @@ A self-hosted model gateway written in Go, with a React admin console. It expose
 - **OpenAI-compatible relay** — `POST /v1/chat/completions` (streaming and non-streaming), `POST /v1/embeddings`, `GET /v1/models`.
 - **Two chat upstream protocols** — OpenAI-compatible channels (OpenAI, DeepSeek, Moonshot, Qwen, vLLM, Ollama, …) and Anthropic Messages channels, translated to and from the OpenAI format.
 - **MiniMax-H3 and Seedance video generation** — text-to-video and first-frame image-to-video from the console, with asynchronous tasks, live status, video preview and MP4 download. Supports MiniMax-H3 and ByteDance Seedance on Volcano Ark.
+- **MiniMax text to speech** — choose a system voice, synthesize up to 50,000 characters of speech, replay and download the audio. Long text runs as a background task with live progress that survives a page refresh or a gateway restart. Voice selection, generation and history are console-only.
 - **Channel routing** — priority first, weighted load balancing inside a priority, public-to-upstream model aliases, and automatic failover on connection errors, `401`, `403`, `404`, `429` and `5xx`.
 - **Upstream model discovery** — fetch the provider's model list in the channel form, tick the models to import, and keep manual entries and public aliases.
 - **Gateway keys** — per-key USD balance, daily spending budget, model allowlists, requests-per-minute, tokens-per-minute and concurrency limits, expiry, enable/disable, and a one-time plaintext reveal at creation.
@@ -90,7 +91,7 @@ Clients keep using the OpenAI chat format; the gateway translates requests and A
 
 ### Video generation (MiniMax-H3 and Seedance)
 
-**MiniMax-H3.** Add a channel with protocol **MiniMax H3 (video)**, base URL `https://api.minimax.io` (or `https://api.minimaxi.com` for the China platform) and model `MiniMax-H3` (or one of the H3 variants). The API key is sent as `Authorization: Bearer …` to the MiniMax V2 video endpoints. The provider's OpenAI-compatible model list omits video models, so **Fetch models** adds the H3 family (`MiniMax-H3`, `MiniMax-H3-Highspeed`, `MiniMax-H3-Lite`, `MiniMax-H3-Max`) alongside the language models it returns.
+**MiniMax-H3.** Add a channel with protocol **MiniMax (video and speech)**, base URL `https://api.minimax.io` (or `https://api.minimaxi.com` for the China platform) and model `MiniMax-H3` (or one of the H3 variants). The API key is sent as `Authorization: Bearer …` to the MiniMax V2 video endpoints. The provider's OpenAI-compatible model list omits video models, so **Fetch models** adds the H3 family (`MiniMax-H3`, `MiniMax-H3-Highspeed`, `MiniMax-H3-Lite`, `MiniMax-H3-Max`) alongside the language models it returns.
 
 **Seedance (Volcano Ark).** Seedance is ByteDance's video model on Volcano Engine Ark. Add a channel with protocol **Seedance (Volcano Ark, video)**, base URL `https://ark.cn-beijing.volces.com/api/v3`, and the model IDs to serve, for example `doubao-seedance-1-0-pro-250528` or `doubao-seedance-1-0-pro-fast-251015`. **Fetch models** reads `GET /api/v3/models` and also offers the Seedance family; public aliases such as `my-video=doubao-seedance-2-0-260128` are supported. The key is sent as `Authorization: Bearer …` to `POST /api/v3/contents/generations/tasks`, and task status is polled at `GET /api/v3/contents/generations/tasks/{id}`.
 
@@ -108,6 +109,21 @@ Then open **Video** in the console to:
 3. choose resolution, duration and, for text-to-video, an aspect ratio. The form offers the values each model supports: MiniMax uses 480P/768P/2K and 4–15 s; Seedance uses 480p/720p/1080p (plus 4k on some 2.x models) and 2–12 s, 4–15 s or 4–30 s depending on the model family.
 
 The gateway submits the asynchronous task, polls it in the background, and stores the finished MP4 under `DATA_DIR/videos/`. Finished videos can be previewed in the browser and downloaded with the **Download MP4** action. Tasks left in flight are resumed after a restart. Video generation is console-only for now: it is not metered per gateway key and does not appear in request logs.
+
+### Text to speech (MiniMax)
+
+A MiniMax channel can serve both video and speech models. Use the same base URL (`https://api.minimax.io`, or `https://api.minimaxi.com` for the China platform) and API key. The provider's model list does not reliably include the speech family, so **Fetch models** adds `speech-2.8-hd`, `speech-2.8-turbo`, `speech-2.6-hd`, `speech-2.6-turbo`, `speech-02-hd`, `speech-02-turbo`, `speech-01-hd` and `speech-01-turbo` alongside the H3 family and the language models it returns.
+
+Then open **Speech** in the console to:
+
+1. pick a speech model;
+2. pick a system voice. The page reads the account's voices from `POST /v1/get_voice` and groups them by language. If the provider call fails, it falls back to a built-in list and shows the reason;
+3. enter up to 50,000 characters and optionally adjust the speed between 0.5× and 2×;
+4. generate the clip, replay it in the page and download the audio file.
+
+Text up to 2,000 characters is synthesized while the page waits. Longer text is split into parts at paragraph, sentence or clause boundaries and accepted as a background task: the console returns immediately, shows the task with a progress bar, and keeps polling until the merged MP3 is ready. Because the job and its completed parts live in SQLite and `DATA_DIR`, refreshing the page — or restarting the gateway — does not lose the task. Finished parts are reused after a restart, and only the remaining parts are requested again.
+
+The Speech model picker lists public models whose ID starts with `speech-`; an alias keeps a `speech-` prefix to appear, for example `speech-my-voice=speech-2.8-hd`. Synthesis uses `POST /v1/t2a_v2` with `output_format: hex`; the gateway decodes each part, strips per-part ID3 metadata, concatenates the MP3 frames and stores the result under `DATA_DIR/speech/` (partial parts stay under `DATA_DIR/speech/jobs/` until the clip is finished). The browser receives the clip only through the authenticated `/api/speech/{id}/content` endpoint, so the upstream key and temporary provider URLs are never exposed. Speech generation is console-only: it is not metered per gateway key and does not appear in request logs.
 
 ### Docker
 
@@ -127,7 +143,7 @@ For Compose, create a `.env` file containing `SECRET_KEY` and `ADMIN_PASSWORD` (
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PORT` | `8080` | HTTP listen port. |
-| `DATA_DIR` | `./data` | Directory for `gateway.db` and downloaded videos (created automatically). |
+| `DATA_DIR` | `./data` | Directory for `gateway.db`, downloaded videos and generated speech (created automatically). |
 | `SECRET_KEY` | `dev-secret-change-me` | Signs admin sessions and encrypts upstream API keys with AES-256-GCM. Use a stable secret. |
 | `ADMIN_USERNAME` | `admin` | Admin username created on first boot. |
 | `ADMIN_PASSWORD` | `admin123` | Admin password created on first boot (minimum 6 characters). |
@@ -161,7 +177,11 @@ Changing `SECRET_KEY` invalidates admin sessions and makes existing channel keys
 | --- | --- |
 | ![Seedance video generation](docs/screenshots/video-seedance-live.png) | ![Seedance channel](docs/screenshots/channel-seedance-after.png) |
 
-The **Models** page shows the public catalog, serving channels and the lowest configured price per model. Star the models you use most to keep them in a favorites list, then use **Favorites only** to narrow the catalog; favorites are stored in the browser and survive reloads. The **Playground** page selects an existing gateway key, sends real relay requests, and shows streaming output, latency, token usage and the request ID. Most screenshots use the local mock upstream in `scripts/mock-upstream.py` (`python3 scripts/mock-upstream.py 19090`), so `127.0.0.1` URLs are demo data rather than real providers; the mock also answers MiniMax and Seedance video create/query calls and serves `scripts/media/demo.mp4` for local previews. The MiniMax and Seedance video screenshots additionally include one real generation each (`MiniMax-H3` and `doubao-seedance-2-0-260128`), and the Playground uses a public Pollinations GPT-OSS endpoint.
+| Text to speech | Text to speech (light) |
+| --- | --- |
+| ![Text to speech](docs/screenshots/speech-after.png) | ![Text to speech in light theme](docs/screenshots/speech-light.png) |
+
+The **Models** page shows the public catalog, serving channels and the lowest configured price per model. Star the models you use most to keep them in a favorites list, then use **Favorites only** to narrow the catalog; favorites are stored in the browser and survive reloads. The **Playground** page selects an existing gateway key, sends real relay requests, and shows streaming output, latency, token usage and the request ID. Most screenshots use the local mock upstream in `scripts/mock-upstream.py` (`python3 scripts/mock-upstream.py 19090`), so `127.0.0.1` URLs are demo data rather than real providers; the mock also answers MiniMax and Seedance video create/query calls, the MiniMax voice list and T2A calls, and serves `scripts/media/demo.mp4` and `scripts/media/demo.mp3` for local previews. The MiniMax and Seedance video screenshots additionally include one real generation each (`MiniMax-H3` and `doubao-seedance-2-0-260128`), and the Playground uses a public Pollinations GPT-OSS endpoint.
 
 Use the theme control in the top bar, or on the sign-in screen, to switch between light, dark and follow-system themes. The console remembers the selection in the browser.
 
@@ -271,6 +291,10 @@ Admin endpoints use the `mr_session` HttpOnly cookie created by `POST /api/auth/
 | `GET/POST /api/videos` | session | List video tasks / submit a MiniMax-H3 generation task. |
 | `GET /api/videos/{id}` | session | One video task with status and metadata. |
 | `GET /api/videos/{id}/content` | session | Preview the stored MP4; add `?download=1` for an attachment. |
+| `GET /api/speech/voices?model=…` | session | System voices for the serving MiniMax channel; falls back to a built-in list with a warning. |
+| `GET/POST /api/speech` | session | List speech clips and background tasks / synthesize text with a MiniMax voice. Long text returns `202` with a queued task. |
+| `GET /api/speech/{id}` | session | One speech clip or job with its status, progress, model, voice and audio metadata. |
+| `GET /api/speech/{id}/content` | session | Stream the finished audio; add `?download=1` for an attachment. Returns `404` until the job completes. |
 | `GET /v1/models` | gateway key | OpenAI model list, filtered by the key. |
 | `POST /v1/chat/completions` | gateway key | OpenAI-compatible chat completions, streaming supported. |
 | `POST /v1/embeddings` | gateway key | Embeddings passthrough for OpenAI-compatible channels. |
@@ -297,7 +321,7 @@ Project layout:
 cmd/server/            entrypoint
 internal/auth/         password hashing, API keys, session JWTs
 internal/config/       environment configuration
-internal/gateway/      relay, routing, OpenAI/Anthropic adapters, video tasks, accounting
+internal/gateway/      relay, routing, OpenAI/Anthropic adapters, video tasks, speech synthesis, accounting
 internal/secretbox/    AES-GCM encryption for upstream keys
 internal/server/       HTTP API, middleware, static console
 internal/store/        SQLite schema and queries
@@ -314,6 +338,7 @@ docs/screenshots/      console screenshots used in this README
 - Upstream channel URLs are configured by an authenticated admin. The gateway will fetch whatever URL is configured, so restrict admin access accordingly.
 - The Anthropic adapter translates text, image data URLs, tool calls and tool results. Remote image URLs are not converted. OpenAI's Responses API, audio, rerank and native Anthropic endpoints are out of scope.
 - MiniMax-H3 video tasks are managed from the admin console; there is no gateway-key video API and video generation is not charged against key quotas. Task history and downloaded MP4 files stay in `DATA_DIR` until removed manually.
+- MiniMax speech synthesis is also console-only: there is no gateway-key speech API and it is not charged against key quotas. Generated audio and partial background-job parts stay in `DATA_DIR` until the clip finishes; finished audio stays until removed manually.
 - Cost accounting trusts the configured prices and upstream token counts; it is an operational estimate, not an invoice. `estimated` and `unverified` charges are marked explicitly and should be reviewed before using the numbers for billing.
 - Playground uses the selected gateway key through an admin-authenticated server endpoint; the browser never receives the key secret. An admin session can therefore spend any key's quota, so restrict admin access accordingly.
 - Playground parameter ranges are protocol-level. Model-specific limits are enforced by the upstream and surfaced as errors; the page does not maintain a per-model capability database.
@@ -321,7 +346,7 @@ docs/screenshots/      console screenshots used in this README
 
 ## Upgrading an existing installation
 
-The SQLite schema is migrated automatically on startup: the gateway adds `logs.cost_status`, `logs.reserved_cost`, `logs.reservation_id` and the `token_reservations` table when they are missing, along with the per-key limit columns (`tpm_limit`, `max_concurrency`, `daily_quota`) and the `video_tasks` table introduced on `main`. No manual database step is required.
+The SQLite schema is migrated automatically on startup: the gateway adds `logs.cost_status`, `logs.reserved_cost`, `logs.reservation_id` and the `token_reservations` table when they are missing, along with the per-key limit columns (`tpm_limit`, `max_concurrency`, `daily_quota`), the `video_tasks` and `speech_clips` tables, and the speech background-job columns (`speed`, `status`, `error`, `total_chunks`, `done_chunks`). Existing speech clips become `succeeded` rows. No manual database step is required.
 
 Existing keys and channels keep their configuration. Because the previous version had no reservations, the first boot after the upgrade has no pending reservations to recover; settled historical costs remain as recorded. New optional environment variables (`STREAM_TIMEOUT_SECONDS`, `QUOTA_DEFAULT_OUTPUT_TOKENS`) default to the values in the table above. Restart the binary (or rebuild the Docker image) as usual.
 
