@@ -272,7 +272,6 @@ func TestDesignVoiceSpeechPinnedToChannel(t *testing.T) {
 		VoiceID:   design.VoiceID,
 		VoiceName: design.Name,
 		Speed:     1,
-		ChannelID: design.ChannelID,
 	})
 	if err != nil {
 		t.Fatalf("synthesize designed voice: %v", err)
@@ -358,20 +357,16 @@ func TestDesignedVoiceLongTextJobStaysOnOwnerChannel(t *testing.T) {
 		VoiceID:   design.VoiceID,
 		VoiceName: design.Name,
 		Speed:     1,
-		ChannelID: design.ChannelID,
 	})
 	if err != nil {
 		t.Fatalf("create designed-voice job: %v", err)
 	}
-	if clip.Status != "queued" || clip.PinnedChannelID != ownerChannel.ID {
-		t.Fatalf("job = %+v, want queued and pinned to %d", clip, ownerChannel.ID)
+	if clip.Status != "queued" {
+		t.Fatalf("job = %+v, want queued", clip)
 	}
 	stored := waitSpeechClip(t, env, clip.ID)
 	if stored.Status != "succeeded" {
 		t.Fatalf("job failed: %s", stored.Error)
-	}
-	if stored.PinnedChannelID != ownerChannel.ID {
-		t.Fatalf("stored pin = %d, want %d", stored.PinnedChannelID, ownerChannel.ID)
 	}
 	owner.mu.Lock()
 	ownerCalls := len(owner.speechBodies)

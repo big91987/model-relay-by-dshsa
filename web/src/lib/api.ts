@@ -11,10 +11,6 @@ import type {
   SpeechClipsResponse,
   SpeechInput,
   SpeechVoiceCatalog,
-  VoiceDesign,
-  VoiceDesignInput,
-  VoiceDesignsResponse,
-  VoiceDesignSpeechInput,
   TestResult,
   Token,
   TokenInput,
@@ -23,6 +19,13 @@ import type {
   VideoInput,
   VideosResponse,
   VideoTask,
+  VoiceClone,
+  VoiceCloneInput,
+  VoiceClonesResponse,
+  VoiceDesign,
+  VoiceDesignInput,
+  VoiceDesignsResponse,
+  VoiceDesignSpeechInput,
 } from './types'
 
 export class ApiError extends Error {
@@ -37,7 +40,7 @@ export class ApiError extends Error {
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
-  if (init.body && !headers.has('Content-Type')) {
+  if (init.body && !(init.body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
   const response = await fetch(path, {
@@ -168,6 +171,21 @@ export const api = {
   },
   speakWithVoiceDesign(id: number, input: VoiceDesignSpeechInput) {
     return request<SpeechClip>(`/api/voice-designs/${id}/speech`, { method: 'POST', ...jsonBody(input) })
+  },
+  voiceClones() {
+    return request<VoiceClonesResponse>('/api/voice-clones')
+  },
+  createVoiceClone(input: VoiceCloneInput) {
+    const form = new FormData()
+    form.set('name', input.name)
+    form.set('model', input.model)
+    form.set('preview_text', input.preview_text)
+    form.set('authorized', input.authorized ? 'true' : 'false')
+    form.set('file', input.file)
+    return request<VoiceClone>('/api/voice-clones', { method: 'POST', body: form })
+  },
+  previewVoiceClone(id: number, text: string) {
+    return request<VoiceClone>(`/api/voice-clones/${id}/preview`, { method: 'POST', ...jsonBody({ text }) })
   },
   playgroundModels(tokenId: number) {
     return request<{ data: { id: string }[] }>(`/api/playground/models?token_id=${tokenId}`)

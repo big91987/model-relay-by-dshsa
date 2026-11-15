@@ -52,9 +52,6 @@ type SpeechRequest struct {
 	VoiceID   string
 	VoiceName string
 	Speed     float64
-	// ChannelID pins synthesis to the channel that owns a designed voice. It is
-	// zero for system voices, which may use any channel serving the model.
-	ChannelID int64
 }
 
 // SpeechVoice is one selectable MiniMax system voice.
@@ -244,14 +241,14 @@ func (g *Gateway) CreateSpeech(ctx context.Context, req SpeechRequest) (*store.S
 	if err := normalizeSpeechRequest(&req); err != nil {
 		return nil, &SpeechError{Status: http.StatusBadRequest, Message: err.Error()}
 	}
-	candidates, err := g.speechCandidates(req.Model, req.ChannelID)
+	candidates, cloneChannelID, err := g.speechCandidatesForVoice(req.Model, req.VoiceID)
 	if err != nil {
 		return nil, err
 	}
 	if len(candidates) == 0 {
 		message := fmt.Sprintf("model %q is not available on any enabled MiniMax channel", req.Model)
-		if req.ChannelID != 0 {
-			message = fmt.Sprintf("model %q is not available on the channel that owns this voice", req.Model)
+		if cloneChannelID != 0 {
+			message = fmt.Sprintf("the channel that owns voice %q does not serve model %q", req.VoiceID, req.Model)
 		}
 		return nil, &SpeechError{Status: http.StatusNotFound, Message: message}
 	}
@@ -272,18 +269,17 @@ func (g *Gateway) CreateSpeech(ctx context.Context, req SpeechRequest) (*store.S
 // console can list it immediately and find it again after a refresh.
 func (g *Gateway) createSpeechJob(req *SpeechRequest, candidates []candidate) (*store.SpeechClip, error) {
 	clip := &store.SpeechClip{
-		ChannelID:       candidates[0].channel.ID,
-		ChannelName:     candidates[0].channel.Name,
-		PinnedChannelID: req.ChannelID,
-		Model:           req.Model,
-		UpstreamModel:   candidates[0].upstream,
-		VoiceID:         req.VoiceID,
-		VoiceName:       speechVoiceName(req),
-		Text:            req.Text,
-		Speed:           req.Speed,
-		Status:          "queued",
-		TotalChunks:     len(splitSpeechText(req.Text, speechChunkRunes)),
-		Characters:      int64(utf8.RuneCountInString(req.Text)),
+		ChannelID:     candidates[0].channel.ID,
+		ChannelName:   candidates[0].channel.Name,
+		Model:         req.Model,
+		UpstreamModel: candidates[0].upstream,
+		VoiceID:       req.VoiceID,
+		VoiceName:     speechVoiceName(req),
+		Text:          req.Text,
+		Speed:         req.Speed,
+		Status:        "queued",
+		TotalChunks:   len(splitSpeechText(req.Text, speechChunkRunes)),
+		Characters:    int64(utf8.RuneCountInString(req.Text)),
 	}
 	if err := g.store.CreateSpeechClip(clip); err != nil {
 		return nil, err
@@ -293,24 +289,52 @@ func (g *Gateway) createSpeechJob(req *SpeechRequest, candidates []candidate) (*
 }
 
 // speechCandidates lists the enabled MiniMax channels that can serve a model.
-// A non-zero channelID restricts the result to that channel, which keeps a
-// designed voice on the provider account that owns it.
-func (g *Gateway) speechCandidates(model string, channelID int64) ([]candidate, error) {
+func (g *Gateway) speechCandidates(model string) ([]candidate, error) {
 	channels, err := g.store.ListChannels()
 	if err != nil {
 		return nil, err
 	}
 	out := make([]candidate, 0)
 	for _, cand := range orderCandidates(channels, model) {
-		if cand.channel.Type != "minimax" {
-			continue
+		if cand.channel.Type == "minimax" {
+			out = append(out, cand)
 		}
-		if channelID != 0 && cand.channel.ID != channelID {
-			continue
-		}
-		out = append(out, cand)
 	}
 	return out, nil
+}
+
+// speechCandidatesForVoice lists the channels that can serve a model and, for
+// a custom voice, pins them to the channel that owns the voice. Both cloned and
+// text-designed voices exist only on the MiniMax account that created them. The
+// second result is the owning channel id (0 for a system voice).
+func (g *Gateway) speechCandidatesForVoice(model, voiceID string) ([]candidate, int64, error) {
+	candidates, err := g.speechCandidates(model)
+	if err != nil {
+		return nil, 0, err
+	}
+	var ownerChannelID int64
+	if clone, cloneErr := g.store.GetVoiceCloneByVoiceID(voiceID); cloneErr == nil {
+		ownerChannelID = clone.ChannelID
+	} else if !errors.Is(cloneErr, store.ErrNotFound) {
+		return nil, 0, cloneErr
+	}
+	if ownerChannelID == 0 {
+		if design, designErr := g.store.GetVoiceDesignByVoiceID(voiceID); designErr == nil {
+			ownerChannelID = design.ChannelID
+		} else if !errors.Is(designErr, store.ErrNotFound) {
+			return nil, 0, designErr
+		}
+	}
+	if ownerChannelID == 0 {
+		return candidates, 0, nil
+	}
+	pinned := make([]candidate, 0, len(candidates))
+	for _, cand := range candidates {
+		if cand.channel.ID == ownerChannelID {
+			pinned = append(pinned, cand)
+		}
+	}
+	return pinned, ownerChannelID, nil
 }
 
 // synthesizeSpeech tries each candidate until one returns usable audio. A
@@ -668,13 +692,17 @@ func (g *Gateway) runSpeechJob(id int64) {
 		return
 	}
 
-	candidates, err := g.speechCandidates(clip.Model, clip.PinnedChannelID)
+	candidates, cloneChannelID, err := g.speechCandidatesForVoice(clip.Model, clip.VoiceID)
 	if err != nil {
 		g.failSpeechJob(clip, "could not load channels: "+err.Error())
 		return
 	}
 	if len(candidates) == 0 {
-		g.failSpeechJob(clip, fmt.Sprintf("model %q is not available on any enabled MiniMax channel", clip.Model))
+		message := fmt.Sprintf("model %q is not available on any enabled MiniMax channel", clip.Model)
+		if cloneChannelID != 0 {
+			message = fmt.Sprintf("the channel that owns voice %q does not serve model %q", clip.VoiceID, clip.Model)
+		}
+		g.failSpeechJob(clip, message)
 		return
 	}
 	req := SpeechRequest{
@@ -683,7 +711,6 @@ func (g *Gateway) runSpeechJob(id int64) {
 		VoiceID:   clip.VoiceID,
 		VoiceName: clip.VoiceName,
 		Speed:     clip.Speed,
-		ChannelID: clip.PinnedChannelID,
 	}
 
 	for index := clip.DoneChunks; index < len(chunks); index++ {
