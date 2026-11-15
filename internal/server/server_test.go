@@ -39,11 +39,12 @@ func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 		t.Fatalf("seed admin: %v", err)
 	}
 	cfg := &config.Config{
-		SecretKey:         "test-secret",
-		SessionTTL:        time.Hour,
-		Version:           "test",
-		DataDir:           t.TempDir(),
-		VideoPollInterval: 10 * time.Millisecond,
+		SecretKey:          "test-secret",
+		SessionTTL:         time.Hour,
+		Version:            "test",
+		DataDir:            t.TempDir(),
+		VideoPollInterval:  10 * time.Millisecond,
+		SpeechPollInterval: 10 * time.Millisecond,
 	}
 	cipher, err := secretbox.New(cfg.SecretKey)
 	if err != nil {
@@ -1534,45 +1535,76 @@ func TestLogsSummaryStableAcrossPages(t *testing.T) {
 func TestMinimaxLongSpeechBackgroundFlow(t *testing.T) {
 	ts, _ := newTestServer(t)
 	speechAudio := []byte("ID3\x03\x00\x00\x00\x00\x00\x00\x00server-long-speech")
-	segment := speechAudio[10:] // the merged clip has ID3 metadata stripped
-	var calls atomic.Int64
-	// The upstream holds every part until the test releases it, so the job
-	// cannot finish before the "audio not ready" assertion below.
+	var creates atomic.Int64
+	var queries atomic.Int64
+	var downloads atomic.Int64
+	var createdText atomic.Value
+	var queriedIDs []string
+	var queryMu sync.Mutex
+	// Hold the task in Processing until the test has checked the refreshed
+	// console and the unfinished download.
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	releaseUpstream := func() { releaseOnce.Do(func() { close(release) }) }
 	defer releaseUpstream()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/t2a_v2" {
-			http.NotFound(w, r)
-			return
-		}
 		if r.Header.Get("Authorization") != "Bearer upstream-key" {
 			t.Errorf("unexpected upstream auth: %q", r.Header.Get("Authorization"))
 		}
-		var body struct {
-			Model string `json:"model"`
-			Text  string `json:"text"`
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/t2a_async_v2":
+			var body struct {
+				Model        string `json:"model"`
+				Text         string `json:"text"`
+				VoiceSetting struct {
+					VoiceID string  `json:"voice_id"`
+					Speed   float64 `json:"speed"`
+				} `json:"voice_setting"`
+				AudioSetting struct {
+					Format string `json:"format"`
+				} `json:"audio_setting"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode async speech request: %v", err)
+			}
+			if body.Model != "speech-2.8-hd" || body.VoiceSetting.VoiceID != "English_expressive_narrator" ||
+				body.VoiceSetting.Speed != 1.1 || body.AudioSetting.Format != "mp3" {
+				t.Errorf("unexpected async speech body: %+v", body)
+			}
+			createdText.Store(body.Text)
+			creates.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"task_id":          555,
+				"file_id":          666,
+				"usage_characters": len([]rune(body.Text)),
+				"base_resp":        map[string]any{"status_code": 0, "status_msg": "success"},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/query/t2a_async_query_v2":
+			id := r.URL.Query().Get("task_id")
+			queryMu.Lock()
+			queriedIDs = append(queriedIDs, id)
+			queryMu.Unlock()
+			queries.Add(1)
+			<-release
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"task_id":    555,
+				"status":     "Success",
+				"file_id":    666,
+				"extra_info": map[string]any{"audio_length": 2100},
+				"base_resp":  map[string]any{"status_code": 0, "status_msg": "success"},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/files/retrieve_content":
+			if r.URL.Query().Get("file_id") != "666" {
+				t.Errorf("unexpected file id: %q", r.URL.Query().Get("file_id"))
+			}
+			downloads.Add(1)
+			w.Header().Set("Content-Type", "audio/mpeg")
+			_, _ = w.Write(speechAudio)
+		default:
+			http.NotFound(w, r)
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Errorf("decode speech request: %v", err)
-		}
-		if body.Model != "speech-2.8-hd" || len([]rune(body.Text)) > 3000 || strings.TrimSpace(body.Text) == "" {
-			t.Errorf("unexpected long-text chunk: model=%q runes=%d", body.Model, len([]rune(body.Text)))
-		}
-		calls.Add(1)
-		<-release
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"data": map[string]any{"audio": fmt.Sprintf("%x", speechAudio), "status": 2},
-			"extra_info": map[string]any{
-				"audio_length":     2100,
-				"audio_format":     "mp3",
-				"audio_size":       len(speechAudio),
-				"usage_characters": 50,
-			},
-			"base_resp": map[string]any{"status_code": 0, "status_msg": "success"},
-		})
 	}))
 	defer upstream.Close()
 
@@ -1601,6 +1633,7 @@ func TestMinimaxLongSpeechBackgroundFlow(t *testing.T) {
 	var created struct {
 		ID          int64  `json:"id"`
 		Status      string `json:"status"`
+		Async       bool   `json:"async"`
 		TotalChunks int    `json:"total_chunks"`
 		DoneChunks  int    `json:"done_chunks"`
 		AudioReady  bool   `json:"audio_ready"`
@@ -1610,17 +1643,20 @@ func TestMinimaxLongSpeechBackgroundFlow(t *testing.T) {
 	if err := json.Unmarshal(body, &created); err != nil {
 		t.Fatalf("decode created job: %v", err)
 	}
-	if created.ID == 0 || (created.Status != "queued" && created.Status != "running") {
+	if created.ID == 0 || created.Status != "running" || !created.Async {
 		t.Fatalf("unexpected created job: %s", body)
 	}
 	if created.AudioReady || created.ContentURL != "" {
 		t.Fatalf("running job already exposes audio: %s", body)
 	}
-	if created.TotalChunks < 2 || created.Characters != int64(len([]rune(longText))) {
+	if created.TotalChunks != 0 || created.DoneChunks != 0 || created.Characters != int64(len([]rune(longText))) {
 		t.Fatalf("unexpected job metadata: %s", body)
 	}
+	if got, _ := createdText.Load().(string); got != longText {
+		t.Fatalf("upstream received %d characters, want the complete %d-character manuscript", len([]rune(got)), len([]rune(longText)))
+	}
 
-	// Refresh in a fresh session: the background job is still listed and the
+	// Refresh in a fresh session: the same running task is listed and the
 	// unfinished download is not served.
 	refreshed := newClient(t)
 	if resp, body := doJSON(t, refreshed, http.MethodPost, ts.URL+"/api/auth/login", map[string]any{
@@ -1629,7 +1665,8 @@ func TestMinimaxLongSpeechBackgroundFlow(t *testing.T) {
 		t.Fatalf("refresh login status %d: %s", resp.StatusCode, body)
 	}
 	resp, body = doJSON(t, refreshed, http.MethodGet, ts.URL+"/api/speech", nil, nil)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), fmt.Sprintf(`"id":%d`, created.ID)) {
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), fmt.Sprintf(`"id":%d`, created.ID)) ||
+		!strings.Contains(string(body), `"async":true`) {
 		t.Fatalf("refreshed list status %d: %s", resp.StatusCode, body)
 	}
 	resp, _ = doJSON(t, refreshed, http.MethodGet, ts.URL+fmt.Sprintf("/api/speech/%d/content", created.ID), nil, nil)
@@ -1643,6 +1680,7 @@ func TestMinimaxLongSpeechBackgroundFlow(t *testing.T) {
 		ID         int64  `json:"id"`
 		Status     string `json:"status"`
 		Error      string `json:"error"`
+		Async      bool   `json:"async"`
 		DoneChunks int    `json:"done_chunks"`
 		Characters int64  `json:"characters"`
 		DurationMS int64  `json:"duration_ms"`
@@ -1668,20 +1706,32 @@ func TestMinimaxLongSpeechBackgroundFlow(t *testing.T) {
 	if finished.Status != "succeeded" {
 		t.Fatalf("job failed: %s", finished.Error)
 	}
-	if !finished.AudioReady || finished.ContentURL == "" || finished.DoneChunks != created.TotalChunks {
+	if !finished.AudioReady || finished.ContentURL == "" || !finished.Async || finished.DoneChunks != 0 {
 		t.Fatalf("unexpected finished job: %s", body)
 	}
-	if finished.DurationMS != int64(2100*created.TotalChunks) {
-		t.Fatalf("duration = %d, want %d", finished.DurationMS, 2100*created.TotalChunks)
+	if finished.DurationMS != 2100 {
+		t.Fatalf("duration = %d, want 2100", finished.DurationMS)
 	}
-	if got := calls.Load(); got != int64(created.TotalChunks) {
-		t.Fatalf("upstream calls = %d, want %d", got, created.TotalChunks)
+	if got := creates.Load(); got != 1 {
+		t.Fatalf("upstream create calls = %d, want exactly 1", got)
 	}
+	if got := queries.Load(); got < 1 {
+		t.Fatalf("upstream query calls = %d, want at least 1", got)
+	}
+	if got := downloads.Load(); got != 1 {
+		t.Fatalf("upstream downloads = %d, want 1", got)
+	}
+	queryMu.Lock()
+	for _, id := range queriedIDs {
+		if id != "555" {
+			t.Fatalf("queried MiniMax task %q, want 555", id)
+		}
+	}
+	queryMu.Unlock()
 
 	resp, body = doJSON(t, refreshed, http.MethodGet, ts.URL+finished.ContentURL, nil, nil)
-	wantAudio := bytes.Repeat(segment, created.TotalChunks)
-	if resp.StatusCode != http.StatusOK || !bytes.Equal(body, wantAudio) {
-		t.Fatalf("finished audio status %d, %d bytes, want %d", resp.StatusCode, len(body), len(wantAudio))
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(body, speechAudio) {
+		t.Fatalf("finished audio status %d, %d bytes", resp.StatusCode, len(body))
 	}
 	if got := resp.Header.Get("Content-Type"); got != "audio/mpeg" {
 		t.Fatalf("content type = %q", got)

@@ -294,6 +294,7 @@ export interface SpeechClip {
   speed: number
   status: SpeechClipStatus
   error: string
+  async: boolean
   total_chunks: number
   done_chunks: number
   format: string

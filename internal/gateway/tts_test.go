@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -37,13 +38,17 @@ type mockSpeechUpstream struct {
 	streamMsg       string
 	streamInterrupt bool
 	audio           []byte
+	async           *mockAsyncSpeech
 	server          *httptest.Server
 }
 
 func newMockSpeechUpstream(t *testing.T) *mockSpeechUpstream {
 	t.Helper()
-	m := &mockSpeechUpstream{audio: testSpeechAudio}
+	m := &mockSpeechUpstream{audio: testSpeechAudio, async: newMockAsyncSpeech(testSpeechAudio)}
 	m.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if m.async.handle(w, r) {
+			return
+		}
 		if r.Header.Get("Authorization") != "Bearer upstream-key" {
 			t.Errorf("unexpected upstream auth: %q", r.Header.Get("Authorization"))
 		}
@@ -107,6 +112,137 @@ func newMockSpeechUpstream(t *testing.T) *mockSpeechUpstream {
 	}))
 	t.Cleanup(m.server.Close)
 	return m
+}
+
+// mockAsyncSpeech serves the MiniMax long-text task endpoints used by the
+// asynchronous speech path. Each query reports Processing until
+// queriesBeforeSuccess queries have been answered, then Success.
+type mockAsyncSpeech struct {
+	mu                   sync.Mutex
+	creates              []map[string]any
+	queriedTaskIDs       []string
+	queries              int
+	downloads            int
+	fail                 bool
+	createCode           int
+	createBody           string
+	audio                []byte
+	taskID               int64
+	fileID               int64
+	queriesBeforeSuccess int
+	durationMS           int64
+}
+
+func newMockAsyncSpeech(audio []byte) *mockAsyncSpeech {
+	return &mockAsyncSpeech{
+		audio:                audio,
+		taskID:               910001,
+		fileID:               920001,
+		queriesBeforeSuccess: 1,
+		durationMS:           1234,
+	}
+}
+
+func (m *mockAsyncSpeech) handle(w http.ResponseWriter, r *http.Request) bool {
+	asyncPath := (r.Method == http.MethodPost && r.URL.Path == "/v1/t2a_async_v2") ||
+		(r.Method == http.MethodGet && r.URL.Path == "/v1/query/t2a_async_query_v2") ||
+		(r.Method == http.MethodGet && r.URL.Path == "/v1/files/retrieve_content")
+	if !asyncPath {
+		return false
+	}
+	if r.Header.Get("Authorization") != "Bearer upstream-key" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"base_resp":{"status_code":1004,"status_msg":"login fail"}}`)
+		return true
+	}
+	switch {
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/t2a_async_v2":
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		m.mu.Lock()
+		m.creates = append(m.creates, body)
+		code, raw := m.createCode, m.createBody
+		taskID, fileID := m.taskID, m.fileID
+		m.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if code != 0 {
+			w.WriteHeader(code)
+		}
+		if raw != "" {
+			_, _ = io.WriteString(w, raw)
+			return true
+		}
+		text, _ := body["text"].(string)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"task_id":          taskID,
+			"file_id":          fileID,
+			"usage_characters": utf8.RuneCountInString(text),
+			"base_resp":        map[string]any{"status_code": 0, "status_msg": "success"},
+		})
+		return true
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/query/t2a_async_query_v2":
+		taskID := r.URL.Query().Get("task_id")
+		m.mu.Lock()
+		m.queriedTaskIDs = append(m.queriedTaskIDs, taskID)
+		m.queries++
+		queries := m.queries
+		fail := m.fail
+		fileID := m.fileID
+		before := m.queriesBeforeSuccess
+		duration := m.durationMS
+		m.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		payload := map[string]any{
+			"task_id":   taskID,
+			"base_resp": map[string]any{"status_code": 0, "status_msg": "success"},
+		}
+		switch {
+		case fail:
+			payload["status"] = "Failed"
+			payload["base_resp"] = map[string]any{"status_code": 0, "status_msg": "mock async speech task failed"}
+		case queries <= before:
+			payload["status"] = "Processing"
+		default:
+			payload["status"] = "Success"
+			payload["file_id"] = fileID
+			payload["extra_info"] = map[string]any{"audio_length": duration}
+		}
+		_ = json.NewEncoder(w).Encode(payload)
+		return true
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/files/retrieve_content":
+		fileID, _ := strconv.ParseInt(r.URL.Query().Get("file_id"), 10, 64)
+		m.mu.Lock()
+		m.downloads++
+		audio := m.audio
+		m.mu.Unlock()
+		if fileID == 0 {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"base_resp":{"status_code":2013,"status_msg":"file_id is required"}}`)
+			return true
+		}
+		w.Header().Set("Content-Type", "audio/mpeg")
+		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
+		_, _ = w.Write(audio)
+		return true
+	}
+	return false
+}
+
+func TestJSONIDString(t *testing.T) {
+	cases := map[string]string{
+		`12345678901234`:   "12345678901234",
+		`"12345678901234"`: "12345678901234",
+		`"  abc  "`:        "abc",
+		`null`:             "",
+		`""`:               "",
+		`0`:                "0",
+	}
+	for raw, want := range cases {
+		if got := jsonIDString(json.RawMessage(raw)); got != want {
+			t.Fatalf("jsonIDString(%s) = %q, want %q", raw, got, want)
+		}
+	}
 }
 
 // writeSpeechStream mimics MiniMax's SSE stream: one JSON payload per data
@@ -446,13 +582,12 @@ func TestTrimMP3Tags(t *testing.T) {
 	}
 }
 
-func TestCreateSpeechRunsLongTextAsBackgroundJob(t *testing.T) {
+func TestCreateSpeechRunsLongTextAsOneAsyncTask(t *testing.T) {
 	env := newTestEnv(t)
 	upstream := newMockSpeechUpstream(t)
-	env.addChannel(t, "minimax", upstream.server.URL, "minimax", 0, []string{"speech-2.8-hd"}, nil, 0, 0)
+	channel := env.addChannel(t, "minimax", upstream.server.URL, "minimax", 0, []string{"speech-2.8-hd"}, nil, 0, 0)
 
-	text := strings.Repeat("这是一个用于测试长文本后台配音的句子。", 300)
-	wantChunks := len(splitSpeechText(text, speechChunkRunes))
+	text := strings.Repeat("这是一个用于测试长文本异步配音的句子。", 300)
 	clip, err := env.gw.CreateSpeech(context.Background(), SpeechRequest{
 		Model:     "speech-2.8-hd",
 		Text:      text,
@@ -463,72 +598,142 @@ func TestCreateSpeechRunsLongTextAsBackgroundJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create long speech: %v", err)
 	}
-	if clip.Status != "queued" || clip.AudioPath != "" {
-		t.Fatalf("created job = %+v, want queued without audio", clip)
+	if clip.Status != "running" || clip.UpstreamTaskID == "" || clip.AudioPath != "" {
+		t.Fatalf("created contract = %+v, want one running task", clip)
 	}
-	if clip.TotalChunks != wantChunks || clip.Characters != int64(utf8.RuneCountInString(text)) {
-		t.Fatalf("job metadata = %+v, want %d chunks", clip, wantChunks)
+	if clip.TotalChunks != 0 || clip.DoneChunks != 0 || clip.Characters != int64(utf8.RuneCountInString(text)) {
+		t.Fatalf("job metadata = %+v", clip)
 	}
 
 	stored := waitSpeechClip(t, env, clip.ID)
 	if stored.Status != "succeeded" {
 		t.Fatalf("job failed: %s", stored.Error)
 	}
-	if stored.DoneChunks != wantChunks || stored.TotalChunks != wantChunks {
-		t.Fatalf("progress = %d/%d, want %d/%d", stored.DoneChunks, stored.TotalChunks, wantChunks, wantChunks)
+	if stored.UpstreamTaskID != clip.UpstreamTaskID || stored.TotalChunks != 0 || stored.DoneChunks != 0 {
+		t.Fatalf("finished job lost its task identity: %+v", stored)
 	}
-	if stored.AudioPath == "" || stored.SizeBytes == 0 || stored.DurationMS != int64(1234*wantChunks) {
+	if stored.AudioPath == "" || stored.SizeBytes != int64(len(testSpeechAudio)) || stored.DurationMS != 1234 {
 		t.Fatalf("unexpected finished job: %+v", stored)
 	}
-	if stored.Speed != 1.1 || stored.VoiceName != "Expressive Narrator" {
+	if stored.ChannelID != channel.ID || stored.Speed != 1.1 || stored.VoiceName != "Expressive Narrator" {
 		t.Fatalf("job settings were not preserved: %+v", stored)
 	}
 
 	upstream.mu.Lock()
-	bodies := append([]map[string]any(nil), upstream.ttsBodies...)
+	syncCalls := len(upstream.ttsBodies)
 	upstream.mu.Unlock()
-	if len(bodies) != wantChunks {
-		t.Fatalf("tts calls = %d, want %d", len(bodies), wantChunks)
+	upstream.async.mu.Lock()
+	creates := append([]map[string]any(nil), upstream.async.creates...)
+	queries := upstream.async.queries
+	downloads := upstream.async.downloads
+	queriedIDs := append([]string(nil), upstream.async.queriedTaskIDs...)
+	upstream.async.mu.Unlock()
+
+	if syncCalls != 0 {
+		t.Fatalf("long text used %d synchronous t2a calls, want 0", syncCalls)
 	}
-	for index, body := range bodies {
-		chunk, _ := body["text"].(string)
-		if utf8.RuneCountInString(chunk) > speechChunkRunes || strings.TrimSpace(chunk) == "" {
-			t.Fatalf("upstream chunk %d is invalid: %q", index, chunk)
+	if len(creates) != 1 {
+		t.Fatalf("async create calls = %d, want exactly 1", len(creates))
+	}
+	if body := creates[0]; body["model"] != "speech-2.8-hd" || body["text"] != text {
+		t.Fatalf("unexpected async create body: %+v", body)
+	}
+	voice, _ := creates[0]["voice_setting"].(map[string]any)
+	if voice["voice_id"] != "English_expressive_narrator" || voice["speed"] != 1.1 {
+		t.Fatalf("unexpected async voice settings: %+v", voice)
+	}
+	audio, _ := creates[0]["audio_setting"].(map[string]any)
+	if audio["format"] != "mp3" || audio["audio_sample_rate"] != float64(32000) {
+		t.Fatalf("unexpected async audio settings: %+v", audio)
+	}
+	if queries < 2 || downloads != 1 {
+		t.Fatalf("queries = %d, downloads = %d, want at least 2 queries and 1 download", queries, downloads)
+	}
+	for _, id := range queriedIDs {
+		if id != clip.UpstreamTaskID {
+			t.Fatalf("queried task id %q, want %q", id, clip.UpstreamTaskID)
 		}
 	}
 
-	audio, err := os.ReadFile(filepath.Join(env.gw.cfg.DataDir, stored.AudioPath))
+	storedAudio, err := os.ReadFile(filepath.Join(env.gw.cfg.DataDir, stored.AudioPath))
 	if err != nil {
-		t.Fatalf("read merged audio: %v", err)
+		t.Fatalf("read async audio: %v", err)
 	}
-	wantAudio := bytes.Repeat(trimMP3Tags(testSpeechAudio), wantChunks)
-	if !bytes.Equal(audio, wantAudio) {
-		t.Fatalf("merged audio length = %d, want %d", len(audio), len(wantAudio))
+	if !bytes.Equal(storedAudio, testSpeechAudio) {
+		t.Fatalf("stored audio = %q, want the downloaded file", storedAudio)
 	}
 }
 
-func TestSpeechJobFailureIsPersisted(t *testing.T) {
+func TestCreateSpeechRejectsLongTextTask(t *testing.T) {
 	env := newTestEnv(t)
 	upstream := newMockSpeechUpstream(t)
-	upstream.ttsBody = `{"base_resp":{"status_code":2013,"status_msg":"the text was rejected"}}`
+	upstream.async.createCode = http.StatusBadRequest
+	upstream.async.createBody = `{"base_resp":{"status_code":2013,"status_msg":"the long text was rejected"}}`
 	env.addChannel(t, "minimax", upstream.server.URL, "minimax", 0, []string{"speech-2.8-hd"}, nil, 0, 0)
 
-	clip, err := env.gw.CreateSpeech(context.Background(), SpeechRequest{
+	_, err := env.gw.CreateSpeech(context.Background(), SpeechRequest{
 		Model: "speech-2.8-hd", Text: strings.Repeat("长文本。", 1000), VoiceID: "English_Graceful_Lady",
 	})
-	if err != nil {
-		t.Fatalf("create long speech: %v", err)
+	speechErr, ok := err.(*SpeechError)
+	if !ok || speechErr.Status != http.StatusBadRequest {
+		t.Fatalf("error = %v, want 400 SpeechError", err)
 	}
-	stored := waitSpeechClip(t, env, clip.ID)
-	if stored.Status != "failed" || !strings.Contains(stored.Error, "the text was rejected") {
-		t.Fatalf("failed job = %+v", stored)
+	if !strings.Contains(speechErr.Message, "long text was rejected") {
+		t.Fatalf("unexpected message: %q", speechErr.Message)
 	}
-	if stored.AudioPath != "" {
-		t.Fatalf("failed job kept an audio path: %q", stored.AudioPath)
+	upstream.async.mu.Lock()
+	queries := upstream.async.queries
+	upstream.async.mu.Unlock()
+	if queries != 0 {
+		t.Fatalf("rejected task was polled %d times", queries)
 	}
 }
 
-func TestSpeechJobResumesCompletedSegments(t *testing.T) {
+func TestSpeechAsyncTaskResumesAfterRestart(t *testing.T) {
+	env := newTestEnv(t)
+	upstream := newMockSpeechUpstream(t)
+	channel := env.addChannel(t, "minimax", upstream.server.URL, "minimax", 0, []string{"speech-2.8-hd"}, nil, 0, 0)
+	upstream.async.queriesBeforeSuccess = 0
+
+	text := strings.Repeat("这是一段在重启后继续查询的文案。", 200)
+	clip := &store.SpeechClip{
+		ChannelID:      channel.ID,
+		ChannelName:    channel.Name,
+		Model:          "speech-2.8-hd",
+		UpstreamModel:  "speech-2.8-hd",
+		VoiceID:        "English_Graceful_Lady",
+		VoiceName:      "Graceful Lady",
+		Text:           text,
+		Speed:          1,
+		Status:         "running",
+		UpstreamTaskID: "910001",
+		UpstreamFileID: 920001,
+		Characters:     int64(utf8.RuneCountInString(text)),
+	}
+	if err := env.st.CreateSpeechClip(clip); err != nil {
+		t.Fatalf("store running async job: %v", err)
+	}
+
+	env.gw.ResumeSpeechJobs()
+	stored := waitSpeechClip(t, env, clip.ID)
+	if stored.Status != "succeeded" || stored.UpstreamTaskID != "910001" {
+		t.Fatalf("resumed job = %+v", stored)
+	}
+	upstream.async.mu.Lock()
+	creates := len(upstream.async.creates)
+	queries := upstream.async.queries
+	downloads := upstream.async.downloads
+	queriedIDs := append([]string(nil), upstream.async.queriedTaskIDs...)
+	upstream.async.mu.Unlock()
+	if creates != 0 || queries != 1 || downloads != 1 {
+		t.Fatalf("creates=%d queries=%d downloads=%d, want 0/1/1", creates, queries, downloads)
+	}
+	if len(queriedIDs) != 1 || queriedIDs[0] != "910001" {
+		t.Fatalf("queried task ids = %v, want the stored task", queriedIDs)
+	}
+}
+
+func TestLegacyChunkedSpeechJobResumesCompletedSegments(t *testing.T) {
 	env := newTestEnv(t)
 	upstream := newMockSpeechUpstream(t)
 	channel := env.addChannel(t, "minimax", upstream.server.URL, "minimax", 0, []string{"speech-2.8-hd"}, nil, 0, 0)

@@ -25,6 +25,7 @@ type mockVoiceDesignUpstream struct {
 	speechCode   int
 	audio        []byte
 	voiceID      string
+	async        *mockAsyncSpeech
 	server       *httptest.Server
 }
 
@@ -33,8 +34,12 @@ func newMockVoiceDesignUpstream(t *testing.T) *mockVoiceDesignUpstream {
 	m := &mockVoiceDesignUpstream{
 		audio:   testVoiceDesignAudio,
 		voiceID: "ttv-voice-2026010100000000-mock0001",
+		async:   newMockAsyncSpeech(testVoiceDesignAudio),
 	}
 	m.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if m.async.handle(w, r) {
+			return
+		}
 		if r.Header.Get("Authorization") != "Bearer upstream-key" {
 			t.Errorf("unexpected upstream auth: %q", r.Header.Get("Authorization"))
 		}
@@ -361,23 +366,25 @@ func TestDesignedVoiceLongTextJobStaysOnOwnerChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create designed-voice job: %v", err)
 	}
-	if clip.Status != "queued" {
-		t.Fatalf("job = %+v, want queued", clip)
+	if clip.Status != "running" || clip.UpstreamTaskID == "" {
+		t.Fatalf("job = %+v, want one running async task", clip)
 	}
 	stored := waitSpeechClip(t, env, clip.ID)
 	if stored.Status != "succeeded" {
 		t.Fatalf("job failed: %s", stored.Error)
 	}
-	owner.mu.Lock()
-	ownerCalls := len(owner.speechBodies)
-	owner.mu.Unlock()
-	other.mu.Lock()
-	otherCalls := len(other.speechBodies)
-	other.mu.Unlock()
-	if ownerCalls == 0 {
-		t.Fatal("owner channel did not synthesize the job")
+	owner.async.mu.Lock()
+	ownerCalls := len(owner.async.creates)
+	ownerSyncCalls := len(owner.speechBodies)
+	owner.async.mu.Unlock()
+	other.async.mu.Lock()
+	otherCalls := len(other.async.creates)
+	otherSyncCalls := len(other.speechBodies)
+	other.async.mu.Unlock()
+	if ownerCalls == 0 || ownerSyncCalls != 0 {
+		t.Fatalf("owner channel async creates=%d sync calls=%d", ownerCalls, ownerSyncCalls)
 	}
-	if otherCalls != 0 {
+	if otherCalls != 0 || otherSyncCalls != 0 {
 		t.Fatalf("higher-priority channel was used despite the pin: %d calls", otherCalls)
 	}
 }

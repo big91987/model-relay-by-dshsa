@@ -40,6 +40,7 @@ type mockVoiceCloneUpstream struct {
 
 	previewAudio []byte
 	previewCode  int
+	async        *mockAsyncSpeech
 
 	server *httptest.Server
 }
@@ -48,8 +49,12 @@ func newMockVoiceCloneUpstream(t *testing.T) *mockVoiceCloneUpstream {
 	t.Helper()
 	m := &mockVoiceCloneUpstream{
 		previewAudio: testSpeechAudio,
+		async:        newMockAsyncSpeech(testSpeechAudio),
 	}
 	m.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if m.async.handle(w, r) {
+			return
+		}
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/files/upload":
 			if r.Header.Get("Authorization") != "Bearer upstream-key" {
@@ -456,8 +461,8 @@ func TestLongSpeechJobPinsClonedVoiceChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create long speech: %v", err)
 	}
-	if clip.Status != "queued" {
-		t.Fatalf("status = %q, want queued", clip.Status)
+	if clip.Status != "running" || clip.UpstreamTaskID == "" {
+		t.Fatalf("job = %+v, want one running async task", clip)
 	}
 	stored := waitSpeechClip(t, env, clip.ID)
 	if stored.Status != "succeeded" {
@@ -466,14 +471,17 @@ func TestLongSpeechJobPinsClonedVoiceChannel(t *testing.T) {
 	if stored.ChannelID != cloneChannel.ID {
 		t.Fatalf("job channel = %d, want %d", stored.ChannelID, cloneChannel.ID)
 	}
-	preferred.mu.Lock()
-	preferredCalls := len(preferred.ttsBodies)
-	preferred.mu.Unlock()
-	fallback.mu.Lock()
-	fallbackCalls := len(fallback.ttsBodies)
-	fallback.mu.Unlock()
-	if preferredCalls == 0 || fallbackCalls != 0 {
-		t.Fatalf("tts calls preferred=%d fallback=%d", preferredCalls, fallbackCalls)
+	preferred.async.mu.Lock()
+	preferredCreates := len(preferred.async.creates)
+	preferredSyncCalls := len(preferred.ttsBodies)
+	preferred.async.mu.Unlock()
+	fallback.async.mu.Lock()
+	fallbackCreates := len(fallback.async.creates)
+	fallbackSyncCalls := len(fallback.ttsBodies)
+	fallback.async.mu.Unlock()
+	if preferredCreates == 0 || fallbackCreates != 0 || preferredSyncCalls != 0 || fallbackSyncCalls != 0 {
+		t.Fatalf("async creates preferred=%d fallback=%d, sync calls preferred=%d fallback=%d",
+			preferredCreates, fallbackCreates, preferredSyncCalls, fallbackSyncCalls)
 	}
 }
 
