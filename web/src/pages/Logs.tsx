@@ -15,7 +15,7 @@ import {
   percent,
 } from '../lib/format'
 import { useToast } from '../lib/toast'
-import type { LogItem, LogsResponse, Token } from '../lib/types'
+import type { LogItem, LogQuery, LogsResponse, Token } from '../lib/types'
 
 interface Filters {
   model: string
@@ -38,6 +38,20 @@ function describePeriod(filters: Filters): string {
   return 'All time'
 }
 
+function logQuery(filters: Filters): LogQuery {
+  const start = filters.start ? parseLocalDateTime(filters.start) : null
+  const end = filters.end ? parseLocalDateTime(filters.end) : null
+  return {
+    model: filters.model.trim() || undefined,
+    status: filters.status || undefined,
+    request_id: filters.request_id.trim() || undefined,
+    token_id: filters.token_id ? Number(filters.token_id) : undefined,
+    start: start ?? undefined,
+    // The picker has minute precision: include the whole selected end minute.
+    end: end !== null ? end + 59 : undefined,
+  }
+}
+
 export default function Logs() {
   const toast = useToast()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -50,23 +64,12 @@ export default function Logs() {
   const [error, setError] = useState('')
   const [tokens, setTokens] = useState<Token[]>([])
   const [selected, setSelected] = useState<LogItem | null>(null)
+  const [exporting, setExporting] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const start = filters.start ? parseLocalDateTime(filters.start) : null
-      const end = filters.end ? parseLocalDateTime(filters.end) : null
-      const response = await api.logs({
-        page,
-        page_size: pageSize,
-        model: filters.model.trim() || undefined,
-        status: filters.status || undefined,
-        request_id: filters.request_id.trim() || undefined,
-        token_id: filters.token_id ? Number(filters.token_id) : undefined,
-        start: start ?? undefined,
-        // The picker has minute precision: include the whole selected end minute.
-        end: end !== null ? end + 59 : undefined,
-      })
+      const response = await api.logs({ page, page_size: pageSize, ...logQuery(filters) })
       setData(response)
       setError('')
     } catch (err) {
@@ -95,9 +98,21 @@ export default function Logs() {
     setPage(1)
   }, [searchParams, filters.request_id])
 
+  const validateDraft = (): Filters | null => {
+    const next = { ...draft, request_id: draft.request_id.trim() }
+    const start = next.start ? parseLocalDateTime(next.start) : null
+    const end = next.end ? parseLocalDateTime(next.end) : null
+    if (start !== null && end !== null && start > end) {
+      toast.error('The period start must not be after the period end')
+      return null
+    }
+    return next
+  }
+
   const applyFilters = (event: FormEvent) => {
     event.preventDefault()
-    const next = { ...draft, request_id: draft.request_id.trim() }
+    const next = validateDraft()
+    if (!next) return
     setPage(1)
     setFilters(next)
     setSearchParams(next.request_id ? { request_id: next.request_id } : {}, { replace: true })
@@ -119,11 +134,44 @@ export default function Logs() {
     }
   }
 
+  const exportCsv = async () => {
+    const next = validateDraft()
+    if (!next) return
+    setPage(1)
+    setFilters(next)
+    setSearchParams(next.request_id ? { request_id: next.request_id } : {}, { replace: true })
+    setExporting(true)
+    try {
+      const { blob, filename } = await api.exportLogs(logQuery(next))
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+      toast.success(`Exported ${filename}`)
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to export request logs')
+    } finally {
+      setExporting(false)
+    }
+  }
+
   const totalPages = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1
 
   return (
     <div className="page">
-      <PageHeader title="Request logs" subtitle="Every relayed call with tokens, cost, latency and upstream routing." />
+      <PageHeader
+        title="Request logs"
+        subtitle="Every relayed call with tokens, cost, latency and upstream routing. Export the filtered detail as CSV for finance reconciliation."
+        actions={
+          <button className="btn btn-ghost" type="button" onClick={() => void exportCsv()} disabled={exporting}>
+            <Icon name="download" size={16} /> {exporting ? 'Exporting…' : 'Export CSV'}
+          </button>
+        }
+      />
       {error ? <ErrorBanner message={error} /> : null}
 
       <section className="panel filter-panel">
