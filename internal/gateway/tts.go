@@ -248,7 +248,7 @@ func (g *Gateway) CreateSpeech(ctx context.Context, req SpeechRequest) (*store.S
 	if len(candidates) == 0 {
 		message := fmt.Sprintf("model %q is not available on any enabled MiniMax channel", req.Model)
 		if cloneChannelID != 0 {
-			message = fmt.Sprintf("the channel that owns cloned voice %q does not serve model %q", req.VoiceID, req.Model)
+			message = fmt.Sprintf("the channel that owns voice %q does not serve model %q", req.VoiceID, req.Model)
 		}
 		return nil, &SpeechError{Status: http.StatusNotFound, Message: message}
 	}
@@ -303,31 +303,38 @@ func (g *Gateway) speechCandidates(model string) ([]candidate, error) {
 	return out, nil
 }
 
-// speechCandidatesForVoice lists the channels that can serve a model and, for a
-// cloned voice, pins them to the channel that owns the voice. A cloned voice
-// only exists on the MiniMax account that cloned it. The second result is the
-// owning channel id (0 for a system voice).
+// speechCandidatesForVoice lists the channels that can serve a model and, for
+// a custom voice, pins them to the channel that owns the voice. Both cloned and
+// text-designed voices exist only on the MiniMax account that created them. The
+// second result is the owning channel id (0 for a system voice).
 func (g *Gateway) speechCandidatesForVoice(model, voiceID string) ([]candidate, int64, error) {
 	candidates, err := g.speechCandidates(model)
 	if err != nil {
 		return nil, 0, err
 	}
-	var cloneChannelID int64
+	var ownerChannelID int64
 	if clone, cloneErr := g.store.GetVoiceCloneByVoiceID(voiceID); cloneErr == nil {
-		cloneChannelID = clone.ChannelID
+		ownerChannelID = clone.ChannelID
 	} else if !errors.Is(cloneErr, store.ErrNotFound) {
 		return nil, 0, cloneErr
 	}
-	if cloneChannelID == 0 {
+	if ownerChannelID == 0 {
+		if design, designErr := g.store.GetVoiceDesignByVoiceID(voiceID); designErr == nil {
+			ownerChannelID = design.ChannelID
+		} else if !errors.Is(designErr, store.ErrNotFound) {
+			return nil, 0, designErr
+		}
+	}
+	if ownerChannelID == 0 {
 		return candidates, 0, nil
 	}
 	pinned := make([]candidate, 0, len(candidates))
 	for _, cand := range candidates {
-		if cand.channel.ID == cloneChannelID {
+		if cand.channel.ID == ownerChannelID {
 			pinned = append(pinned, cand)
 		}
 	}
-	return pinned, cloneChannelID, nil
+	return pinned, ownerChannelID, nil
 }
 
 // synthesizeSpeech tries each candidate until one returns usable audio. A
@@ -693,7 +700,7 @@ func (g *Gateway) runSpeechJob(id int64) {
 	if len(candidates) == 0 {
 		message := fmt.Sprintf("model %q is not available on any enabled MiniMax channel", clip.Model)
 		if cloneChannelID != 0 {
-			message = fmt.Sprintf("the channel that owns cloned voice %q does not serve model %q", clip.VoiceID, clip.Model)
+			message = fmt.Sprintf("the channel that owns voice %q does not serve model %q", clip.VoiceID, clip.Model)
 		}
 		g.failSpeechJob(clip, message)
 		return

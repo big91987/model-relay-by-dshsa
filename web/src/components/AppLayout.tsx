@@ -12,6 +12,7 @@ const navigation: { to: string; label: string; icon: IconName }[] = [
   { to: '/models', label: 'Models', icon: 'models' },
   { to: '/videos', label: 'Video', icon: 'video' },
   { to: '/speech', label: 'Speech', icon: 'speech' },
+  { to: '/voice-design', label: 'Voice design', icon: 'spark' },
   { to: '/tokens', label: 'API keys', icon: 'key' },
   { to: '/logs', label: 'Logs', icon: 'logs' },
 ]
@@ -23,6 +24,7 @@ const titles: Record<string, string> = {
   '/models': 'Models',
   '/videos': 'Video generation',
   '/speech': 'Text to speech',
+  '/voice-design': 'Voice design',
   '/tokens': 'API keys',
   '/logs': 'Logs',
 }

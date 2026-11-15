@@ -22,6 +22,10 @@ import type {
   VoiceClone,
   VoiceCloneInput,
   VoiceClonesResponse,
+  VoiceDesign,
+  VoiceDesignInput,
+  VoiceDesignsResponse,
+  VoiceDesignSpeechInput,
 } from './types'
 
 export class ApiError extends Error {
@@ -155,6 +159,18 @@ export const api = {
   },
   createSpeech(input: SpeechInput) {
     return request<SpeechClip>('/api/speech', { method: 'POST', ...jsonBody(input) })
+  },
+  speechClip(id: number) {
+    return request<SpeechClip>(`/api/speech/${id}`)
+  },
+  voiceDesigns() {
+    return request<VoiceDesignsResponse>('/api/voice-designs?limit=50')
+  },
+  createVoiceDesign(input: VoiceDesignInput) {
+    return request<VoiceDesign>('/api/voice-designs', { method: 'POST', ...jsonBody(input) })
+  },
+  speakWithVoiceDesign(id: number, input: VoiceDesignSpeechInput) {
+    return request<SpeechClip>(`/api/voice-designs/${id}/speech`, { method: 'POST', ...jsonBody(input) })
   },
   voiceClones() {
     return request<VoiceClonesResponse>('/api/voice-clones')
