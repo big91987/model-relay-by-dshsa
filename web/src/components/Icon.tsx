@@ -6,6 +6,7 @@ export type IconName =
   | 'models'
   | 'video'
   | 'speech'
+  | 'music'
   | 'key'
   | 'logs'
   | 'plus'
@@ -71,6 +72,13 @@ const icons: Record<IconName, ReactNode> = {
   speech: (
     <>
       <path d="M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4" />
+    </>
+  ),
+  music: (
+    <>
+      <path d="M9 18V5l12-2v13" />
+      <circle cx="6" cy="18" r="3" />
+      <circle cx="18" cy="16" r="3" />
     </>
   ),
   mic: (

@@ -6,6 +6,7 @@ PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 19090
 # task: each chunk arrives slowly enough to watch the console progress bar.
 TTS_DELAY_MS = int(os.environ.get("MOCK_TTS_DELAY_MS", "0"))
 MEDIA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
+MUSIC_AUDIO_PATH = os.path.join(MEDIA_DIR, "demo-music.mp3")
 VIDEO_TASKS = {}
 VIDEO_LOCK = threading.Lock()
 VOICE_DESIGNS = {}
@@ -47,6 +48,7 @@ DEEPSEEK_MODELS = ["deepseek-chat", "deepseek-reasoner"]
 SEEDANCE_MODELS = ["doubao-seedance-2-5-260628", "doubao-seedance-2-0-260128",
                    "doubao-seedance-1-0-pro-250528", "doubao-seedance-1-0-pro-fast-251015",
                    "doubao-seedance-1-0-lite-i2v-250428"]
+MUSIC_MODELS = ["music-3.0", "music-2.6", "music-3.0-free", "music-2.6-free"]
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -75,6 +77,8 @@ class Handler(BaseHTTPRequestHandler):
             ids = ANTHROPIC_MODELS
         elif "deepseek" in auth:
             ids = DEEPSEEK_MODELS
+        elif "music" in auth:
+            ids = MUSIC_MODELS
         else:
             ids = OPENAI_MODELS
         self.send_json(200, {"object": "list", "data": [{"id": i, "object": "model", "owned_by": "mock"} for i in ids]})
@@ -106,6 +110,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.voice_clone(body)
         if self.path.endswith("/v1/voice_design"):
             return self.voice_design(body)
+        if self.path.endswith("/v1/music_generation"):
+            return self.create_music(body)
         self.send_json(404, {"error": {"message": "not found"}})
 
     def create_video(self, body):
@@ -212,6 +218,28 @@ class Handler(BaseHTTPRequestHandler):
             payload["error"] = {"code": "OutputVideoSensitiveContentDetected",
                                 "message": "the generated video was blocked by the safety filter"}
         self.send_json(200, payload)
+
+    def create_music(self, body):
+        if self.headers.get("Authorization") != "Bearer music-key":
+            return self.send_json(401, {"base_resp": {"status_code": 1004, "status_msg": "login fail"}})
+        try:
+            with open(MUSIC_AUDIO_PATH, "rb") as handle:
+                audio = handle.read()
+        except OSError:
+            return self.send_json(500, {"base_resp": {"status_code": 1024, "status_msg": "demo music is missing"}})
+        prompt = str(body.get("prompt", ""))
+        if "fail" in prompt.lower():
+            return self.send_json(200, {"base_resp": {"status_code": 2013,
+                                                      "status_msg": "the prompt was rejected by the safety filter"}})
+        sys.stderr.write("mock minimax music: %s (%s)\n" % (body.get("model"), body.get("audio_setting", {}).get("format")))
+        self.send_json(200, {
+            "data": {"audio": audio.hex(), "status": 2},
+            "trace_id": "mock-music-trace",
+            "extra_info": {"music_duration": 18000, "music_sample_rate": 44100, "music_channel": 2,
+                           "bitrate": 128000, "music_size": len(audio)},
+            "analysis_info": None,
+            "base_resp": {"status_code": 0, "status_msg": "success"},
+        })
 
     def get_voice(self):
         if self.headers.get("Authorization") != "Bearer upstream-key":
