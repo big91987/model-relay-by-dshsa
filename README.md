@@ -9,7 +9,7 @@ A self-hosted model gateway written in Go, with a React admin console. It expose
 - **OpenAI-compatible relay** — `POST /v1/chat/completions` (streaming and non-streaming), `POST /v1/embeddings`, `GET /v1/models`.
 - **Two chat upstream protocols** — OpenAI-compatible channels (OpenAI, DeepSeek, Moonshot, Qwen, vLLM, Ollama, …) and Anthropic Messages channels, translated to and from the OpenAI format.
 - **MiniMax-H3 and Seedance video generation** — text-to-video and first-frame image-to-video from the console, with asynchronous tasks, live status, video preview and MP4 download. Supports MiniMax-H3 and ByteDance Seedance on Volcano Ark.
-- **MiniMax text to speech and voice cloning** — choose a system voice or clone a custom one from an authorized sample recording, synthesize up to 50,000 characters of speech, replay and download the audio. Long text runs as a background task with live progress that survives a page refresh or a gateway restart. Voice selection, cloning, generation and history are console-only.
+- **MiniMax text to speech and voice cloning** — choose a system voice or clone a custom one from an authorized sample recording, either uploaded or recorded in the browser, synthesize up to 50,000 characters of speech, replay and download the audio. Long text runs as a background task with live progress that survives a page refresh or a gateway restart. Voice selection, cloning, generation and history are console-only.
 - **Channel routing** — priority first, weighted load balancing inside a priority, public-to-upstream model aliases, and automatic failover on connection errors, `401`, `403`, `404`, `429` and `5xx`.
 - **Upstream model discovery** — fetch the provider's model list in the channel form, tick the models to import, and keep manual entries and public aliases.
 - **Gateway keys** — per-key USD balance, daily spending budget, model allowlists, requests-per-minute, tokens-per-minute and concurrency limits, expiry, enable/disable, and a one-time plaintext reveal at creation.
@@ -129,7 +129,7 @@ The Speech model picker lists public models whose ID starts with `speech-`; an a
 
 **Clone a voice** on the Speech page creates a custom MiniMax voice from a sample recording you are authorized to use:
 
-1. choose an mp3, m4a or wav recording between 10 seconds and 5 minutes and up to 20 MB;
+1. choose an mp3, m4a or wav recording between 10 seconds and 5 minutes and up to 20 MB, or record one in the browser. The browser converts a recording to 16 kHz mono WAV locally, so the provider receives an accepted format without storing the microphone audio anywhere else. Recording needs microphone permission and a secure (HTTPS or localhost) page;
 2. confirm that you have permission to clone the voice, name it and choose a speech model plus a short preview text;
 3. the gateway uploads the sample with `POST /v1/files/upload` (`purpose=voice_clone`), calls `POST /v1/voice_clone` with the returned `file_id` and a generated voice id, and downloads the returned preview audio;
 4. the cloned voice appears under **My cloned voices** in the voice picker. Its preview is stored under `DATA_DIR/voice-clones/` and served through the authenticated `/api/voice-clones/{id}/preview` endpoint, so the provider's temporary preview URL and API key are never exposed;
@@ -193,9 +193,13 @@ Changing `SECRET_KEY` invalidates admin sessions and makes existing channel keys
 | --- | --- |
 | ![Text to speech](docs/screenshots/speech-after.png) | ![Text to speech in light theme](docs/screenshots/speech-light.png) |
 
-| Cloned voices | Clone a voice dialog | Cloned voices (light) |
-| --- | --- | --- |
-| ![Cloned voices on the Speech page](docs/screenshots/voice-clone-after.png) | ![Clone a voice dialog](docs/screenshots/voice-clone-dialog.png) | ![Cloned voices in light theme](docs/screenshots/voice-clone-after-light.png) |
+| Cloned voices | Clone a voice dialog |
+| --- | --- |
+| ![Cloned voices on the Speech page](docs/screenshots/voice-clone-after.png) | ![Clone a voice dialog](docs/screenshots/voice-clone-dialog.png) |
+
+| Record a sample | Cloned voices (light) |
+| --- | --- |
+| ![Recording a sample in the browser](docs/screenshots/voice-clone-recording.png) | ![Cloned voices in light theme](docs/screenshots/voice-clone-after-light.png) |
 
 The **Models** page shows the public catalog, serving channels and the lowest configured price per model. Star the models you use most to keep them in a favorites list, then use **Favorites only** to narrow the catalog; favorites are stored in the browser and survive reloads. The **Playground** page selects an existing gateway key, sends real relay requests, and shows streaming output, latency, token usage and the request ID. Most screenshots use the local mock upstream in `scripts/mock-upstream.py` (`python3 scripts/mock-upstream.py 19090`), so `127.0.0.1` URLs are demo data rather than real providers; the mock also answers MiniMax and Seedance video create/query calls, the MiniMax voice list, T2A calls and the voice-clone upload/clone calls, and serves `scripts/media/demo.mp4` and `scripts/media/demo.mp3` for local previews. The MiniMax and Seedance video screenshots additionally include one real generation each (`MiniMax-H3` and `doubao-seedance-2-0-260128`), and the Playground uses a public Pollinations GPT-OSS endpoint.
 

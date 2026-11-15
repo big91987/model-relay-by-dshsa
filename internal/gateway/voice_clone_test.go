@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -217,6 +218,45 @@ func TestCreateVoiceClone(t *testing.T) {
 	}
 	if body["text"] != previewText || body["model"] != "speech-2.8-hd" {
 		t.Fatalf("clone body = %+v", body)
+	}
+}
+
+func TestCreateVoiceCloneAcceptsWavSample(t *testing.T) {
+	env := newTestEnv(t)
+	upstream := newMockVoiceCloneUpstream(t)
+	env.addChannel(t, "minimax", upstream.server.URL, "minimax", 0, []string{"speech-2.8-hd"}, nil, 0, 0)
+
+	// The browser recorder converts microphone audio to a 16 kHz mono PCM WAV.
+	sample := make([]byte, 44+320)
+	copy(sample[0:], "RIFF")
+	binary.LittleEndian.PutUint32(sample[4:], uint32(len(sample)-8))
+	copy(sample[8:], "WAVE")
+	copy(sample[12:], "fmt ")
+	binary.LittleEndian.PutUint32(sample[16:], 16)
+	binary.LittleEndian.PutUint16(sample[20:], 1)
+	binary.LittleEndian.PutUint16(sample[22:], 1)
+	binary.LittleEndian.PutUint32(sample[24:], 16000)
+	binary.LittleEndian.PutUint32(sample[28:], 32000)
+	binary.LittleEndian.PutUint16(sample[32:], 2)
+	binary.LittleEndian.PutUint16(sample[34:], 16)
+	copy(sample[36:], "data")
+	binary.LittleEndian.PutUint32(sample[40:], uint32(len(sample)-44))
+
+	clone, warning, err := env.gw.CreateVoiceClone(context.Background(), VoiceCloneRequest{
+		Name: "Recorder", FileName: "voice-recording.wav", Sample: sample,
+		Model: "speech-2.8-hd", PreviewText: "Preview", Authorized: true,
+	})
+	if err != nil {
+		t.Fatalf("create voice clone: %v", err)
+	}
+	if warning != "" || clone.SampleFormat != "wav" || clone.SampleBytes != int64(len(sample)) {
+		t.Fatalf("unexpected clone: %+v warning=%q", clone, warning)
+	}
+	upstream.mu.Lock()
+	uploaded := upstream.uploadBytes
+	upstream.mu.Unlock()
+	if string(uploaded) != string(sample) {
+		t.Fatalf("uploaded sample = %d bytes, want %d", len(uploaded), len(sample))
 	}
 }
 
