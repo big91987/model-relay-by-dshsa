@@ -146,6 +146,7 @@ func (s *Store) migrateSQLite() error {
 			priority INTEGER NOT NULL DEFAULT 0,
 			weight INTEGER NOT NULL DEFAULT 1,
 			status TEXT NOT NULL DEFAULT 'enabled',
+			price_mode TEXT NOT NULL DEFAULT 'unset',
 			input_price REAL NOT NULL DEFAULT 0,
 			output_price REAL NOT NULL DEFAULT 0,
 			created_at INTEGER NOT NULL,
@@ -186,6 +187,7 @@ func (s *Store) migrateSQLite() error {
 			reserved_cost REAL NOT NULL DEFAULT 0,
 			cost_status TEXT NOT NULL DEFAULT 'actual',
 			reservation_id TEXT NOT NULL DEFAULT '',
+			billing_attempts TEXT NOT NULL DEFAULT '[]',
 			status TEXT NOT NULL DEFAULT 'success',
 			status_code INTEGER NOT NULL DEFAULT 0,
 			error TEXT NOT NULL DEFAULT '',
@@ -336,10 +338,17 @@ func (s *Store) migrateSQLite() error {
 		{"cost_status", `TEXT NOT NULL DEFAULT 'actual'`},
 		{"reserved_cost", `REAL NOT NULL DEFAULT 0`},
 		{"reservation_id", `TEXT NOT NULL DEFAULT ''`},
+		{"billing_attempts", `TEXT NOT NULL DEFAULT '[]'`},
 	} {
 		if err := s.ensureColumn("logs", column.name, column.definition); err != nil {
 			return fmt.Errorf("migrate database: %w", err)
 		}
+	}
+	if err := s.ensureColumn("channels", "price_mode", `TEXT NOT NULL DEFAULT 'unset'`); err != nil {
+		return fmt.Errorf("migrate database: %w", err)
+	}
+	if _, err := s.db.Exec(`UPDATE channels SET price_mode = 'priced' WHERE price_mode = 'unset' AND (input_price > 0 OR output_price > 0)`); err != nil {
+		return fmt.Errorf("migrate database: %w", err)
 	}
 	for _, column := range []struct{ name, definition string }{
 		{"tpm_limit", `INTEGER NOT NULL DEFAULT 0`},
@@ -397,6 +406,7 @@ func (s *Store) migratePostgres() error {
 			priority BIGINT NOT NULL DEFAULT 0,
 			weight BIGINT NOT NULL DEFAULT 1,
 			status TEXT NOT NULL DEFAULT 'enabled',
+			price_mode TEXT NOT NULL DEFAULT 'unset',
 			input_price DOUBLE PRECISION NOT NULL DEFAULT 0,
 			output_price DOUBLE PRECISION NOT NULL DEFAULT 0,
 			created_at BIGINT NOT NULL,
@@ -437,6 +447,7 @@ func (s *Store) migratePostgres() error {
 			reserved_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
 			cost_status TEXT NOT NULL DEFAULT 'actual',
 			reservation_id TEXT NOT NULL DEFAULT '',
+			billing_attempts TEXT NOT NULL DEFAULT '[]',
 			status TEXT NOT NULL DEFAULT 'success',
 			status_code BIGINT NOT NULL DEFAULT 0,
 			error TEXT NOT NULL DEFAULT '',
@@ -587,6 +598,8 @@ func (s *Store) migratePostgres() error {
 		{"logs", "cost_status", `TEXT NOT NULL DEFAULT 'actual'`},
 		{"logs", "reserved_cost", `DOUBLE PRECISION NOT NULL DEFAULT 0`},
 		{"logs", "reservation_id", `TEXT NOT NULL DEFAULT ''`},
+		{"logs", "billing_attempts", `TEXT NOT NULL DEFAULT '[]'`},
+		{"channels", "price_mode", `TEXT NOT NULL DEFAULT 'unset'`},
 		{"tokens", "tpm_limit", `BIGINT NOT NULL DEFAULT 0`},
 		{"tokens", "max_concurrency", `BIGINT NOT NULL DEFAULT 0`},
 		{"tokens", "daily_quota", `DOUBLE PRECISION NOT NULL DEFAULT 0`},
@@ -603,6 +616,9 @@ func (s *Store) migratePostgres() error {
 		}
 	}
 	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_speech_clips_status ON speech_clips(status)`); err != nil {
+		return fmt.Errorf("migrate postgres database: %w", err)
+	}
+	if _, err := s.db.Exec(`UPDATE channels SET price_mode = 'priced' WHERE price_mode = 'unset' AND (input_price > 0 OR output_price > 0)`); err != nil {
 		return fmt.Errorf("migrate postgres database: %w", err)
 	}
 	return nil
@@ -708,6 +724,15 @@ func scanUser(row *sql.Row) (*User, error) {
 	return &u, nil
 }
 
+// Channel pricing modes. PriceModeUnset means no trustworthy price is
+// configured; PriceModeFree is an explicit zero-cost channel; PriceModePriced
+// means InputPrice/OutputPrice are authoritative.
+const (
+	PriceModeUnset  = "unset"
+	PriceModePriced = "priced"
+	PriceModeFree   = "free"
+)
+
 // Channel is an upstream provider configuration.
 type Channel struct {
 	ID              int64             `json:"id"`
@@ -721,13 +746,14 @@ type Channel struct {
 	Priority        int               `json:"priority"`
 	Weight          int               `json:"weight"`
 	Status          string            `json:"status"`
+	PriceMode       string            `json:"price_mode"`
 	InputPrice      float64           `json:"input_price"`
 	OutputPrice     float64           `json:"output_price"`
 	CreatedAt       int64             `json:"created_at"`
 	UpdatedAt       int64             `json:"updated_at"`
 }
 
-const channelColumns = `id, name, type, base_url, api_key, api_key_hint, models, model_mapping, priority, weight, status, input_price, output_price, created_at, updated_at`
+const channelColumns = `id, name, type, base_url, api_key, api_key_hint, models, model_mapping, priority, weight, status, price_mode, input_price, output_price, created_at, updated_at`
 
 // ListChannels returns all channels ordered by priority and id.
 func (s *Store) ListChannels() ([]Channel, error) {
@@ -761,7 +787,7 @@ func scanChannel(row interface{ Scan(dest ...any) error }) (*Channel, error) {
 	var c Channel
 	var models, mapping string
 	err := row.Scan(&c.ID, &c.Name, &c.Type, &c.BaseURL, &c.APIKeyEncrypted, &c.APIKeyHint,
-		&models, &mapping, &c.Priority, &c.Weight, &c.Status, &c.InputPrice, &c.OutputPrice, &c.CreatedAt, &c.UpdatedAt)
+		&models, &mapping, &c.Priority, &c.Weight, &c.Status, &c.PriceMode, &c.InputPrice, &c.OutputPrice, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -770,24 +796,65 @@ func scanChannel(row interface{ Scan(dest ...any) error }) (*Channel, error) {
 	return &c, nil
 }
 
+// normalizeChannelPricing fills a missing price mode for callers that do not
+// use the admin API (tests, scripts). Any positive price means the channel is
+// priced; an all-zero channel without an explicit mode is unknown, not free.
+func normalizeChannelPricing(c *Channel) {
+	if c.PriceMode == "" {
+		if c.InputPrice > 0 || c.OutputPrice > 0 {
+			c.PriceMode = PriceModePriced
+		} else {
+			c.PriceMode = PriceModeUnset
+		}
+	}
+}
+
+// validateChannelPricing enforces the explicit distinction between an
+// unknown-price channel, a priced channel and an intentionally free one.
+func validateChannelPricing(c *Channel) error {
+	normalizeChannelPricing(c)
+	switch c.PriceMode {
+	case PriceModeUnset:
+		c.InputPrice, c.OutputPrice = 0, 0
+	case PriceModeFree:
+		if c.InputPrice != 0 || c.OutputPrice != 0 {
+			return errors.New("free channels must use zero prices")
+		}
+		c.InputPrice, c.OutputPrice = 0, 0
+	case PriceModePriced:
+		if c.InputPrice == 0 && c.OutputPrice == 0 {
+			return errors.New("priced channels need at least one positive price; mark the channel free for explicit zero cost")
+		}
+	default:
+		return fmt.Errorf("unknown channel price mode %q", c.PriceMode)
+	}
+	return nil
+}
+
 // CreateChannel inserts a channel and sets its id.
 func (s *Store) CreateChannel(c *Channel) error {
+	if err := validateChannelPricing(c); err != nil {
+		return err
+	}
 	now := now()
 	c.CreatedAt, c.UpdatedAt = now, now
 	var err error
-	c.ID, err = s.insertStoreID(`INSERT INTO channels (name, type, base_url, api_key, api_key_hint, models, model_mapping, priority, weight, status, input_price, output_price, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	c.ID, err = s.insertStoreID(`INSERT INTO channels (name, type, base_url, api_key, api_key_hint, models, model_mapping, priority, weight, status, price_mode, input_price, output_price, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.Name, c.Type, c.BaseURL, c.APIKeyEncrypted, c.APIKeyHint, encodeStrings(c.Models), encodeMap(c.ModelMapping),
-		c.Priority, c.Weight, c.Status, c.InputPrice, c.OutputPrice, c.CreatedAt, c.UpdatedAt)
+		c.Priority, c.Weight, c.Status, c.PriceMode, c.InputPrice, c.OutputPrice, c.CreatedAt, c.UpdatedAt)
 	return err
 }
 
 // UpdateChannel persists all mutable channel fields.
 func (s *Store) UpdateChannel(c *Channel) error {
+	if err := validateChannelPricing(c); err != nil {
+		return err
+	}
 	c.UpdatedAt = now()
-	_, err := s.db.Exec(`UPDATE channels SET name=?, type=?, base_url=?, api_key=?, api_key_hint=?, models=?, model_mapping=?, priority=?, weight=?, status=?, input_price=?, output_price=?, updated_at=? WHERE id=?`,
+	_, err := s.db.Exec(`UPDATE channels SET name=?, type=?, base_url=?, api_key=?, api_key_hint=?, models=?, model_mapping=?, priority=?, weight=?, status=?, price_mode=?, input_price=?, output_price=?, updated_at=? WHERE id=?`,
 		c.Name, c.Type, c.BaseURL, c.APIKeyEncrypted, c.APIKeyHint, encodeStrings(c.Models), encodeMap(c.ModelMapping),
-		c.Priority, c.Weight, c.Status, c.InputPrice, c.OutputPrice, c.UpdatedAt, c.ID)
+		c.Priority, c.Weight, c.Status, c.PriceMode, c.InputPrice, c.OutputPrice, c.UpdatedAt, c.ID)
 	return err
 }
 
@@ -972,30 +1039,44 @@ func (s *Store) AddTokenUsage(id int64, cost float64) error {
 	return err
 }
 
-// Log is one relayed request.
-type Log struct {
-	ID               int64   `json:"id"`
-	RequestID        string  `json:"request_id"`
-	ReservationID    string  `json:"reservation_id"`
-	UserID           int64   `json:"user_id"`
-	TokenID          int64   `json:"token_id"`
+// ChargeAttempt is one upstream call that contributed to a request, including
+// a failed failover attempt whose usage was still reported and billed.
+type ChargeAttempt struct {
 	ChannelID        int64   `json:"channel_id"`
-	TokenName        string  `json:"token_name"`
 	ChannelName      string  `json:"channel_name"`
-	Model            string  `json:"model"`
 	UpstreamModel    string  `json:"upstream_model"`
+	StatusCode       int     `json:"status_code"`
 	PromptTokens     int64   `json:"prompt_tokens"`
 	CompletionTokens int64   `json:"completion_tokens"`
-	TotalTokens      int64   `json:"total_tokens"`
 	Cost             float64 `json:"cost"`
-	ReservedCost     float64 `json:"reserved_cost"`
 	CostStatus       string  `json:"cost_status"`
-	Status           string  `json:"status"`
-	StatusCode       int     `json:"status_code"`
-	Error            string  `json:"error"`
-	LatencyMS        int64   `json:"latency_ms"`
-	Stream           bool    `json:"stream"`
-	CreatedAt        int64   `json:"created_at"`
+}
+
+// Log is one relayed request.
+type Log struct {
+	ID               int64           `json:"id"`
+	RequestID        string          `json:"request_id"`
+	ReservationID    string          `json:"reservation_id"`
+	UserID           int64           `json:"user_id"`
+	TokenID          int64           `json:"token_id"`
+	ChannelID        int64           `json:"channel_id"`
+	TokenName        string          `json:"token_name"`
+	ChannelName      string          `json:"channel_name"`
+	Model            string          `json:"model"`
+	UpstreamModel    string          `json:"upstream_model"`
+	PromptTokens     int64           `json:"prompt_tokens"`
+	CompletionTokens int64           `json:"completion_tokens"`
+	TotalTokens      int64           `json:"total_tokens"`
+	Cost             float64         `json:"cost"`
+	ReservedCost     float64         `json:"reserved_cost"`
+	CostStatus       string          `json:"cost_status"`
+	Attempts         []ChargeAttempt `json:"attempts"`
+	Status           string          `json:"status"`
+	StatusCode       int             `json:"status_code"`
+	Error            string          `json:"error"`
+	LatencyMS        int64           `json:"latency_ms"`
+	Stream           bool            `json:"stream"`
+	CreatedAt        int64           `json:"created_at"`
 }
 
 // InsertLog persists a request log entry.
@@ -1008,10 +1089,10 @@ func (s *Store) InsertLog(l *Log) error {
 	}
 	var err error
 	l.ID, err = s.insertStoreID(`INSERT INTO logs (request_id, reservation_id, user_id, token_id, channel_id, token_name, channel_name, model, upstream_model,
-		prompt_tokens, completion_tokens, total_tokens, cost, reserved_cost, cost_status, status, status_code, error, latency_ms, stream, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		prompt_tokens, completion_tokens, total_tokens, cost, reserved_cost, cost_status, billing_attempts, status, status_code, error, latency_ms, stream, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		l.RequestID, l.ReservationID, l.UserID, l.TokenID, l.ChannelID, l.TokenName, l.ChannelName, l.Model, l.UpstreamModel,
-		l.PromptTokens, l.CompletionTokens, l.TotalTokens, l.Cost, l.ReservedCost, l.CostStatus, l.Status, l.StatusCode, l.Error, l.LatencyMS, boolValue(l.Stream), l.CreatedAt)
+		l.PromptTokens, l.CompletionTokens, l.TotalTokens, l.Cost, l.ReservedCost, l.CostStatus, encodeAttempts(l.Attempts), l.Status, l.StatusCode, l.Error, l.LatencyMS, boolValue(l.Stream), l.CreatedAt)
 	return err
 }
 
@@ -1051,7 +1132,7 @@ type LogPage struct {
 
 // logColumns is the column list scanLog expects.
 const logColumns = `id, request_id, reservation_id, user_id, token_id, channel_id, token_name, channel_name, model, upstream_model,
-	prompt_tokens, completion_tokens, total_tokens, cost, reserved_cost, cost_status, status, status_code, error, latency_ms, stream, created_at`
+	prompt_tokens, completion_tokens, total_tokens, cost, reserved_cost, cost_status, billing_attempts, status, status_code, error, latency_ms, stream, created_at`
 
 // logWhere builds the WHERE clause shared by log listing, aggregation and exports.
 func logWhere(f LogFilter) (string, []any) {
@@ -1206,11 +1287,13 @@ func (s *Store) ExportLogs(f LogFilter, fn func(*Log) error) error {
 
 func scanLog(row interface{ Scan(dest ...any) error }) (*Log, error) {
 	var l Log
+	var attempts string
 	err := row.Scan(&l.ID, &l.RequestID, &l.ReservationID, &l.UserID, &l.TokenID, &l.ChannelID, &l.TokenName, &l.ChannelName, &l.Model, &l.UpstreamModel,
-		&l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.Cost, &l.ReservedCost, &l.CostStatus, &l.Status, &l.StatusCode, &l.Error, &l.LatencyMS, &l.Stream, &l.CreatedAt)
+		&l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.Cost, &l.ReservedCost, &l.CostStatus, &attempts, &l.Status, &l.StatusCode, &l.Error, &l.LatencyMS, &l.Stream, &l.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
+	l.Attempts = decodeAttempts(attempts)
 	return &l, nil
 }
 
@@ -1917,6 +2000,22 @@ func (s *Store) totalsSince(start int64) (Totals, error) {
 }
 
 func now() int64 { return time.Now().Unix() }
+
+func encodeAttempts(v []ChargeAttempt) string {
+	if v == nil {
+		v = []ChargeAttempt{}
+	}
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+func decodeAttempts(s string) []ChargeAttempt {
+	var v []ChargeAttempt
+	if err := json.Unmarshal([]byte(s), &v); err != nil || v == nil {
+		return []ChargeAttempt{}
+	}
+	return v
+}
 
 func encodeStrings(v []string) string {
 	if v == nil {

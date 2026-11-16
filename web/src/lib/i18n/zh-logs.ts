@@ -53,6 +53,9 @@ export const zh: Record<string, string> = {
   'Completion tokens': '输出令牌数',
   'Total tokens': '令牌总数',
   'Cost basis': '计费方式',
+  'Upstream attempts': '上游计费尝试',
+  '{count} upstream attempts': '{count} 次上游调用',
+  '—': '—',
   'Reserved for this request': '本次请求预留额度',
   Streaming: '流式传输',
 }

@@ -173,6 +173,14 @@ func (g *Gateway) ChatCompletions(w http.ResponseWriter, r *http.Request, tok *s
 		return
 	}
 
+	if tok.Quota >= 0 {
+		if names := unpricedCandidateNames(candidates); len(names) > 0 {
+			msg := fmt.Sprintf("channel pricing is not configured for %s; set input/output prices or mark the channel explicitly free before using a finite-quota key", strings.Join(names, ", "))
+			writeOpenAIError(w, http.StatusServiceUnavailable, msg, "server_error", "channel_price_not_configured")
+			g.recordFree(tok, requestID, model, payload.Stream, "error", http.StatusServiceUnavailable, msg, started)
+			return
+		}
+	}
 	plan := g.planChatQuota(body, raw, len(payload.Messages), candidates)
 	reservation, err := g.reserveQuota(tok, requestID, model, plan, payload.Stream)
 	if err != nil {
@@ -195,6 +203,7 @@ func (g *Gateway) ChatCompletions(w http.ResponseWriter, r *http.Request, tok *s
 		}
 	}
 
+	attempts := make([]store.ChargeAttempt, 0, len(candidates))
 	var lastErr string
 	var lastStatus int
 	var lastChannel *store.Channel
@@ -205,6 +214,7 @@ func (g *Gateway) ChatCompletions(w http.ResponseWriter, r *http.Request, tok *s
 		lastChannel = &ch
 		apiKey, err := g.secrets.Decrypt(ch.APIKeyEncrypted)
 		if err != nil {
+			attempts = append(attempts, buildAttemptCharge(&ch, cand.upstream, 0, 0, 0, false, false))
 			lastErr = fmt.Sprintf("channel %q: %v", ch.Name, err)
 			continue
 		}
@@ -215,25 +225,29 @@ func (g *Gateway) ChatCompletions(w http.ResponseWriter, r *http.Request, tok *s
 		case "anthropic":
 			out = g.attemptAnthropic(w, r, &ch, apiKey, cand.upstream, raw, promptTokens)
 		default:
+			attempts = append(attempts, buildAttemptCharge(&ch, cand.upstream, 0, 0, 0, false, false))
 			lastErr = fmt.Sprintf("channel %q has unsupported type %q", ch.Name, ch.Type)
 			continue
 		}
 		if out.committed {
+			attempts = append(attempts, buildAttemptCharge(&ch, cand.upstream, http.StatusOK, out.prompt, out.completion, out.usageReported, true))
 			logStatus := "success"
 			if out.errMsg != "" {
 				logStatus = "error"
 			}
-			g.settleRequest(tok, reservation, &ch, cand.upstream, model, payload.Stream, logStatus, http.StatusOK, out.errMsg, out.prompt, out.completion, usageStatus(out.usageReported), started)
+			g.settleAttempts(tok, reservation, attempts, &ch, cand.upstream, model, payload.Stream, logStatus, http.StatusOK, out.errMsg, started)
 			return
 		}
 		if out.ambiguous {
-			g.settleUnverified(w, tok, reservation, &ch, cand.upstream, model, payload.Stream, out.status, out.errMsg, started)
+			g.settleAmbiguous(w, tok, reservation, &ch, cand.upstream, model, payload.Stream, out.status, out.errMsg, started, attempts, plan.bounds[ch.ID])
 			return
 		}
 		if out.status == 0 {
+			attempts = append(attempts, buildAttemptCharge(&ch, cand.upstream, 0, 0, 0, false, false))
 			lastErr = out.errMsg
 			continue
 		}
+		attempts = append(attempts, buildAttemptCharge(&ch, cand.upstream, out.status, out.prompt, out.completion, out.usageReported, out.usageReported))
 		if shouldFailover(out.status) {
 			lastStatus = out.status
 			lastErr = fmt.Sprintf("channel %q returned %d: %s", ch.Name, out.status, out.errMsg)
@@ -245,7 +259,7 @@ func (g *Gateway) ChatCompletions(w http.ResponseWriter, r *http.Request, tok *s
 			msg = http.StatusText(out.status)
 		}
 		writeOpenAIError(w, out.status, msg, "upstream_error", fmt.Sprintf("upstream_status_%d", out.status))
-		g.releaseRequest(tok, reservation, &ch, cand.upstream, model, payload.Stream, "error", out.status, msg, started)
+		g.settleAttempts(tok, reservation, attempts, &ch, cand.upstream, model, payload.Stream, "error", out.status, msg, started)
 		return
 	}
 
@@ -257,7 +271,7 @@ func (g *Gateway) ChatCompletions(w http.ResponseWriter, r *http.Request, tok *s
 	}
 	g.logger.Error("all upstream channels failed", "model", model, "error", lastErr)
 	writeOpenAIError(w, status, msg, "upstream_error", "upstream_unavailable")
-	g.releaseRequest(tok, reservation, lastChannel, "", model, payload.Stream, "error", status, msg, started)
+	g.settleAttempts(tok, reservation, attempts, lastChannel, "", model, payload.Stream, "error", status, msg, started)
 }
 
 // Embeddings handles POST /v1/embeddings (OpenAI-compatible channels only).
@@ -324,12 +338,21 @@ func (g *Gateway) Embeddings(w http.ResponseWriter, r *http.Request, tok *store.
 		g.recordFree(tok, requestID, model, false, "error", http.StatusBadGateway, msg, started)
 		return
 	}
+	if tok.Quota >= 0 {
+		if names := unpricedCandidateNames(candidates); len(names) > 0 {
+			msg := fmt.Sprintf("channel pricing is not configured for %s; set input/output prices or mark the channel explicitly free before using a finite-quota key", strings.Join(names, ", "))
+			writeOpenAIError(w, http.StatusServiceUnavailable, msg, "server_error", "channel_price_not_configured")
+			g.recordFree(tok, requestID, model, false, "error", http.StatusServiceUnavailable, msg, started)
+			return
+		}
+	}
 	plan := g.planEmbeddingQuota(body, candidates)
 	reservation, err := g.reserveQuota(tok, requestID, model, plan, false)
 	if err != nil {
 		g.quotaRejection(w, tok, requestID, model, false, started, err)
 		return
 	}
+	attempts := make([]store.ChargeAttempt, 0, len(candidates))
 	var lastErr string
 	var lastChannel *store.Channel
 	for _, cand := range candidates {
@@ -337,6 +360,7 @@ func (g *Gateway) Embeddings(w http.ResponseWriter, r *http.Request, tok *store.
 		lastChannel = &ch
 		apiKey, err := g.secrets.Decrypt(ch.APIKeyEncrypted)
 		if err != nil {
+			attempts = append(attempts, buildAttemptCharge(&ch, cand.upstream, 0, 0, 0, false, false))
 			lastErr = err.Error()
 			continue
 		}
@@ -346,33 +370,36 @@ func (g *Gateway) Embeddings(w http.ResponseWriter, r *http.Request, tok *store.
 		forwardBody, _ := json.Marshal(raw)
 		req, err := g.upstreamRequest(r.Context(), &ch, http.MethodPost, "/embeddings", forwardBody, apiKey, false, true)
 		if err != nil {
+			attempts = append(attempts, buildAttemptCharge(&ch, cand.upstream, 0, 0, 0, false, false))
 			lastErr = err.Error()
 			continue
 		}
 		resp, err := g.client.Do(req)
 		if err != nil {
 			if transportErrorIsAmbiguous(err) {
-				g.settleUnverified(w, tok, reservation, &ch, cand.upstream, model, false, ambiguityStatus(err), err.Error(), started)
+				g.settleAmbiguous(w, tok, reservation, &ch, cand.upstream, model, false, ambiguityStatus(err), err.Error(), started, attempts, plan.bounds[ch.ID])
 				return
 			}
+			attempts = append(attempts, buildAttemptCharge(&ch, cand.upstream, 0, 0, 0, false, false))
 			lastErr = err.Error()
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			msg := readErrorBody(resp)
+			msg, usage := readErrorBodyAndUsage(resp)
 			resp.Body.Close()
+			attempts = append(attempts, buildAttemptCharge(&ch, cand.upstream, resp.StatusCode, usage.prompt, usage.completion, usage.reported, usage.reported))
 			if shouldFailover(resp.StatusCode) {
 				lastErr = msg
 				continue
 			}
 			writeOpenAIError(w, resp.StatusCode, msg, "upstream_error", "upstream_error")
-			g.releaseRequest(tok, reservation, &ch, cand.upstream, model, false, "error", resp.StatusCode, msg, started)
+			g.settleAttempts(tok, reservation, attempts, &ch, cand.upstream, model, false, "error", resp.StatusCode, msg, started)
 			return
 		}
 		data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 		resp.Body.Close()
 		if err != nil {
-			g.settleUnverified(w, tok, reservation, &ch, cand.upstream, model, false, http.StatusBadGateway, "read upstream response: "+err.Error(), started)
+			g.settleAmbiguous(w, tok, reservation, &ch, cand.upstream, model, false, http.StatusBadGateway, "read upstream response: "+err.Error(), started, attempts, plan.bounds[ch.ID])
 			return
 		}
 		usage := usageFromJSON(data)
@@ -380,10 +407,11 @@ func (g *Gateway) Embeddings(w http.ResponseWriter, r *http.Request, tok *store.
 		if prompt == 0 {
 			prompt = promptEstimate
 		}
+		attempts = append(attempts, buildAttemptCharge(&ch, cand.upstream, resp.StatusCode, prompt, 0, usage.reported, true))
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(data)
-		g.settleRequest(tok, reservation, &ch, cand.upstream, model, false, "success", resp.StatusCode, "", prompt, 0, usageStatus(usage.reported), started)
+		g.settleAttempts(tok, reservation, attempts, &ch, cand.upstream, model, false, "success", resp.StatusCode, "", started)
 		return
 	}
 	status := http.StatusBadGateway
@@ -392,7 +420,7 @@ func (g *Gateway) Embeddings(w http.ResponseWriter, r *http.Request, tok *store.
 		msg = lastErr
 	}
 	writeOpenAIError(w, status, msg, "upstream_error", "upstream_unavailable")
-	g.releaseRequest(tok, reservation, lastChannel, "", model, false, "error", status, msg, started)
+	g.settleAttempts(tok, reservation, attempts, lastChannel, "", model, false, "error", status, msg, started)
 }
 
 // validateEmbeddingInput checks the `input` member of an embeddings request
@@ -589,9 +617,9 @@ func (g *Gateway) attemptOpenAI(w http.ResponseWriter, r *http.Request, ch *stor
 		return outcome{errMsg: err.Error()}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		msg := readErrorBody(resp)
+		msg, usage := readErrorBodyAndUsage(resp)
 		resp.Body.Close()
-		return outcome{status: resp.StatusCode, errMsg: msg}
+		return outcome{status: resp.StatusCode, errMsg: msg, prompt: usage.prompt, completion: usage.completion, usageReported: usage.reported}
 	}
 	if stream {
 		prompt, completion, reported, err := g.streamOpenAI(w, resp, promptTokens, rawModel(raw))
@@ -639,9 +667,9 @@ func (g *Gateway) attemptAnthropic(w http.ResponseWriter, r *http.Request, ch *s
 		return outcome{errMsg: err.Error()}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		msg := readErrorBody(resp)
+		msg, usage := readErrorBodyAndUsage(resp)
 		resp.Body.Close()
-		return outcome{status: resp.StatusCode, errMsg: msg}
+		return outcome{status: resp.StatusCode, errMsg: msg, prompt: usage.prompt, completion: usage.completion, usageReported: usage.reported}
 	}
 	if stream {
 		prompt, completion, reported, err := g.streamAnthropic(w, resp, promptTokens, rawModel(raw))
@@ -759,11 +787,12 @@ func (g *Gateway) recordFree(tok *store.Token, requestID, model string, stream b
 	}
 }
 
-// settleRequest releases the unused reservation and records the charge in one
-// transaction. FinalizeReservation refuses a second settlement, so a duplicate
-// completion notification cannot charge the key twice.
-func (g *Gateway) settleRequest(tok *store.Token, res *store.Reservation, ch *store.Channel, upstream, model string, stream bool, status string, code int, errMsg string, prompt, completion int64, costStatus string, started time.Time) {
-	cost := costFor(ch, prompt, completion)
+// settleAttempts records every upstream attempt that contributed a charge and
+// finalizes the reservation exactly once. Attempts that produced no usage are
+// kept for attribution but carry no cost.
+func (g *Gateway) settleAttempts(tok *store.Token, res *store.Reservation, attempts []store.ChargeAttempt, ch *store.Channel, upstream, model string, stream bool, status string, code int, errMsg string, started time.Time) {
+	prompt, completion, cost := sumAttempts(attempts)
+	costStatus := combineCostStatus(attempts)
 	if cost > res.ReservedCost+1e-9 {
 		g.logger.Warn("settled cost exceeded the reserved upper bound",
 			"request_id", res.RequestID, "cost", cost, "reserved", res.ReservedCost)
@@ -780,6 +809,7 @@ func (g *Gateway) settleRequest(tok *store.Token, res *store.Reservation, ch *st
 		Cost:             cost,
 		ReservedCost:     res.ReservedCost,
 		CostStatus:       costStatus,
+		Attempts:         attempts,
 		Status:           status,
 		StatusCode:       code,
 		Error:            truncate(errMsg, 1000),
@@ -800,17 +830,18 @@ func (g *Gateway) settleRequest(tok *store.Token, res *store.Reservation, ch *st
 		return
 	}
 	// Replace the token reservation made at admission with the real usage so
-	// the TPM window reflects what upstream actually consumed. Do this only
-	// after the reservation settles so a duplicate notification cannot add the
-	// same tokens to the TPM window twice.
+	// the TPM window reflects what every attempt actually consumed. Do this
+	// only after the reservation settles so a duplicate notification cannot
+	// add the same tokens to the TPM window twice.
 	g.limits.Settle(tok.ID, res.RequestID, prompt, completion)
 }
 
-// settleUnverified handles a request that certainly or possibly reached an
-// upstream but whose real usage is unknowable. It charges the reserved upper
-// bound and marks the charge unverified; it never retries another channel
-// because that could bill the same request twice.
-func (g *Gateway) settleUnverified(w http.ResponseWriter, tok *store.Token, res *store.Reservation, ch *store.Channel, upstream, model string, stream bool, code int, errMsg string, started time.Time) {
+// settleAmbiguous handles a request that may have reached an upstream but whose
+// real usage is unknowable. It charges that attempt's own upper bound as
+// unverified and keeps any earlier attributable charges, instead of charging
+// the whole reservation again. It never retries another channel because that
+// could bill the same request twice.
+func (g *Gateway) settleAmbiguous(w http.ResponseWriter, tok *store.Token, res *store.Reservation, ch *store.Channel, upstream, model string, stream bool, code int, errMsg string, started time.Time, attempts []store.ChargeAttempt, bound float64) {
 	msg := strings.TrimSpace(errMsg)
 	if msg == "" {
 		msg = "upstream request outcome is unknown"
@@ -819,63 +850,23 @@ func (g *Gateway) settleUnverified(w http.ResponseWriter, tok *store.Token, res 
 		code = http.StatusBadGateway
 	}
 	writeOpenAIError(w, code, msg, "upstream_error", "upstream_usage_unknown")
-	l := &store.Log{
-		RequestID:     res.RequestID,
-		TokenID:       tok.ID,
-		TokenName:     tok.Name,
-		Model:         model,
+	costStatus := store.CostUnverified
+	switch ch.PriceMode {
+	case store.PriceModeFree:
+		// The charge is known to be zero even though the outcome is unknown.
+		bound, costStatus = 0, store.CostFree
+	case store.PriceModeUnset:
+		bound, costStatus = 0, store.CostUnpriced
+	}
+	attempts = append(attempts, store.ChargeAttempt{
+		ChannelID:     ch.ID,
+		ChannelName:   ch.Name,
 		UpstreamModel: upstream,
-		Cost:          res.ReservedCost,
-		ReservedCost:  res.ReservedCost,
-		CostStatus:    store.CostUnverified,
-		Status:        "error",
 		StatusCode:    code,
-		Error:         truncate(msg, 1000),
-		LatencyMS:     time.Since(started).Milliseconds(),
-		Stream:        stream,
-	}
-	if ch != nil {
-		l.ChannelID = ch.ID
-		l.ChannelName = ch.Name
-	}
-	ok, err := g.store.FinalizeReservation(res.ID, l, res.ReservedCost, store.CostUnverified, false)
-	if err != nil {
-		g.logger.Error("failed to settle unverified request", "request_id", res.RequestID, "error", err)
-		return
-	}
-	if !ok {
-		g.logger.Warn("quota reservation was already finalized", "request_id", res.RequestID)
-	}
-}
-
-// releaseRequest records a request that produced no charge and frees its hold.
-func (g *Gateway) releaseRequest(tok *store.Token, res *store.Reservation, ch *store.Channel, upstream, model string, stream bool, status string, code int, errMsg string, started time.Time) {
-	l := &store.Log{
-		RequestID:     res.RequestID,
-		TokenID:       tok.ID,
-		TokenName:     tok.Name,
-		Model:         model,
-		UpstreamModel: upstream,
-		ReservedCost:  res.ReservedCost,
-		CostStatus:    store.CostFree,
-		Status:        status,
-		StatusCode:    code,
-		Error:         truncate(errMsg, 1000),
-		LatencyMS:     time.Since(started).Milliseconds(),
-		Stream:        stream,
-	}
-	if ch != nil {
-		l.ChannelID = ch.ID
-		l.ChannelName = ch.Name
-	}
-	ok, err := g.store.FinalizeReservation(res.ID, l, 0, store.CostFree, true)
-	if err != nil {
-		g.logger.Error("failed to release quota reservation", "request_id", res.RequestID, "error", err)
-		return
-	}
-	if !ok {
-		g.logger.Warn("quota reservation was already finalized", "request_id", res.RequestID)
-	}
+		Cost:          round6(bound),
+		CostStatus:    costStatus,
+	})
+	g.settleAttempts(tok, res, attempts, ch, upstream, model, stream, "error", code, msg, started)
 }
 
 // quotaRejection answers a request whose quota reservation could not be placed.
@@ -1008,10 +999,19 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func readErrorBody(resp *http.Response) string {
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+	msg, _ := readErrorBodyAndUsage(resp)
+	return msg
+}
+
+// readErrorBodyAndUsage extracts both the provider's error message and any
+// usage block it still reports. Some providers bill a failed call and include
+// the tokens in the error body; that charge must remain attributable.
+func readErrorBodyAndUsage(resp *http.Response) (string, upstreamUsage) {
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	usage := usageFromJSON(data)
 	msg := strings.TrimSpace(string(data))
 	if msg == "" {
-		return http.StatusText(resp.StatusCode)
+		return http.StatusText(resp.StatusCode), usage
 	}
 	var parsed struct {
 		Error struct {
@@ -1019,9 +1019,9 @@ func readErrorBody(resp *http.Response) string {
 		} `json:"error"`
 	}
 	if json.Unmarshal(data, &parsed) == nil && parsed.Error.Message != "" {
-		return parsed.Error.Message
+		return parsed.Error.Message, usage
 	}
-	return truncate(msg, 500)
+	return truncate(msg, 500), usage
 }
 
 func newRequestID() string {

@@ -238,10 +238,26 @@ export default function Models() {
                         </div>
                       </td>
                       <td className="num">
-                        {isMediaModel(model) ? <span className="muted">{t("Not metered")}</span> : formatPrice(model.input_price)}
+                        {isMediaModel(model) ? (
+                          <span className="muted">{t("Not metered")}</span>
+                        ) : model.price_modes?.includes('unset') ? (
+                          <span className="badge badge-danger">{t("Unpriced")}</span>
+                        ) : model.price_modes?.length > 0 && model.price_modes.every((mode) => mode === 'free') ? (
+                          <span className="badge badge-success">{t("Free")}</span>
+                        ) : (
+                          formatPrice(model.input_price)
+                        )}
                       </td>
                       <td className="num">
-                        {isMediaModel(model) ? <span className="muted">{t("Not metered")}</span> : formatPrice(model.output_price)}
+                        {isMediaModel(model) ? (
+                          <span className="muted">{t("Not metered")}</span>
+                        ) : model.price_modes?.includes('unset') ? (
+                          <span className="badge badge-danger">{t("Unpriced")}</span>
+                        ) : model.price_modes?.length > 0 && model.price_modes.every((mode) => mode === 'free') ? (
+                          <span className="badge badge-success">{t("Free")}</span>
+                        ) : (
+                          formatPrice(model.output_price)
+                        )}
                       </td>
                     </tr>
                   )

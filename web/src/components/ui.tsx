@@ -43,6 +43,7 @@ const costStatusLabels: Record<string, string> = {
   actual: t("Actual"),
   estimated: t("Estimated"),
   unverified: t("Unverified"),
+  unpriced: t("Unpriced"),
   free: t("No charge"),
   pending: t("Pending"),
 }
@@ -50,7 +51,7 @@ const costStatusLabels: Record<string, string> = {
 export function CostStatusBadge({ status }: { status: string }) {
   let tone: 'success' | 'danger' | 'muted' = 'muted'
   if (status === 'actual') tone = 'success'
-  if (status === 'unverified') tone = 'danger'
+  if (status === 'unverified' || status === 'unpriced') tone = 'danger'
   const label = costStatusLabels[status] ? t(costStatusLabels[status]) : status
   return (
     <span className={`badge badge-${tone}`}>

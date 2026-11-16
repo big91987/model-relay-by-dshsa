@@ -90,7 +90,7 @@ func openAIUsage(data []byte, promptFallback int64) (prompt, completion int64, r
 	}
 	_ = json.Unmarshal(data, &parsed)
 	prompt, completion = parsed.Usage.PromptTokens, parsed.Usage.CompletionTokens
-	reported = prompt > 0 && completion > 0
+	reported = prompt > 0 || completion > 0
 	if prompt == 0 {
 		prompt = promptFallback
 	}
@@ -220,6 +220,7 @@ func (g *Gateway) streamOpenAI(w http.ResponseWriter, resp *http.Response, promp
 				completion = chunk.Usage.CompletionTokens
 				completionReported = true
 			}
+			reported = promptReported || completionReported
 		}
 		for _, c := range chunk.Choices {
 			content.WriteString(c.Delta.Content)
@@ -267,7 +268,7 @@ func (g *Gateway) streamOpenAI(w http.ResponseWriter, resp *http.Response, promp
 	if completion == 0 {
 		completion = estimateTokens(content.String()) + estimateTokens(toolArgs.String())
 	}
-	reported = promptReported && completionReported
+	reported = promptReported || completionReported
 	return prompt, completion, reported, scanner.Err()
 }
 
@@ -365,7 +366,7 @@ func (g *Gateway) streamOpenAIFallback(w http.ResponseWriter, resp *http.Respons
 		model = "unknown"
 	}
 	usageSource := "upstream"
-	reported := payload.Usage.PromptTokens > 0 && payload.Usage.CompletionTokens > 0
+	reported := payload.Usage.PromptTokens > 0 || payload.Usage.CompletionTokens > 0
 	prompt := payload.Usage.PromptTokens
 	if prompt == 0 {
 		prompt = promptFallback
