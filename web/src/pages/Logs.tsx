@@ -200,6 +200,8 @@ export default function Logs() {
             <option value="">{t('All statuses')}</option>
             <option value="success">{t('Success')}</option>
             <option value="error">{t('Error')}</option>
+            <option value="interrupted">{t('Interrupted')}</option>
+            <option value="cancelled">{t('Cancelled')}</option>
           </select>
           <select
             className="input"
@@ -340,7 +342,7 @@ export default function Logs() {
                 {data.items.map((log) => (
                   <tr
                     key={log.id}
-                    className={`clickable${log.status === 'error' ? ' row-error' : ''}`}
+                    className={`clickable${log.status === 'error' || log.status === 'interrupted' ? ' row-error' : ''}`}
                     onClick={() => setSelected(log)}
                     title={t('Open request detail')}
                   >

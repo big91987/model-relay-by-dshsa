@@ -108,7 +108,7 @@ func (g *Gateway) FetchModels(ctx context.Context, channelType, baseURL, apiKey 
 			return nil, fmt.Errorf("fetch models: %w", err)
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			msg := readErrorBody(resp)
+			msg := readErrorBody(resp, apiKey)
 			resp.Body.Close()
 			return nil, fmt.Errorf("upstream returned %d: %s", resp.StatusCode, msg)
 		}

@@ -149,6 +149,7 @@ export async function streamChatCompletion(options: {
   const decoder = new TextDecoder()
   let buffer = ''
   let finished = false
+  let completed = false
 
   const consume = (block: string): boolean => {
     const payload = block
@@ -158,7 +159,10 @@ export async function streamChatCompletion(options: {
       .join('\n')
       .trim()
     if (!payload) return false
-    if (payload === '[DONE]') return true
+    if (payload === '[DONE]') {
+      completed = true
+      return true
+    }
     let event: Record<string, unknown>
     try {
       event = JSON.parse(payload) as Record<string, unknown>
@@ -168,12 +172,21 @@ export async function streamChatCompletion(options: {
     if (event.error && typeof event.error === 'object') {
       const fields = event.error as Record<string, unknown>
       const message = typeof fields.message === 'string' ? fields.message : 'The upstream returned an error'
-      result.error =
-        fields.code === 'stream_interrupted'
-          ? `Connection interrupted: the upstream stream ended before the response finished. Partial content is shown above. (${message})`
-          : message
+      if (fields.code === 'stream_interrupted' || fields.code === 'stream_incomplete') {
+        result.error = `Connection interrupted: the upstream stream ended before the response finished. Partial content is shown above. (${message})`
+      } else {
+        result.error = message
+      }
     }
-    const delta = (event.choices as { delta?: { content?: unknown } }[] | undefined)?.[0]?.delta?.content
+    const choices = event.choices as
+      | { delta?: { content?: unknown }; finish_reason?: unknown }[]
+      | undefined
+    for (const choice of choices ?? []) {
+      if (typeof choice.finish_reason === 'string' && choice.finish_reason !== '') {
+        completed = true
+      }
+    }
+    const delta = choices?.[0]?.delta?.content
     if (typeof delta === 'string' && delta) {
       result.content += delta
       onDelta(result.content)
@@ -214,10 +227,8 @@ export async function streamChatCompletion(options: {
     result.error = `Connection interrupted: ${error instanceof Error ? error.message : String(error)}`
   }
 
-  if (!finished && !result.error && !signal.aborted) {
-    if (!result.usage) {
-      result.error = 'Connection interrupted: the response ended before completion.'
-    }
+  if (!finished && !completed && !result.error && !signal.aborted) {
+    result.error = 'Connection interrupted: the response ended before completion.'
   }
 
   return result

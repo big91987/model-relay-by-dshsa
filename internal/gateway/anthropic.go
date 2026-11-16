@@ -396,7 +396,7 @@ func anthropicToOpenAI(data []byte, model string, promptFallback int64) ([]byte,
 }
 
 // streamAnthropic translates an Anthropic SSE stream into OpenAI chat completion chunks.
-func (g *Gateway) streamAnthropic(w http.ResponseWriter, resp *http.Response, promptFallback int64, model string) (int64, int64, bool, error) {
+func (g *Gateway) streamAnthropic(w http.ResponseWriter, resp *http.Response, promptFallback int64, model, apiKey string) (int64, int64, bool, error) {
 	defer resp.Body.Close()
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -454,6 +454,9 @@ func (g *Gateway) streamAnthropic(w http.ResponseWriter, resp *http.Response, pr
 	writeUsage := func() error {
 		p, c := prompt, completion
 		source := "upstream"
+		if !(usageInput > 0 && usageOutput > 0) {
+			source = "estimated"
+		}
 		if p == 0 {
 			p = promptFallback
 			source = "estimated"
@@ -590,14 +593,21 @@ func (g *Gateway) streamAnthropic(w http.ResponseWriter, resp *http.Response, pr
 			}
 			done = true
 		case "error":
-			msg := ev.Error.Message
+			msg := redactSensitive(ev.Error.Message, apiKey)
 			if msg == "" {
 				msg = "upstream stream error"
+			}
+			if !usageSent {
+				_ = writeUsage()
+			}
+			code := ev.Error.Type
+			if code == "" {
+				code = "stream_upstream_error"
 			}
 			encoded, _ := json.Marshal(map[string]any{"error": map[string]any{
 				"message": msg,
 				"type":    "upstream_error",
-				"code":    ev.Error.Type,
+				"code":    code,
 			}})
 			_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", encoded)
 			if flusher != nil {
@@ -610,17 +620,22 @@ func (g *Gateway) streamAnthropic(w http.ResponseWriter, resp *http.Response, pr
 			break
 		}
 	}
+	streamErr := scanner.Err()
 	if !done {
-		if streamErr := scanner.Err(); streamErr != nil {
-			_ = writeStreamError(w, "upstream stream interrupted: "+streamErr.Error())
-			_, _ = io.WriteString(w, "data: [DONE]\n\n")
-		} else {
-			_ = writeChunk(map[string]any{}, mapStopReason(stopReason))
-			if !usageSent {
-				_ = writeUsage()
-			}
-			_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		// message_stop is the Anthropic completion marker. A clean EOF without
+		// it is a truncated stream; report it as an interruption and account
+		// for the partial usage already observed.
+		if !usageSent {
+			_ = writeUsage()
 		}
+		code := "stream_incomplete"
+		message := "upstream stream ended before completion"
+		if streamErr != nil {
+			code = "stream_interrupted"
+			message = "upstream stream interrupted: " + streamErr.Error()
+		}
+		_ = writeStreamError(w, code, message)
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -632,11 +647,11 @@ func (g *Gateway) streamAnthropic(w http.ResponseWriter, resp *http.Response, pr
 		completion = estimateTokens(text.String() + toolArgs.String())
 	}
 	reported = usageInput > 0 && usageOutput > 0
-	if err := scanner.Err(); err != nil {
-		return prompt, completion, reported, err
+	if streamErr != nil {
+		return prompt, completion, reported, streamErr
 	}
 	if !done {
-		return prompt, completion, reported, fmt.Errorf("upstream stream ended before message_stop")
+		return prompt, completion, reported, errStreamIncomplete
 	}
 	return prompt, completion, reported, nil
 }

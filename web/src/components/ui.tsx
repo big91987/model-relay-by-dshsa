@@ -29,7 +29,7 @@ export function Spinner({ size = 16 }: { size?: number }) {
 export function StatusBadge({ status }: { status: string }) {
   let tone: 'success' | 'danger' | 'muted' = 'muted'
   if (status === 'success' || status === 'enabled' || status === 'active') tone = 'success'
-  if (status === 'error' || status === 'disabled') tone = 'danger'
+  if (status === 'error' || status === 'disabled' || status === 'interrupted') tone = 'danger'
   const label = t(status ? status.charAt(0).toUpperCase() + status.slice(1) : "Unknown")
   return (
     <span className={`badge badge-${tone}`}>
