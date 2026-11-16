@@ -127,6 +127,9 @@ type mockAsyncSpeech struct {
 	createCode           int
 	createBody           string
 	audio                []byte
+	downloadBodies       [][]byte
+	downloadTypes        []string
+	downloadContentType  string
 	taskID               int64
 	fileID               int64
 	queriesBeforeSuccess int
@@ -215,13 +218,25 @@ func (m *mockAsyncSpeech) handle(w http.ResponseWriter, r *http.Request) bool {
 		m.mu.Lock()
 		m.downloads++
 		audio := m.audio
+		contentType := m.downloadContentType
+		if contentType == "" {
+			contentType = "audio/mpeg"
+		}
+		if len(m.downloadBodies) > 0 {
+			audio = m.downloadBodies[0]
+			m.downloadBodies = m.downloadBodies[1:]
+		}
+		if len(m.downloadTypes) > 0 {
+			contentType = m.downloadTypes[0]
+			m.downloadTypes = m.downloadTypes[1:]
+		}
 		m.mu.Unlock()
 		if fileID == 0 {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"base_resp":{"status_code":2013,"status_msg":"file_id is required"}}`)
 			return true
 		}
-		w.Header().Set("Content-Type", "audio/mpeg")
+		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Content-Length", strconv.Itoa(len(audio)))
 		_, _ = w.Write(audio)
 		return true

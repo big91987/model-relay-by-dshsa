@@ -38,6 +38,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 	cfg := &config.Config{SecretKey: "test-secret", DataDir: t.TempDir(), SpeechPollInterval: 10 * time.Millisecond}
 	gw := New(cfg, st, cipher, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	gw.speechRetryDelay = 0
 	_, prefix, hash, _ := auth.GenerateAPIKey()
 	token := &store.Token{
 		UserID: 1, Name: "test-key", KeyHash: hash, KeyPrefix: prefix,
