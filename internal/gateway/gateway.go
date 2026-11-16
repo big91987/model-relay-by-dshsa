@@ -111,6 +111,8 @@ type openAIChatPayload struct {
 type outcome struct {
 	committed     bool
 	ambiguous     bool
+	canceled      bool
+	interrupted   bool
 	status        int
 	prompt        int64
 	completion    int64
@@ -218,9 +220,18 @@ func (g *Gateway) ChatCompletions(w http.ResponseWriter, r *http.Request, tok *s
 			lastErr = fmt.Sprintf("channel %q has unsupported type %q", ch.Name, ch.Type)
 			continue
 		}
+		// The channel key is available only here; redact it and any
+		// credential-shaped text before the message can reach a response,
+		// request log or server log.
+		out.errMsg = redactSensitive(out.errMsg, apiKey)
 		if out.committed {
 			logStatus := "success"
-			if out.errMsg != "" {
+			switch {
+			case out.canceled:
+				logStatus = "cancelled"
+			case out.interrupted:
+				logStatus = "interrupted"
+			case out.errMsg != "":
 				logStatus = "error"
 			}
 			g.settleRequest(tok, reservation, &ch, cand.upstream, model, payload.Stream, logStatus, http.StatusOK, out.errMsg, out.prompt, out.completion, usageStatus(out.usageReported), started)
@@ -359,7 +370,7 @@ func (g *Gateway) Embeddings(w http.ResponseWriter, r *http.Request, tok *store.
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			msg := readErrorBody(resp)
+			msg := readErrorBody(resp, apiKey)
 			resp.Body.Close()
 			if shouldFailover(resp.StatusCode) {
 				lastErr = msg
@@ -551,7 +562,7 @@ func (g *Gateway) TestChannel(ctx context.Context, ch *store.Channel, model stri
 		return TestResult{LatencyMS: latency, Message: err.Error()}
 	}
 	defer resp.Body.Close()
-	excerpt := readErrorBody(resp)
+	excerpt := readErrorBody(resp, apiKey)
 	message := strings.TrimSpace(excerpt)
 	if message == "" {
 		message = http.StatusText(resp.StatusCode)
@@ -589,18 +600,19 @@ func (g *Gateway) attemptOpenAI(w http.ResponseWriter, r *http.Request, ch *stor
 		return outcome{errMsg: err.Error()}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		msg := readErrorBody(resp)
+		msg := readErrorBody(resp, apiKey)
 		resp.Body.Close()
 		return outcome{status: resp.StatusCode, errMsg: msg}
 	}
 	if stream {
-		prompt, completion, reported, err := g.streamOpenAI(w, resp, promptTokens, rawModel(raw))
+		prompt, completion, reported, err := g.streamOpenAI(w, resp, promptTokens, rawModel(raw), apiKey)
 		if err != nil {
 			var preCommit *streamStartError
 			if errors.As(err, &preCommit) {
 				return outcome{ambiguous: true, status: http.StatusBadGateway, errMsg: err.Error()}
 			}
-			return outcome{committed: true, status: http.StatusOK, prompt: prompt, completion: completion, usageReported: reported, errMsg: "stream interrupted: " + err.Error()}
+			msg, canceled := streamFailureMessage(r, err)
+			return outcome{committed: true, status: http.StatusOK, prompt: prompt, completion: completion, usageReported: reported, errMsg: redactSensitive(msg, apiKey), canceled: canceled, interrupted: !canceled}
 		}
 		return outcome{committed: true, status: http.StatusOK, prompt: prompt, completion: completion, usageReported: reported}
 	}
@@ -611,6 +623,12 @@ func (g *Gateway) attemptOpenAI(w http.ResponseWriter, r *http.Request, ch *stor
 		// read. Usage is unknowable; do not retry another channel and risk a
 		// second real charge.
 		return outcome{ambiguous: true, status: http.StatusBadGateway, errMsg: "read upstream response: " + err.Error()}
+	}
+	// A 2xx response can still be an error document. Do not forward it as a
+	// successful completion or persist its raw (possibly credential-bearing)
+	// body.
+	if msg, isError := upstreamErrorMessage(data, apiKey); isError {
+		return outcome{status: http.StatusBadGateway, errMsg: msg}
 	}
 	prompt, completion, reported := openAIUsage(data, promptTokens)
 	w.Header().Set("Content-Type", "application/json")
@@ -639,14 +657,15 @@ func (g *Gateway) attemptAnthropic(w http.ResponseWriter, r *http.Request, ch *s
 		return outcome{errMsg: err.Error()}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		msg := readErrorBody(resp)
+		msg := readErrorBody(resp, apiKey)
 		resp.Body.Close()
 		return outcome{status: resp.StatusCode, errMsg: msg}
 	}
 	if stream {
-		prompt, completion, reported, err := g.streamAnthropic(w, resp, promptTokens, rawModel(raw))
+		prompt, completion, reported, err := g.streamAnthropic(w, resp, promptTokens, rawModel(raw), apiKey)
 		if err != nil {
-			return outcome{committed: true, status: http.StatusOK, prompt: prompt, completion: completion, usageReported: reported, errMsg: "stream interrupted: " + err.Error()}
+			msg, canceled := streamFailureMessage(r, err)
+			return outcome{committed: true, status: http.StatusOK, prompt: prompt, completion: completion, usageReported: reported, errMsg: redactSensitive(msg, apiKey), canceled: canceled, interrupted: !canceled}
 		}
 		return outcome{committed: true, status: http.StatusOK, prompt: prompt, completion: completion, usageReported: reported}
 	}
@@ -747,7 +766,7 @@ func (g *Gateway) recordFree(tok *store.Token, requestID, model string, stream b
 		CostStatus: store.CostFree,
 		Status:     status,
 		StatusCode: code,
-		Error:      truncate(errMsg, 1000),
+		Error:      truncate(redactSensitive(errMsg), 1000),
 		LatencyMS:  time.Since(started).Milliseconds(),
 		Stream:     stream,
 	}
@@ -782,7 +801,7 @@ func (g *Gateway) settleRequest(tok *store.Token, res *store.Reservation, ch *st
 		CostStatus:       costStatus,
 		Status:           status,
 		StatusCode:       code,
-		Error:            truncate(errMsg, 1000),
+		Error:            truncate(redactSensitive(errMsg), 1000),
 		LatencyMS:        time.Since(started).Milliseconds(),
 		Stream:           stream,
 	}
@@ -811,7 +830,7 @@ func (g *Gateway) settleRequest(tok *store.Token, res *store.Reservation, ch *st
 // bound and marks the charge unverified; it never retries another channel
 // because that could bill the same request twice.
 func (g *Gateway) settleUnverified(w http.ResponseWriter, tok *store.Token, res *store.Reservation, ch *store.Channel, upstream, model string, stream bool, code int, errMsg string, started time.Time) {
-	msg := strings.TrimSpace(errMsg)
+	msg := redactSensitive(strings.TrimSpace(errMsg))
 	if msg == "" {
 		msg = "upstream request outcome is unknown"
 	}
@@ -830,7 +849,7 @@ func (g *Gateway) settleUnverified(w http.ResponseWriter, tok *store.Token, res 
 		CostStatus:    store.CostUnverified,
 		Status:        "error",
 		StatusCode:    code,
-		Error:         truncate(msg, 1000),
+		Error:         truncate(redactSensitive(msg), 1000),
 		LatencyMS:     time.Since(started).Milliseconds(),
 		Stream:        stream,
 	}
@@ -860,7 +879,7 @@ func (g *Gateway) releaseRequest(tok *store.Token, res *store.Reservation, ch *s
 		CostStatus:    store.CostFree,
 		Status:        status,
 		StatusCode:    code,
-		Error:         truncate(errMsg, 1000),
+		Error:         truncate(redactSensitive(errMsg), 1000),
 		LatencyMS:     time.Since(started).Milliseconds(),
 		Stream:        stream,
 	}
@@ -1007,11 +1026,33 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func readErrorBody(resp *http.Response) string {
+// upstreamErrorMessage recognizes an error document returned with a 2xx
+// status. The message is redacted before it can reach a response or log.
+func upstreamErrorMessage(data []byte, secrets ...string) (string, bool) {
+	var envelope struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal(data, &envelope) != nil || len(envelope.Error) == 0 || string(envelope.Error) == "null" {
+		return "", false
+	}
+	var object struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(envelope.Error, &object) == nil && object.Message != "" {
+		return redactSensitive(object.Message, secrets...), true
+	}
+	var text string
+	if json.Unmarshal(envelope.Error, &text) == nil && text != "" {
+		return redactSensitive(text, secrets...), true
+	}
+	return "upstream returned an error", true
+}
+
+func readErrorBody(resp *http.Response, secrets ...string) string {
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 	msg := strings.TrimSpace(string(data))
 	if msg == "" {
-		return http.StatusText(resp.StatusCode)
+		return redactSensitive(http.StatusText(resp.StatusCode), secrets...)
 	}
 	var parsed struct {
 		Error struct {
@@ -1019,9 +1060,19 @@ func readErrorBody(resp *http.Response) string {
 		} `json:"error"`
 	}
 	if json.Unmarshal(data, &parsed) == nil && parsed.Error.Message != "" {
-		return parsed.Error.Message
+		return redactSensitive(parsed.Error.Message, secrets...)
 	}
-	return truncate(msg, 500)
+	return redactSensitive(truncate(msg, 500), secrets...)
+}
+
+// streamFailureMessage classifies a stream error. A client disconnect is a
+// cancellation (the page stopped generation); every other post-header stream
+// error is an interruption, including a clean EOF without a completion marker.
+func streamFailureMessage(r *http.Request, err error) (string, bool) {
+	if r.Context().Err() == context.Canceled {
+		return "client cancelled the request", true
+	}
+	return "stream interrupted: " + err.Error(), false
 }
 
 func newRequestID() string {

@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ type testEnv struct {
 	st     *store.Store
 	cipher *secretbox.Cipher
 	token  *store.Token
+	logBuf *bytes.Buffer
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -37,7 +39,8 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatalf("cipher: %v", err)
 	}
 	cfg := &config.Config{SecretKey: "test-secret", DataDir: t.TempDir(), SpeechPollInterval: 10 * time.Millisecond}
-	gw := New(cfg, st, cipher, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	logBuf := &bytes.Buffer{}
+	gw := New(cfg, st, cipher, slog.New(slog.NewTextHandler(logBuf, nil)))
 	_, prefix, hash, _ := auth.GenerateAPIKey()
 	token := &store.Token{
 		UserID: 1, Name: "test-key", KeyHash: hash, KeyPrefix: prefix,
@@ -46,12 +49,17 @@ func newTestEnv(t *testing.T) *testEnv {
 	if err := st.CreateToken(token); err != nil {
 		t.Fatalf("create token: %v", err)
 	}
-	return &testEnv{gw: gw, st: st, cipher: cipher, token: token}
+	return &testEnv{gw: gw, st: st, cipher: cipher, token: token, logBuf: logBuf}
 }
 
 func (e *testEnv) addChannel(t *testing.T, name, baseURL, typ string, priority int, models []string, mapping map[string]string, inputPrice, outputPrice float64) *store.Channel {
 	t.Helper()
-	encrypted, err := e.cipher.Encrypt("upstream-key")
+	return e.addChannelWithKey(t, name, baseURL, typ, priority, models, mapping, inputPrice, outputPrice, "upstream-key")
+}
+
+func (e *testEnv) addChannelWithKey(t *testing.T, name, baseURL, typ string, priority int, models []string, mapping map[string]string, inputPrice, outputPrice float64, key string) *store.Channel {
+	t.Helper()
+	encrypted, err := e.cipher.Encrypt(key)
 	if err != nil {
 		t.Fatalf("encrypt key: %v", err)
 	}
@@ -268,8 +276,11 @@ func TestChatCompletionsStreamInterrupted(t *testing.T) {
 		t.Fatalf("interrupted stream must send an explicit error and [DONE]: %s", body)
 	}
 	logs := env.logs(t)
-	if len(logs) != 1 || logs[0].Status != "error" || !strings.Contains(logs[0].Error, "stream interrupted") {
+	if len(logs) != 1 || logs[0].Status != "interrupted" || !strings.Contains(logs[0].Error, "stream interrupted") {
 		t.Fatalf("unexpected logs: %+v", logs)
+	}
+	if logs[0].CompletionTokens == 0 {
+		t.Fatalf("interrupted stream must account for partial usage: %+v", logs[0])
 	}
 }
 

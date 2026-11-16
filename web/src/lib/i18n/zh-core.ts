@@ -8,6 +8,7 @@ export const zh: Record<string, string> = {
   Success: '成功',
   Succeeded: '已完成',
   Error: '错误',
+  Interrupted: '已中断',
   Failed: '失败',
   Queued: '排队中',
   Running: '运行中',

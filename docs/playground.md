@@ -163,6 +163,28 @@ Message order, role labels, the serving model and the replies' Markdown formatti
 
 Both pairs use a 1440×1000 browser viewport, the dark console theme, the same clean demo data and the same admin account. The Playground was also captured in light theme after switching the top-bar control; see [Playground in light theme](screenshots/playground-light.png) and [the matching light request log](screenshots/playground-logs-light.png).
 
+## Error redaction and stream finalization
+
+Upstream error text is untrusted and can contain the channel credential. The gateway redacts the current channel key, `Bearer` tokens and credential-shaped `api_key` / `authorization` fields before it writes the message to the Playground, the admin request log or the server log. The redacted value is shown as `[REDACTED]`; the channel credential is never persisted in the request log.
+
+A stream is successful only when the upstream sent a completion marker: `data: [DONE]` or a non-empty `finish_reason` for OpenAI-compatible channels, and `message_stop` for Anthropic. A clean EOF without that marker is an interruption, not a success. Client cancellation is recorded separately. The request-log statuses are now:
+
+- `success`: the stream completed; usage is actual or estimated.
+- `interrupted`: the stream ended before a completion marker, or the upstream/network broke; partial usage is still recorded.
+- `cancelled`: the browser stopped the request; partial usage is still recorded.
+- `error`: the request failed before a stream was committed, or an upstream request failed.
+
+The Playground shows an explicit error for an interrupted stream and keeps the partial text and estimated usage; a user stop still shows the stopped note. The Logs page exposes the `Interrupted` and `Cancelled` filters and badges.
+
+### Before/after evidence
+
+Both captures use the same controlled upstream, a 1440×1000 dark-theme viewport, one delta followed by a clean EOF with no completion marker.
+
+- **Before** (`7aec108`, main): the page showed the partial text as a completed answer; the request log was `Success` with 31 estimated tokens.
+- **After** (this branch): the page shows `Connection interrupted` and keeps the 31-token estimate; the request log is `Interrupted`. [Before page](screenshots/playground-error-before.png) / [After page](screenshots/playground-error-after.png), [Before log](screenshots/playground-error-log-before.png) / [After log](screenshots/playground-error-log-after.png).
+
+Cancellation was verified after the fix: the log shows `Cancelled` and 31 estimated tokens; see [cancelled log](screenshots/playground-cancel-log-after.png). A stream with `finish_reason: stop` but no `[DONE]` still completes successfully; a real controlled error frame and a non-streaming HTTP 400 were both verified to contain `[REDACTED]` in the page/API response, request log and server log.
+
 ## Known limitations
 
 - A stopped generation is not guaranteed to be free; upstreams may bill tokens produced before cancellation. The UI says so explicitly.
