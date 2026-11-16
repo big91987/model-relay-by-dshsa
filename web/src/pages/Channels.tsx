@@ -5,7 +5,7 @@ import { EmptyState, ErrorBanner, FormField, PageHeader, Spinner, StatusBadge } 
 import { api } from '../lib/api'
 import { channelTypeLabel } from '../lib/format'
 import { useToast } from '../lib/toast'
-import type { Channel, ChannelInput, ChannelStatus, ChannelType, UpstreamModelsInput } from '../lib/types'
+import type { Channel, ChannelInput, ChannelStatus, ChannelType, PriceMode, UpstreamModelsInput } from '../lib/types'
 import { t } from '../lib/i18n'
 
 interface ChannelFormState {
@@ -18,6 +18,7 @@ interface ChannelFormState {
   priority: string
   weight: string
   status: ChannelStatus
+  price_mode: PriceMode
   input_price: string
   output_price: string
 }
@@ -32,6 +33,7 @@ const emptyForm: ChannelFormState = {
   priority: '0',
   weight: '1',
   status: 'enabled',
+  price_mode: 'unset',
   input_price: '0',
   output_price: '0',
 }
@@ -53,6 +55,7 @@ function toForm(channel: Channel): ChannelFormState {
     priority: String(channel.priority),
     weight: String(channel.weight),
     status: channel.status,
+    price_mode: channel.price_mode ?? (channel.input_price > 0 || channel.output_price > 0 ? 'priced' : 'unset'),
     input_price: String(channel.input_price),
     output_price: String(channel.output_price),
   }
@@ -89,8 +92,9 @@ function toPayload(form: ChannelFormState): ChannelInput {
     priority: Number.parseInt(form.priority, 10) || 0,
     weight: Math.max(1, Number.parseInt(form.weight, 10) || 1),
     status: form.status,
-    input_price: Number.parseFloat(form.input_price) || 0,
-    output_price: Number.parseFloat(form.output_price) || 0,
+    price_mode: form.price_mode,
+    input_price: form.price_mode === 'priced' ? Number.parseFloat(form.input_price) || 0 : 0,
+    output_price: form.price_mode === 'priced' ? Number.parseFloat(form.output_price) || 0 : 0,
   }
   if (form.api_key.trim()) payload.api_key = form.api_key.trim()
   return payload
@@ -388,6 +392,10 @@ export default function Channels() {
                       <td>
                         {isMediaProtocol(channel.type) ? (
                           <span className="muted">{t("Not metered")}</span>
+                        ) : channel.price_mode === 'free' ? (
+                          <span className="badge badge-success">{t("Free")}</span>
+                        ) : channel.price_mode === 'unset' ? (
+                          <span className="badge badge-danger">{t("Unpriced")}</span>
                         ) : (
                           <div className="price-cell">
                             <span>${channel.input_price.toFixed(2)}</span>
@@ -693,28 +701,46 @@ export default function Channels() {
           </FormField>
           {!isMediaProtocol(form.type) ? (
             <>
-              <FormField label={t("Input price")} htmlFor="channel-input-price" hint={t("USD per 1M prompt tokens.")}>
-                <input
-                  id="channel-input-price"
+              <FormField
+                label={t("Price mode")}
+                hint={t("Unknown pricing rejects finite-quota keys; choose Free only when the channel is intentionally zero-cost.")}
+              >
+                <select
                   className="input"
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={form.input_price}
-                  onChange={(event) => setField('input_price', event.target.value)}
-                />
+                  value={form.price_mode}
+                  onChange={(event) => setField('price_mode', event.target.value as PriceMode)}
+                >
+                  <option value="unset">{t("Unpriced (finite-quota keys rejected)")}</option>
+                  <option value="priced">{t("Price per 1M tokens")}</option>
+                  <option value="free">{t("Explicitly free")}</option>
+                </select>
               </FormField>
-              <FormField label={t("Output price")} htmlFor="channel-output-price" hint={t("USD per 1M completion tokens.")}>
-                <input
-                  id="channel-output-price"
-                  className="input"
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={form.output_price}
-                  onChange={(event) => setField('output_price', event.target.value)}
-                />
-              </FormField>
+              {form.price_mode === 'priced' ? (
+                <>
+                  <FormField label={t("Input price")} htmlFor="channel-input-price" hint={t("USD per 1M prompt tokens.")}>
+                    <input
+                      id="channel-input-price"
+                      className="input"
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      value={form.input_price}
+                      onChange={(event) => setField('input_price', event.target.value)}
+                    />
+                  </FormField>
+                  <FormField label={t("Output price")} htmlFor="channel-output-price" hint={t("USD per 1M completion tokens.")}>
+                    <input
+                      id="channel-output-price"
+                      className="input"
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      value={form.output_price}
+                      onChange={(event) => setField('output_price', event.target.value)}
+                    />
+                  </FormField>
+                </>
+              ) : null}
             </>
           ) : null}
           <FormField label={t("Status")}>

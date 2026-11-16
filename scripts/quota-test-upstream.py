@@ -8,6 +8,8 @@ Model names select deterministic behaviour:
   no-usage-model        200 JSON without a usage block
   stream-break-model    SSE with one delta and no finish marker / [DONE]
   fail-model            always HTTP 500
+  fail-usage-model      HTTP 500 while reporting 3 completion tokens
+  usage-6-model         200 JSON with 0 prompt / 6 completion tokens
   slow-model            sleeps --slow-seconds, then behaves like ok-model
   embed-model           embeddings with usage.prompt_tokens = 10
 """
@@ -52,6 +54,15 @@ class Handler(BaseHTTPRequestHandler):
         model = body.get("model", "unknown")
         if model == "fail-model":
             self.send_json(500, {"error": {"message": "controlled upstream failure"}})
+            return
+        if model == "fail-usage-model":
+            self.send_json(500, {
+                "error": {"message": "controlled upstream failure with billed usage"},
+                "usage": {"prompt_tokens": 0, "completion_tokens": 3, "total_tokens": 3},
+            })
+            return
+        if model == "usage-6-model":
+            self.send_json(200, self.completion(model, prompt=0, completion=6))
             return
         if model == "slow-model":
             time.sleep(ARGS.slow_seconds)

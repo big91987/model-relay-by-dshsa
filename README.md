@@ -320,7 +320,7 @@ The reservation is created atomically in the configured database before the requ
 
 - Prompt tokens: the request body's byte length plus chat framing overhead. A token never encodes fewer than one byte, so this is a true upper bound (conservative for text and image payloads).
 - Completion tokens: the client's `max_tokens`/`max_completion_tokens` (the larger one) multiplied by `n`. When the client omits a limit and the key has a finite quota, the gateway injects `max_tokens = QUOTA_DEFAULT_OUTPUT_TOKENS` so the upstream cannot generate more than was reserved.
-- Price: the highest input/output price among the candidate channels, so a failover to a more expensive channel stays covered.
+- Price: the sum of every candidate's own upper bound, because a failover can bill more than one attempt. Explicitly free channels contribute zero; a finite-quota key is rejected before the upstream call if any candidate still has unknown pricing.
 
 If the upper bound does not fit in the available balance, the request is rejected with HTTP `429`, `type: insufficient_quota`, and a message stating the required and available amounts. Requests are never serialized globally; unrelated keys and requests that fit their own balance proceed concurrently.
 
@@ -330,15 +330,17 @@ Every reservation is finalized exactly once, in one database transaction that up
 | --- | --- |
 | `actual` | Upstream reported token usage; cost is computed from it. |
 | `estimated` | Upstream omitted usage; cost is computed from locally counted request/response text. |
-| `unverified` | Real usage is unknown after a timeout, cancellation, restart or a 2xx response whose body could not be read. The reserved upper bound is charged and surfaced for review. |
-| `free` | No upstream usage was possible (rejected before the call, dial/DNS failure) or the upstream rejected the request before generation. No charge. |
+| `unverified` | Real usage is unknown after a timeout, cancellation, restart or a 2xx response whose body could not be read. That attempt's reserved upper bound is charged and surfaced for review. |
+| `unpriced` | Usage is known but the candidate has no trustworthy price configuration (only possible for unlimited keys; finite-quota keys are rejected first). This is deliberately distinct from a free channel. |
+| `free` | No upstream usage was possible (rejected before the call, dial/DNS failure), the upstream rejected the request before generation, or the channel is explicitly marked free. No charge. |
 
 Failure handling:
 
 - Pre-call failures (validation, authorization, rate limit, no channel, insufficient quota, key decryption, dial/DNS errors) are not charged.
-- A non-2xx upstream response is retried on the next candidate and is not charged if all candidates fail. An upstream `400`/`422` is returned without a charge.
-- Once an upstream returns `2xx`, the request is never retried on another channel. A stream that breaks, a client cancellation, or a timeout is settled from the usage received so far (`actual`/`estimated`) or at the reserved upper bound (`unverified`) when usage is unknowable. This avoids double-billing the same request.
-- Channel failover before any response bytes charges only the channel that finally serves the request.
+- A non-2xx upstream response is retried on the next candidate. If the provider still reports usage in the error body, that attempt is charged and shown in the log's `attempts` breakdown; if it reports no usage, the attempt is shown as unbilled and contributes zero.
+- Once an upstream returns `2xx`, the request is never retried on another channel. A stream that breaks, a client cancellation, or a timeout is settled from the usage received so far (`actual`/`estimated`) or at that attempt's reserved upper bound (`unverified`) when usage is unknowable. Earlier attributable charges are kept.
+- Channel failover can therefore produce several charged attempts for one gateway request. The request log's total cost is their sum; the `attempts` array identifies each channel, HTTP status, token count and cost.
+- Every channel has an explicit price mode: **Price per 1M tokens** uses the configured prices, **Explicitly free** is an intentional zero-cost channel, and **Unpriced** means no trustworthy price is configured. A finite-quota key is rejected with HTTP `503` and `channel_price_not_configured` if any candidate is unpriced; an unlimited key is allowed and records `unpriced` instead of pretending the cost was zero.
 
 ### Restart recovery
 
@@ -356,7 +358,8 @@ A key with quota `-1` is unlimited: it still gets reservations and records usage
 
 - Reservations use a byte-based prompt-token upper bound. It is safe but deliberately conservative, especially for large image payloads; a finite-quota key may be able to keep less work in flight than its nominal balance suggests.
 - A provider that ignores `max_tokens` (or bills for a failed request) can exceed the reserved upper bound. The gateway still settles the actual reported cost and logs a warning, but it cannot prevent an upstream that violates its own limits from overcharging.
-- A non-2xx upstream response during failover is treated as unbilled because no usage is reported. Providers that charge for rejected or failed requests cannot be detected from a non-2xx response; those charges are invisible to the gateway and must be reconciled with the provider.
+- A non-2xx response with no usage block is treated as unbilled; providers that charge for rejected requests without reporting usage cannot be detected and must be reconciled with the provider.
+- A failed attempt that reports only part of its usage (for example completion tokens but no prompt tokens) is charged for the reported part and marked `unverified` when a missing component has a non-zero price.
 - Prompt upper bounds count the serialized body, so multimodal inputs and large JSON payloads reserve much more than their eventual token cost. This is deliberate: it keeps the hold conservative, and the unused amount is released at settlement.
 - `unverified` charges are conservative by design: when a timeout or cancellation happens after the request may have reached the provider, the reserved upper bound is charged instead of silently recording zero. Review them in Request logs; the gateway does not currently provide an automatic refund workflow.
 - The reservations are enforced with database transactions on one node (SQLite serializes writers; PostgreSQL locks the token row). Multi-node deployments would also need shared rate-limit state and are out of scope.
@@ -452,7 +455,7 @@ docs/screenshots/      console screenshots used in this README
 
 ## Upgrading an existing installation
 
-The SQLite and PostgreSQL schemas are migrated automatically on startup: the gateway adds `logs.cost_status`, `logs.reserved_cost`, `logs.reservation_id` and the `token_reservations` table when they are missing, along with the per-key limit columns (`tpm_limit`, `max_concurrency`, `daily_quota`), the `video_tasks`, `speech_clips`, `voice_clones`, `voice_designs` and `music_tasks` tables, and the speech task columns (`speed`, `status`, `error`, `total_chunks`, `done_chunks`, `upstream_task_id`, `upstream_file_id`). Existing speech clips become `succeeded` rows and are not deleted; an older in-flight chunked job keeps its chunk progress and finishes through the legacy runner. An empty PostgreSQL database is initialized with the same tables on first start; data is not copied between backends. No manual database step is required.
+The SQLite and PostgreSQL schemas are migrated automatically on startup: the gateway adds `logs.cost_status`, `logs.reserved_cost`, `logs.reservation_id`, `logs.billing_attempts` and the `token_reservations` table when they are missing, along with the per-key limit columns (`tpm_limit`, `max_concurrency`, `daily_quota`), the `video_tasks`, `speech_clips`, `voice_clones`, `voice_designs` and `music_tasks` tables, the speech task columns (`speed`, `status`, `error`, `total_chunks`, `done_chunks`, `upstream_task_id`, `upstream_file_id`), and `channels.price_mode`. Existing channels with a positive input or output price are backfilled as **Price per 1M tokens**; all-zero channels remain **Unpriced** until an admin explicitly marks them free or enters prices. Existing speech clips become `succeeded` rows and are not deleted; an older in-flight chunked job keeps its chunk progress and finishes through the legacy runner. An empty PostgreSQL database is initialized with the same tables on first start; data is not copied between backends. No manual database step is required.
 
 Existing keys and channels keep their configuration. Because the previous version had no reservations, the first boot after the upgrade has no pending reservations to recover; settled historical costs remain as recorded. New optional environment variables (`STREAM_TIMEOUT_SECONDS`, `QUOTA_DEFAULT_OUTPUT_TOKENS`, `SQLITE_PATH`, `HOST`) default to the values in the table above. `SQLITE_PATH` unset keeps `$DATA_DIR/gateway.db`, and `HOST` unset keeps the original all-interface listener unless `TEST_MODE=1` is enabled. Restart the binary (or rebuild the Docker image) as usual.
 

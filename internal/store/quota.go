@@ -27,8 +27,13 @@ const (
 	// CostUnverified marks a charge whose real usage is unknown. The reserved
 	// upper bound is charged and left visible for later verification.
 	CostUnverified = "unverified"
+	// CostUnpriced means upstream usage is known but the channel has no
+	// trustworthy price configuration. It is deliberately distinct from an
+	// explicitly free channel.
+	CostUnpriced = "unpriced"
 	// CostFree means the request was rejected before upstream usage was
-	// possible, or a pre-response upstream failure was confirmed not to bill.
+	// possible, a pre-response upstream failure was confirmed not to bill, or
+	// the channel is explicitly free.
 	CostFree = "free"
 )
 
@@ -265,12 +270,20 @@ func (s *Store) RecoverPendingReservations() ([]Reservation, error) {
 			Cost:          res.ReservedCost,
 			ReservedCost:  res.ReservedCost,
 			CostStatus:    CostUnverified,
-			Status:        "error",
-			StatusCode:    0,
-			Error:         "gateway restarted before this request completed; charged the reserved upper bound and marked the charge unverified",
-			LatencyMS:     latency,
-			Stream:        res.Stream,
-			CreatedAt:     res.CreatedAt,
+			Attempts: []ChargeAttempt{{
+				ChannelID:     res.ChannelID,
+				ChannelName:   res.ChannelName,
+				UpstreamModel: res.UpstreamModel,
+				StatusCode:    0,
+				Cost:          res.ReservedCost,
+				CostStatus:    CostUnverified,
+			}},
+			Status:     "error",
+			StatusCode: 0,
+			Error:      "gateway restarted before this request completed; charged the reserved upper bound and marked the charge unverified",
+			LatencyMS:  latency,
+			Stream:     res.Stream,
+			CreatedAt:  res.CreatedAt,
 		}
 		if err := insertLogTx(tx, log); err != nil {
 			_ = tx.Rollback()
@@ -333,10 +346,10 @@ func insertLogTx(tx *tx, l *Log) error {
 		l.CostStatus = CostActual
 	}
 	id, err := insertID(tx, tx.dialect, `INSERT INTO logs (request_id, reservation_id, user_id, token_id, channel_id, token_name, channel_name, model, upstream_model,
-		prompt_tokens, completion_tokens, total_tokens, cost, reserved_cost, cost_status, status, status_code, error, latency_ms, stream, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		prompt_tokens, completion_tokens, total_tokens, cost, reserved_cost, cost_status, billing_attempts, status, status_code, error, latency_ms, stream, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		l.RequestID, l.ReservationID, l.UserID, l.TokenID, l.ChannelID, l.TokenName, l.ChannelName, l.Model, l.UpstreamModel,
-		l.PromptTokens, l.CompletionTokens, l.TotalTokens, l.Cost, l.ReservedCost, l.CostStatus, l.Status, l.StatusCode, l.Error, l.LatencyMS, boolValue(l.Stream), l.CreatedAt)
+		l.PromptTokens, l.CompletionTokens, l.TotalTokens, l.Cost, l.ReservedCost, l.CostStatus, encodeAttempts(l.Attempts), l.Status, l.StatusCode, l.Error, l.LatencyMS, boolValue(l.Stream), l.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("insert request log: %w", err)
 	}

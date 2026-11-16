@@ -8,6 +8,7 @@ export interface User {
 
 export type ChannelType = 'openai' | 'anthropic' | 'minimax' | 'seedance' | 'minimax-music'
 export type ChannelStatus = 'enabled' | 'disabled'
+export type PriceMode = 'unset' | 'priced' | 'free'
 
 export interface Channel {
   id: number
@@ -20,6 +21,7 @@ export interface Channel {
   priority: number
   weight: number
   status: ChannelStatus
+  price_mode: PriceMode
   input_price: number
   output_price: number
   created_at: number
@@ -36,6 +38,7 @@ export interface ChannelInput {
   priority: number
   weight: number
   status: ChannelStatus
+  price_mode: PriceMode
   input_price: number
   output_price: number
 }
@@ -88,7 +91,18 @@ export interface TokenInput {
   status: TokenStatus
 }
 
-export type CostStatus = 'actual' | 'estimated' | 'unverified' | 'free' | 'pending'
+export type CostStatus = 'actual' | 'estimated' | 'unverified' | 'unpriced' | 'free' | 'pending'
+
+export interface ChargeAttempt {
+  channel_id: number
+  channel_name: string
+  upstream_model: string
+  status_code: number
+  prompt_tokens: number
+  completion_tokens: number
+  cost: number
+  cost_status: CostStatus | string
+}
 
 export interface LogItem {
   id: number
@@ -107,6 +121,7 @@ export interface LogItem {
   cost: number
   reserved_cost: number
   cost_status: CostStatus | string
+  attempts: ChargeAttempt[]
   status: 'success' | 'error' | string
   status_code: number
   error: string
@@ -207,6 +222,7 @@ export interface ModelInfo {
   id: string
   channels: string[]
   types: string[]
+  price_modes: PriceMode[]
   input_price: number
   output_price: number
 }

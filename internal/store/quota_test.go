@@ -156,6 +156,9 @@ func TestRecoverPendingReservationsAfterRestart(t *testing.T) {
 	if err != nil || total != 1 || logs[0].CostStatus != CostUnverified || !nearTax(logs[0].Cost, 0.75) {
 		t.Fatalf("recovery log: total=%d logs=%+v err=%v", total, logs, err)
 	}
+	if len(logs[0].Attempts) != 1 || logs[0].Attempts[0].CostStatus != CostUnverified || !nearTax(logs[0].Attempts[0].Cost, 0.75) {
+		t.Fatalf("recovery attempts: %+v", logs[0].Attempts)
+	}
 	again, err := second.RecoverPendingReservations()
 	if err != nil || len(again) != 0 {
 		t.Fatalf("second recovery: %+v err=%v", again, err)
@@ -202,6 +205,14 @@ func TestOpenMigratesExistingDatabase(t *testing.T) {
 			t.Fatalf("create old schema: %v", err)
 		}
 	}
+	if _, err := raw.Exec(`INSERT INTO channels (name, type, base_url, api_key, input_price, output_price, created_at, updated_at) VALUES ('priced', 'openai', 'https://example.com/v1', 'enc', 1.25, 2.5, 1, 1)`); err != nil {
+		raw.Close()
+		t.Fatalf("insert old priced channel: %v", err)
+	}
+	if _, err := raw.Exec(`INSERT INTO channels (name, type, base_url, api_key, input_price, output_price, created_at, updated_at) VALUES ('unset', 'openai', 'https://example.com/v1', 'enc', 0, 0, 1, 1)`); err != nil {
+		raw.Close()
+		t.Fatalf("insert old unset channel: %v", err)
+	}
 	if err := raw.Close(); err != nil {
 		t.Fatalf("close raw db: %v", err)
 	}
@@ -224,5 +235,44 @@ func TestOpenMigratesExistingDatabase(t *testing.T) {
 	got, err := s.GetTokenByID(token.ID)
 	if err != nil || got.ReservedQuota != 0 {
 		t.Fatalf("migrated token: %+v err=%v", got, err)
+	}
+	priced, err := s.GetChannel(1)
+	if err != nil || priced.PriceMode != PriceModePriced {
+		t.Fatalf("migrated priced channel: %+v err=%v", priced, err)
+	}
+	unset, err := s.GetChannel(2)
+	if err != nil || unset.PriceMode != PriceModeUnset {
+		t.Fatalf("migrated unset channel: %+v err=%v", unset, err)
+	}
+}
+
+func TestLogAttemptsRoundTrip(t *testing.T) {
+	s := testStore(t)
+	token := createTestToken(t, s, "attempts", 10)
+	log := testLog(token, "attempts", "model", 0.000009)
+	log.Attempts = []ChargeAttempt{
+		{ChannelID: 1, ChannelName: "primary", UpstreamModel: "model", StatusCode: 500, CompletionTokens: 3, Cost: 0.000003, CostStatus: CostActual},
+		{ChannelID: 2, ChannelName: "backup", UpstreamModel: "model", StatusCode: 200, CompletionTokens: 6, Cost: 0.000006, CostStatus: CostActual},
+	}
+	if err := s.InsertLog(log); err != nil {
+		t.Fatalf("InsertLog: %v", err)
+	}
+	logs, total, err := s.ListLogs(LogFilter{Page: 1, PageSize: 10})
+	if err != nil || total != 1 || len(logs) != 1 {
+		t.Fatalf("ListLogs: total=%d len=%d err=%v", total, len(logs), err)
+	}
+	got := logs[0]
+	if len(got.Attempts) != 2 || got.Attempts[0].ChannelName != "primary" || got.Attempts[1].Cost != 0.000006 {
+		t.Fatalf("attempts did not round-trip: %+v", got.Attempts)
+	}
+}
+
+func TestChannelPriceModeValidation(t *testing.T) {
+	s := testStore(t)
+	if err := s.CreateChannel(&Channel{Name: "free", Type: "openai", BaseURL: "https://example.com/v1", APIKeyEncrypted: "enc", Models: []string{"m"}, Status: "enabled", PriceMode: PriceModeFree}); err != nil {
+		t.Fatalf("create free channel: %v", err)
+	}
+	if err := s.CreateChannel(&Channel{Name: "zero-priced", Type: "openai", BaseURL: "https://example.com/v1", APIKeyEncrypted: "enc", Models: []string{"m"}, Status: "enabled", PriceMode: PriceModePriced}); err == nil {
+		t.Fatal("priced channel with zero prices must be rejected")
 	}
 }

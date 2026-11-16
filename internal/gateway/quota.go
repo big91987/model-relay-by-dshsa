@@ -15,13 +15,13 @@ const defaultQuotaOutputTokens int64 = 4096
 // never encodes fewer than one UTF-8 byte), and completionUpper is the output
 // limit declared by the client or applied by the gateway.
 type quotaPlan struct {
-	promptUpper        int64
-	completionUpper    int64
-	maxInputPrice      float64
-	maxOutputPrice     float64
 	amount             float64
 	capOutput          bool
 	outputCapPerChoice int64
+	// bounds is the per-candidate cost upper bound. A request may fail over
+	// through several candidates and each one can bill, so the reservation
+	// covers the sum, not just the most expensive single attempt.
+	bounds map[int64]float64
 }
 
 func (g *Gateway) defaultOutputTokens() int64 {
@@ -80,16 +80,37 @@ func saturatingMul(a, b int64) int64 {
 	return a * b
 }
 
-func maxCandidatePrices(candidates []candidate) (input, output float64) {
+// candidateBounds calculates the cost upper bound of every candidate. Explicit
+// free channels contribute zero; unknown-price channels contribute zero here
+// but are rejected earlier for finite-quota keys. The sum is the amount that
+// must be reserved because failover can bill more than one attempt.
+func candidateBounds(promptUpper, completionUpper int64, candidates []candidate) (float64, map[int64]float64) {
+	bounds := make(map[int64]float64, len(candidates))
+	total := 0.0
 	for i := range candidates {
-		if candidates[i].channel.InputPrice > input {
-			input = candidates[i].channel.InputPrice
+		ch := &candidates[i].channel
+		bound := 0.0
+		if ch.PriceMode == store.PriceModePriced {
+			bound = roundUp6((float64(promptUpper)*ch.InputPrice + float64(completionUpper)*ch.OutputPrice) / 1_000_000)
 		}
-		if candidates[i].channel.OutputPrice > output {
-			output = candidates[i].channel.OutputPrice
+		bounds[ch.ID] = bound
+		total += bound
+	}
+	return roundUp6(total), bounds
+}
+
+// unpricedCandidateNames lists candidates whose pricing mode is unknown. A
+// finite-quota key must not call them, because neither the admission upper
+// bound nor the final charge can be computed.
+func unpricedCandidateNames(candidates []candidate) []string {
+	names := make([]string, 0)
+	for i := range candidates {
+		mode := candidates[i].channel.PriceMode
+		if mode == "" || mode == store.PriceModeUnset {
+			names = append(names, candidates[i].channel.Name)
 		}
 	}
-	return input, output
+	return names
 }
 
 // planChatQuota computes the upper bound used to reserve quota for a chat
@@ -103,28 +124,24 @@ func (g *Gateway) planChatQuota(body []byte, raw map[string]any, messages int, c
 		perChoice = g.defaultOutputTokens()
 	}
 	completionUpper := saturatingMul(perChoice, requestedChoices(raw))
-	inputPrice, outputPrice := maxCandidatePrices(candidates)
 	promptUpper := promptTokenUpperBound(body, messages)
+	amount, bounds := candidateBounds(promptUpper, completionUpper, candidates)
 	return quotaPlan{
-		promptUpper:        promptUpper,
-		completionUpper:    completionUpper,
-		maxInputPrice:      inputPrice,
-		maxOutputPrice:     outputPrice,
-		amount:             roundUp6((float64(promptUpper)*inputPrice + float64(completionUpper)*outputPrice) / 1_000_000),
+		amount:             amount,
 		capOutput:          capOutput,
 		outputCapPerChoice: perChoice,
+		bounds:             bounds,
 	}
 }
 
 // planEmbeddingQuota computes the upper bound for an embeddings request, which
 // has input tokens but no completion tokens.
 func (g *Gateway) planEmbeddingQuota(body []byte, candidates []candidate) quotaPlan {
-	inputPrice, _ := maxCandidatePrices(candidates)
 	promptUpper := promptTokenUpperBound(body, 0)
+	amount, bounds := candidateBounds(promptUpper, 0, candidates)
 	return quotaPlan{
-		promptUpper:   promptUpper,
-		maxInputPrice: inputPrice,
-		amount:        roundUp6(float64(promptUpper) * inputPrice / 1_000_000),
+		amount: amount,
+		bounds: bounds,
 	}
 }
 
@@ -157,13 +174,74 @@ func costFor(ch *store.Channel, prompt, completion int64) float64 {
 	return round6((float64(prompt)*ch.InputPrice + float64(completion)*ch.OutputPrice) / 1_000_000)
 }
 
-// usageStatus reports whether usage came from the upstream or was estimated
-// locally from content.
-func usageStatus(reported bool) string {
-	if reported {
-		return store.CostActual
+// buildAttemptCharge records one upstream call. billed=false marks a failed
+// attempt whose response contained no usage: it is visible for attribution but
+// contributes no charge. billed=true with a missing price component is marked
+// unverified rather than pretending the missing part cost zero.
+func buildAttemptCharge(ch *store.Channel, upstream string, statusCode int, prompt, completion int64, usageReported, billed bool) store.ChargeAttempt {
+	a := store.ChargeAttempt{
+		ChannelID:        ch.ID,
+		ChannelName:      ch.Name,
+		UpstreamModel:    upstream,
+		StatusCode:       statusCode,
+		PromptTokens:     prompt,
+		CompletionTokens: completion,
 	}
-	return store.CostEstimated
+	if !billed {
+		a.CostStatus = store.CostFree
+		a.PromptTokens = 0
+		a.CompletionTokens = 0
+		return a
+	}
+	switch ch.PriceMode {
+	case store.PriceModeFree:
+		a.CostStatus = store.CostFree
+	case store.PriceModePriced:
+		a.Cost = costFor(ch, prompt, completion)
+		if !usageReported {
+			a.CostStatus = store.CostEstimated
+			return a
+		}
+		a.CostStatus = store.CostActual
+		if (prompt == 0 && ch.InputPrice > 0) || (completion == 0 && ch.OutputPrice > 0) {
+			a.CostStatus = store.CostUnverified
+		}
+	default:
+		a.CostStatus = store.CostUnpriced
+	}
+	return a
+}
+
+// combineCostStatus keeps the least trustworthy component visible in the
+// request-level status.
+func combineCostStatus(attempts []store.ChargeAttempt) string {
+	seen := map[string]bool{}
+	for i := range attempts {
+		seen[attempts[i].CostStatus] = true
+	}
+	switch {
+	case seen[store.CostUnpriced]:
+		return store.CostUnpriced
+	case seen[store.CostUnverified]:
+		return store.CostUnverified
+	case seen[store.CostEstimated]:
+		return store.CostEstimated
+	case seen[store.CostActual]:
+		return store.CostActual
+	case seen[store.CostFree]:
+		return store.CostFree
+	default:
+		return store.CostFree
+	}
+}
+
+func sumAttempts(attempts []store.ChargeAttempt) (prompt, completion int64, cost float64) {
+	for i := range attempts {
+		prompt += attempts[i].PromptTokens
+		completion += attempts[i].CompletionTokens
+		cost += attempts[i].Cost
+	}
+	return prompt, completion, round6(cost)
 }
 
 // upstreamUsage is a parsed usage block plus whether the upstream actually
@@ -180,16 +258,26 @@ func usageFromJSON(data []byte) upstreamUsage {
 			PromptTokens     int64 `json:"prompt_tokens"`
 			CompletionTokens int64 `json:"completion_tokens"`
 			TotalTokens      int64 `json:"total_tokens"`
+			InputTokens      int64 `json:"input_tokens"`
+			OutputTokens     int64 `json:"output_tokens"`
 		} `json:"usage"`
 	}
 	_ = json.Unmarshal(data, &parsed)
 	if parsed.Usage == nil {
 		return upstreamUsage{}
 	}
+	prompt := parsed.Usage.PromptTokens
+	if prompt == 0 {
+		prompt = parsed.Usage.InputTokens
+	}
+	completion := parsed.Usage.CompletionTokens
+	if completion == 0 {
+		completion = parsed.Usage.OutputTokens
+	}
 	return upstreamUsage{
-		prompt:     parsed.Usage.PromptTokens,
-		completion: parsed.Usage.CompletionTokens,
-		reported:   parsed.Usage.PromptTokens > 0 || parsed.Usage.CompletionTokens > 0 || parsed.Usage.TotalTokens > 0,
+		prompt:     prompt,
+		completion: completion,
+		reported:   prompt > 0 || completion > 0 || parsed.Usage.TotalTokens > 0,
 	}
 }
 

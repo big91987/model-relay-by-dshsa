@@ -1747,3 +1747,57 @@ func TestMinimaxLongSpeechBackgroundFlow(t *testing.T) {
 		t.Fatalf("final list status %d: %s", resp.StatusCode, body)
 	}
 }
+
+func TestChannelPriceModeValidation(t *testing.T) {
+	ts, _ := newTestServer(t)
+	client := newClient(t)
+	resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/auth/login", map[string]any{"username": "admin", "password": "admin-pass"}, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status %d: %s", resp.StatusCode, body)
+	}
+	base := map[string]any{
+		"type": "openai", "base_url": "https://example.com/v1", "api_key": "upstream-key",
+		"models": []string{"public-model"}, "priority": 0, "weight": 1, "status": "enabled",
+	}
+	create := func(t *testing.T, name string, mode *string, input, output float64) (int, map[string]any) {
+		t.Helper()
+		payload := map[string]any{}
+		for key, value := range base {
+			payload[key] = value
+		}
+		payload["name"] = name
+		payload["input_price"] = input
+		payload["output_price"] = output
+		if mode != nil {
+			payload["price_mode"] = *mode
+		}
+		resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/channels", payload, nil)
+		var decoded map[string]any
+		_ = json.Unmarshal(body, &decoded)
+		return resp.StatusCode, decoded
+	}
+
+	priced := "priced"
+	code, decoded := create(t, "priced", &priced, 1, 2)
+	if code != http.StatusCreated || decoded["price_mode"] != "priced" {
+		t.Fatalf("priced channel: status=%d body=%+v", code, decoded)
+	}
+	code, decoded = create(t, "unset", nil, 0, 0)
+	if code != http.StatusCreated || decoded["price_mode"] != "unset" {
+		t.Fatalf("unset channel: status=%d body=%+v", code, decoded)
+	}
+	free := "free"
+	code, decoded = create(t, "free", &free, 0, 0)
+	if code != http.StatusCreated || decoded["price_mode"] != "free" {
+		t.Fatalf("free channel: status=%d body=%+v", code, decoded)
+	}
+	if code, _ := create(t, "priced-zero", &priced, 0, 0); code != http.StatusBadRequest {
+		t.Fatalf("priced zero channel status=%d, want 400", code)
+	}
+	if code, _ := create(t, "free-priced", &free, 1, 2); code != http.StatusBadRequest {
+		t.Fatalf("free channel with prices status=%d, want 400", code)
+	}
+	if code, decoded := create(t, "implicit-priced", nil, 1, 2); code != http.StatusCreated || decoded["price_mode"] != "priced" {
+		t.Fatalf("implicit priced channel: status=%d body=%+v", code, decoded)
+	}
+}

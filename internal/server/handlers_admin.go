@@ -34,11 +34,12 @@ type channelInput struct {
 	Priority     int               `json:"priority"`
 	Weight       int               `json:"weight"`
 	Status       string            `json:"status"`
+	PriceMode    string            `json:"price_mode"`
 	InputPrice   float64           `json:"input_price"`
 	OutputPrice  float64           `json:"output_price"`
 }
 
-func (in *channelInput) normalize(requireKey bool) error {
+func (in *channelInput) normalize(requireKey bool, fallbackPriceMode string) error {
 	in.Name = strings.TrimSpace(in.Name)
 	if in.Name == "" {
 		return errors.New("name is required")
@@ -73,6 +74,32 @@ func (in *channelInput) normalize(requireKey bool) error {
 	if in.InputPrice < 0 || in.OutputPrice < 0 {
 		return errors.New("prices must be zero or greater")
 	}
+	mode := strings.ToLower(strings.TrimSpace(in.PriceMode))
+	if mode == "" {
+		switch {
+		case in.InputPrice > 0 || in.OutputPrice > 0:
+			mode = store.PriceModePriced
+		case fallbackPriceMode != "":
+			mode = fallbackPriceMode
+		default:
+			mode = store.PriceModeUnset
+		}
+	}
+	switch mode {
+	case store.PriceModeUnset:
+		in.InputPrice, in.OutputPrice = 0, 0
+	case store.PriceModeFree:
+		if in.InputPrice != 0 || in.OutputPrice != 0 {
+			return errors.New("free channels must use zero prices")
+		}
+	case store.PriceModePriced:
+		if in.InputPrice == 0 && in.OutputPrice == 0 {
+			return errors.New("priced channels need at least one positive price; use free for an explicit zero-cost channel")
+		}
+	default:
+		return errors.New("price_mode must be unset, priced or free")
+	}
+	in.PriceMode = mode
 	in.Models = cleanList(in.Models)
 	in.ModelMapping = cleanMapping(in.ModelMapping)
 	if len(in.Models) == 0 && len(in.ModelMapping) == 0 {
@@ -196,7 +223,7 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	if err := in.normalize(true); err != nil {
+	if err := in.normalize(true, ""); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -217,6 +244,7 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 		Priority:        in.Priority,
 		Weight:          in.Weight,
 		Status:          in.Status,
+		PriceMode:       in.PriceMode,
 		InputPrice:      in.InputPrice,
 		OutputPrice:     in.OutputPrice,
 	}
@@ -247,7 +275,7 @@ func (s *Server) handleUpdateChannel(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	if err := in.normalize(false); err != nil {
+	if err := in.normalize(false, channel.PriceMode); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -259,6 +287,7 @@ func (s *Server) handleUpdateChannel(w http.ResponseWriter, r *http.Request) {
 	channel.Priority = in.Priority
 	channel.Weight = in.Weight
 	channel.Status = in.Status
+	channel.PriceMode = in.PriceMode
 	channel.InputPrice = in.InputPrice
 	channel.OutputPrice = in.OutputPrice
 	if strings.TrimSpace(in.APIKey) != "" {
@@ -636,8 +665,10 @@ type modelSummary struct {
 	ID          string   `json:"id"`
 	Channels    []string `json:"channels"`
 	Types       []string `json:"types"`
+	PriceModes  []string `json:"price_modes"`
 	InputPrice  float64  `json:"input_price"`
 	OutputPrice float64  `json:"output_price"`
+	hasPriced   bool
 }
 
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
@@ -657,17 +688,25 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		for _, id := range ids {
 			summary, ok := byID[id]
 			if !ok {
-				summary = &modelSummary{ID: id, InputPrice: channel.InputPrice, OutputPrice: channel.OutputPrice}
+				summary = &modelSummary{ID: id}
 				byID[id] = summary
 			}
-			if channel.InputPrice < summary.InputPrice {
-				summary.InputPrice = channel.InputPrice
-			}
-			if channel.OutputPrice < summary.OutputPrice {
-				summary.OutputPrice = channel.OutputPrice
+			if channel.PriceMode == store.PriceModePriced {
+				if !summary.hasPriced {
+					summary.InputPrice, summary.OutputPrice = channel.InputPrice, channel.OutputPrice
+					summary.hasPriced = true
+				} else {
+					if channel.InputPrice < summary.InputPrice {
+						summary.InputPrice = channel.InputPrice
+					}
+					if channel.OutputPrice < summary.OutputPrice {
+						summary.OutputPrice = channel.OutputPrice
+					}
+				}
 			}
 			summary.Channels = appendUnique(summary.Channels, channel.Name)
 			summary.Types = appendUnique(summary.Types, channel.Type)
+			summary.PriceModes = appendUnique(summary.PriceModes, channel.PriceMode)
 		}
 	}
 	out := make([]*modelSummary, 0, len(byID))

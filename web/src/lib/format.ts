@@ -17,7 +17,11 @@ export function formatCompact(value: number): string {
 
 export function formatCost(value: number): string {
   if (!Number.isFinite(value) || value === 0) return '$0.00'
-  if (value < 0.001) return `$${value.toFixed(5)}`
+  if (value < 0.001) {
+    // Micro-charges must not round to "$0.00000": that would make a real
+    // failed-attempt charge look free.
+    return `$${value < 0.00001 ? value.toFixed(6) : value.toFixed(5)}`
+  }
   if (value < 1) return `$${value.toFixed(3)}`
   return `$${value.toFixed(2)}`
 }

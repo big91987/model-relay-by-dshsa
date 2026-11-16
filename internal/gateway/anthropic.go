@@ -366,7 +366,7 @@ func anthropicToOpenAI(data []byte, model string, promptFallback int64) ([]byte,
 	if len(toolCalls) > 0 {
 		message["tool_calls"] = toolCalls
 	}
-	reported := ar.Usage.InputTokens > 0 && ar.Usage.OutputTokens > 0
+	reported := ar.Usage.InputTokens > 0 || ar.Usage.OutputTokens > 0
 	prompt := ar.Usage.InputTokens
 	if prompt == 0 {
 		prompt = promptFallback
@@ -570,7 +570,7 @@ func (g *Gateway) streamAnthropic(w http.ResponseWriter, resp *http.Response, pr
 				completion = ev.Usage.OutputTokens
 				usageOutput = ev.Usage.OutputTokens
 			}
-			if usageInput > 0 && usageOutput > 0 {
+			if usageInput > 0 || usageOutput > 0 {
 				reported = true
 			}
 		case "message_stop":

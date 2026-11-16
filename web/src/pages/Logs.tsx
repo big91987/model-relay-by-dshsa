@@ -359,7 +359,14 @@ export default function Logs() {
                       </div>
                     </td>
                     <td>{log.token_name || <span className="muted">{t('—')}</span>}</td>
-                    <td>{log.channel_name || <span className="muted">{t('—')}</span>}</td>
+                    <td>
+                      <div>{log.channel_name || <span className="muted">{t('—')}</span>}</div>
+                      {log.attempts && log.attempts.length > 1 ? (
+                        <div className="cell-sub">
+                          {t('{count} upstream attempts', { count: log.attempts.length })}
+                        </div>
+                      ) : null}
+                    </td>
                     <td><StatusBadge status={log.status} /></td>
                     <td className="num">
                       <div>{formatNumber(log.total_tokens)}</div>
@@ -490,6 +497,29 @@ export default function Logs() {
               <span>{t('Reserved for this request')}</span>
               <strong>{formatCost(selected.reserved_cost)}</strong>
             </div>
+            {selected.attempts && selected.attempts.length > 0 ? (
+              <div className="detail-wide">
+                <span>{t('Upstream attempts')}</span>
+                <div className="attempt-list">
+                  {selected.attempts.map((attempt, index) => (
+                    <div className="attempt-row" key={`${attempt.channel_id}-${attempt.status_code}-${index}`}>
+                      <div className="attempt-head">
+                        <strong>{attempt.channel_name || t('—')}</strong>
+                        <span className="mono">{attempt.upstream_model || t('—')}</span>
+                        <span className="muted">HTTP {attempt.status_code}</span>
+                      </div>
+                      <div className="attempt-meta">
+                        <span>
+                          {formatNumber(attempt.prompt_tokens)} in · {formatNumber(attempt.completion_tokens)} out
+                        </span>
+                        <span>{formatCost(attempt.cost)}</span>
+                        <CostStatusBadge status={attempt.cost_status} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
             <div>
               <span>{t('Latency')}</span>
               <strong>{formatDuration(selected.latency_ms)}</strong>
