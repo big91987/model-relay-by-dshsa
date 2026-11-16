@@ -1342,6 +1342,9 @@ func (g *Gateway) runSpeechAsyncJob(id int64) {
 				clip.Error = ""
 				if err := g.store.UpdateSpeechClip(clip); err != nil {
 					g.logger.Error("finish async speech job failed", "job", id, "error", err)
+					if oldPath != "" {
+						_ = os.Remove(filepath.Join(g.cfg.DataDir, clip.AudioPath))
+					}
 					return
 				}
 				if oldPath != "" && oldPath != clip.AudioPath {

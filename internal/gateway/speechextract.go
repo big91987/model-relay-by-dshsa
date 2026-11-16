@@ -339,6 +339,9 @@ func (g *Gateway) EnsureSpeechClipAudio(clip *store.SpeechClip) (*store.SpeechCl
 	if ok {
 		if oldPath != "" || clip.Format != previousFormat || clip.SizeBytes != previousSize {
 			if err := g.store.UpdateSpeechClip(clip); err != nil {
+				if oldPath != "" {
+					_ = os.Remove(filepath.Join(g.cfg.DataDir, clip.AudioPath))
+				}
 				return nil, err
 			}
 		}
