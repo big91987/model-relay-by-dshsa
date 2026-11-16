@@ -1,4 +1,4 @@
-import json, math, os, struct, sys, threading, time
+import io, json, math, os, struct, sys, tarfile, threading, time
 from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -15,6 +15,10 @@ ASYNC_TTS_LOCK = threading.Lock()
 # Number of status queries before an async speech task reports Success.
 ASYNC_TTS_QUERIES = int(os.environ.get("MOCK_TTS_ASYNC_QUERIES", "3"))
 ASYNC_TTS_FAIL = os.environ.get("MOCK_TTS_ASYNC_FAIL", "") == "1"
+# The real MiniMax asynchronous TTS file is a POSIX tar containing the audio,
+# a .titles file and a .extra JSON file. Set MOCK_TTS_ASYNC_RAW=1 to serve a
+# bare MP3 instead and exercise the legacy raw-audio path.
+ASYNC_TTS_RAW = os.environ.get("MOCK_TTS_ASYNC_RAW", "") == "1"
 VOICE_DESIGNS = {}
 UPLOADED_FILES = {}
 UPLOAD_LOCK = threading.Lock()
@@ -414,12 +418,29 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(404, {"base_resp": {"status_code": 2013, "status_msg": "file not found"}})
         try:
             with open(os.path.join(MEDIA_DIR, "demo.mp3"), "rb") as handle:
-                data = handle.read()
+                audio = handle.read()
         except OSError:
             return self.send_json(404, {"error": {"message": "demo media is missing"}})
-        sys.stderr.write("mock t2a_async_download file=%s bytes=%d\n" % (file_id, len(data)))
+        if ASYNC_TTS_RAW:
+            data = audio
+            content_type = "audio/mpeg"
+        else:
+            buffer = io.BytesIO()
+            with tarfile.open(fileobj=buffer, mode="w") as archive:
+                for name, payload in [
+                    ("output/speech.titles", b'{"titles":[{"text":"mock","start":0}]}'),
+                    ("output/speech.extra", b'{"audio_length":7440,"audio_format":"mp3"}'),
+                    ("output/speech.mp3", audio),
+                ]:
+                    info = tarfile.TarInfo(name)
+                    info.size = len(payload)
+                    info.mode = 0o600
+                    archive.addfile(info, io.BytesIO(payload))
+            data = buffer.getvalue()
+            content_type = "application/x-tar"
+        sys.stderr.write("mock t2a_async_download file=%s bytes=%d type=%s\n" % (file_id, len(data), content_type))
         self.send_response(200)
-        self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)

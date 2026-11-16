@@ -36,11 +36,16 @@ type speechClipView struct {
 
 func (s *Server) speechClipView(clip *store.SpeechClip) speechClipView {
 	view := speechClipView{SpeechClip: *clip, Async: clip.UpstreamTaskID != ""}
-	if clip.AudioPath == "" {
-		return view
+	if clip.AudioPath != "" {
+		path := filepath.Join(s.cfg.DataDir, clip.AudioPath)
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			view.AudioReady = true
+			view.ContentURL = fmt.Sprintf("/api/speech/%d/content", clip.ID)
+		}
 	}
-	path := filepath.Join(s.cfg.DataDir, clip.AudioPath)
-	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+	// A completed async task can still be retried from the provider when its
+	// local file is missing, so keep the download action available.
+	if !view.AudioReady && clip.Status == "succeeded" && clip.UpstreamTaskID != "" && clip.UpstreamFileID != 0 {
 		view.AudioReady = true
 		view.ContentURL = fmt.Sprintf("/api/speech/%d/content", clip.ID)
 	}
@@ -215,14 +220,24 @@ func (s *Server) handleSpeechContent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to load speech clip")
 		return
 	}
-	if clip.Status == "queued" || clip.Status == "running" {
+	if clip.Status != "succeeded" {
 		writeErr(w, http.StatusNotFound, "the audio is not ready yet")
 		return
 	}
-	if clip.AudioPath == "" {
+	if clip.AudioPath == "" && (clip.UpstreamTaskID == "" || clip.UpstreamFileID == 0) {
 		writeErr(w, http.StatusNotFound, "the audio is not ready yet")
 		return
 	}
+	// Older releases stored the provider tar archive verbatim. Repair it (or
+	// retry a missing async download) before serving so existing completed
+	// clips stay downloadable.
+	prepared, err := s.gw.EnsureSpeechClipAudio(clip)
+	if err != nil {
+		s.logger.Error("prepare stored speech audio failed", "clip", id, "error", err)
+		writeErr(w, http.StatusBadGateway, "the stored speech audio could not be prepared: "+err.Error())
+		return
+	}
+	clip = prepared
 	path := filepath.Join(s.cfg.DataDir, clip.AudioPath)
 	if info, statErr := os.Stat(path); statErr != nil || info.IsDir() {
 		writeErr(w, http.StatusNotFound, "the stored audio file is missing")
@@ -249,6 +264,8 @@ func speechContentType(format string) string {
 		return "audio/wav"
 	case "m4a":
 		return "audio/mp4"
+	case "ogg", "opus":
+		return "audio/ogg"
 	default:
 		return "audio/mpeg"
 	}

@@ -1332,32 +1332,37 @@ func (g *Gateway) runSpeechAsyncJob(id int64) {
 				g.failSpeechJob(clip, "MiniMax finished the speech task without a file id")
 				return
 			}
-			// A previous attempt may have downloaded the audio before its final
-			// database update failed; reuse the stored file.
-			if clip.AudioPath != "" {
-				if info, statErr := os.Stat(filepath.Join(g.cfg.DataDir, clip.AudioPath)); statErr == nil && !info.IsDir() {
-					clip.Status = "succeeded"
-					clip.SizeBytes = info.Size()
-					clip.Error = ""
-					if err := g.store.UpdateSpeechClip(clip); err != nil {
-						g.logger.Error("finish async speech job failed", "job", id, "error", err)
-					}
+			// A previous attempt may have downloaded the provider file before its
+			// final database update failed. Repair/reuse it only when it is a
+			// standalone audio file; an older tar response is extracted here.
+			if reused, oldPath, reuseErr := g.prepareStoredSpeechAudio(clip); reuseErr != nil {
+				g.logger.Warn("stored async speech audio was not reusable", "job", id, "error", reuseErr)
+			} else if reused {
+				clip.Status = "succeeded"
+				clip.Error = ""
+				if err := g.store.UpdateSpeechClip(clip); err != nil {
+					g.logger.Error("finish async speech job failed", "job", id, "error", err)
 					return
 				}
+				if oldPath != "" && oldPath != clip.AudioPath {
+					_ = os.Remove(filepath.Join(g.cfg.DataDir, oldPath))
+				}
+				g.logger.Info("speech async task finished from stored audio", "clip", id, "task", clip.UpstreamTaskID, "bytes", clip.SizeBytes)
+				return
 			}
-			rel, size, downloadErr := g.downloadSpeechAsyncAudio(ch, apiKey, fileID)
+			rel, size, format, downloadErr := g.downloadSpeechAsyncAudio(ch, apiKey, fileID)
 			if downloadErr != nil {
 				g.failSpeechJob(clip, "could not download the generated audio: "+downloadErr.Error())
 				return
 			}
 			clip.AudioPath = rel
 			clip.SizeBytes = size
-			if clip.DurationMS == 0 {
+			clip.Format = format
+			if clip.DurationMS == 0 && format == "mp3" {
 				// The query response does not always carry the audio length.
 				// The requested MP3 bitrate gives a useful CBR estimate.
 				clip.DurationMS = size * 8 * 1000 / 128000
 			}
-			clip.Format = "mp3"
 			clip.Status = "succeeded"
 			clip.Error = ""
 			if err := g.store.UpdateSpeechClip(clip); err != nil {
@@ -1464,28 +1469,46 @@ func (g *Gateway) querySpeechAsyncTask(ctx context.Context, ch *store.Channel, a
 // downloadSpeechAsyncAudio retries the file download a few times. MiniMax
 // serves the completed file through the same channel and API key that created
 // the task.
-func (g *Gateway) downloadSpeechAsyncAudio(ch *store.Channel, apiKey string, fileID int64) (string, int64, error) {
+func (g *Gateway) downloadSpeechAsyncAudio(ch *store.Channel, apiKey string, fileID int64) (string, int64, string, error) {
 	dir := filepath.Join(g.cfg.DataDir, "speech")
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return "", 0, err
+		return "", 0, "", err
 	}
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
-			time.Sleep(time.Duration(attempt) * 2 * time.Second)
+			time.Sleep(time.Duration(attempt) * g.speechRetryDelay)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), speechAsyncDownloadTimeout)
-		rel, size, err := g.fetchSpeechAudioFile(ctx, ch, apiKey, fileID, dir)
+		source, sourceSize, err := g.fetchSpeechAsyncSource(ctx, ch, apiKey, fileID, dir)
 		cancel()
 		if err == nil {
-			return rel, size, nil
+			audioPath, audioSize, format, materializeErr := materializeSpeechAudio(source, dir)
+			_ = os.Remove(source)
+			if materializeErr == nil {
+				rel, relErr := filepath.Rel(g.cfg.DataDir, audioPath)
+				if relErr != nil {
+					_ = os.Remove(audioPath)
+					err = relErr
+				} else {
+					return rel, audioSize, format, nil
+				}
+			} else {
+				err = materializeErr
+			}
+		}
+		if sourceSize > maxSpeechAsyncArchive {
+			err = fmt.Errorf("the provider response exceeds the %d MiB limit", maxSpeechAsyncArchive>>20)
 		}
 		lastErr = err
 	}
-	return "", 0, lastErr
+	return "", 0, "", lastErr
 }
 
-func (g *Gateway) fetchSpeechAudioFile(ctx context.Context, ch *store.Channel, apiKey string, fileID int64, dir string) (string, int64, error) {
+// fetchSpeechAsyncSource downloads the provider file into a temporary source
+// file. The provider may return either a raw audio stream or a POSIX tar
+// containing the audio and metadata; materializeSpeechAudio decides which.
+func (g *Gateway) fetchSpeechAsyncSource(ctx context.Context, ch *store.Channel, apiKey string, fileID int64, dir string) (string, int64, error) {
 	path := "/v1/files/retrieve_content?file_id=" + strconv.FormatInt(fileID, 10)
 	req, err := g.upstreamRequest(ctx, ch, http.MethodGet, path, nil, apiKey, false, false)
 	if err != nil {
@@ -1504,12 +1527,12 @@ func (g *Gateway) fetchSpeechAudioFile(ctx context.Context, ch *store.Channel, a
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxSpeechAsyncResponse))
 		return "", 0, errors.New(speechErrorMessage(data, resp.StatusCode))
 	}
-	file, err := os.CreateTemp(dir, "speech-async-*.mp3")
+	file, err := os.CreateTemp(dir, "speech-source-*.tmp")
 	if err != nil {
 		return "", 0, err
 	}
 	name := file.Name()
-	written, copyErr := io.Copy(file, io.LimitReader(resp.Body, maxSpeechAsyncAudio+1))
+	written, copyErr := io.Copy(file, io.LimitReader(resp.Body, maxSpeechAsyncArchive+1))
 	closeErr := file.Close()
 	if copyErr != nil || closeErr != nil {
 		_ = os.Remove(name)
@@ -1518,20 +1541,15 @@ func (g *Gateway) fetchSpeechAudioFile(ctx context.Context, ch *store.Channel, a
 		}
 		return "", 0, closeErr
 	}
-	if written > maxSpeechAsyncAudio {
+	if written > maxSpeechAsyncArchive {
 		_ = os.Remove(name)
-		return "", 0, fmt.Errorf("the generated audio exceeds the %d MiB limit", maxSpeechAsyncAudio>>20)
+		return "", 0, fmt.Errorf("the provider response exceeds the %d MiB limit", maxSpeechAsyncArchive>>20)
 	}
 	if written == 0 {
 		_ = os.Remove(name)
-		return "", 0, errors.New("the provider returned an empty audio file")
+		return "", 0, errors.New("the provider returned an empty response")
 	}
-	rel, err := filepath.Rel(g.cfg.DataDir, name)
-	if err != nil {
-		_ = os.Remove(name)
-		return "", 0, err
-	}
-	return rel, written, nil
+	return name, written, nil
 }
 
 func (g *Gateway) speechJobDir(id int64) string {

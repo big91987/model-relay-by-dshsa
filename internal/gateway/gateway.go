@@ -50,6 +50,12 @@ type Gateway struct {
 	// speechJobs guards each background speech job so a resume cannot start a
 	// second writer for the same clip.
 	speechJobs sync.Map
+	// speechRepairs serializes repairs of the same stored speech audio, for
+	// example extracting a provider tar archive for an already completed task.
+	speechRepairs sync.Map
+	// speechRetryDelay is the pause between async speech download attempts.
+	// Tests shorten it.
+	speechRetryDelay time.Duration
 }
 
 // New builds a Gateway with a tuned upstream HTTP client.
@@ -95,6 +101,7 @@ func New(cfg *config.Config, st *store.Store, secrets *secretbox.Cipher, logger 
 		logger:             logger,
 		videoPollInterval:  pollInterval,
 		speechPollInterval: speechPoll,
+		speechRetryDelay:   2 * time.Second,
 	}
 }
 

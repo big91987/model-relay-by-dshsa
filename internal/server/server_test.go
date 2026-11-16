@@ -1,10 +1,12 @@
 package server
 
 import (
+	"archive/tar"
 	"bytes"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +15,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -29,6 +32,11 @@ import (
 )
 
 func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
+	ts, st, _ := newTestServerWithDataDir(t)
+	return ts, st
+}
+
+func newTestServerWithDataDir(t *testing.T) (*httptest.Server, *store.Store, string) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "server.db"))
 	if err != nil {
@@ -38,11 +46,12 @@ func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	if _, err := st.EnsureAdmin("admin", "admin-pass"); err != nil {
 		t.Fatalf("seed admin: %v", err)
 	}
+	dataDir := t.TempDir()
 	cfg := &config.Config{
 		SecretKey:          "test-secret",
 		SessionTTL:         time.Hour,
 		Version:            "test",
-		DataDir:            t.TempDir(),
+		DataDir:            dataDir,
 		VideoPollInterval:  10 * time.Millisecond,
 		SpeechPollInterval: 10 * time.Millisecond,
 	}
@@ -55,7 +64,7 @@ func newTestServer(t *testing.T) (*httptest.Server, *store.Store) {
 	srv := New(cfg, st, cipher, gw, logger)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return ts, st
+	return ts, st, dataDir
 }
 
 func newClient(t *testing.T) *http.Client {
@@ -1745,5 +1754,153 @@ func TestMinimaxLongSpeechBackgroundFlow(t *testing.T) {
 	resp, body = doJSON(t, refreshed, http.MethodGet, ts.URL+"/api/speech", nil, nil)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"status":"succeeded"`) {
 		t.Fatalf("final list status %d: %s", resp.StatusCode, body)
+	}
+}
+
+func buildServerSpeechTar(t *testing.T, audio []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	writer := tar.NewWriter(&buf)
+	for _, entry := range []struct {
+		name string
+		body []byte
+	}{
+		{name: "output/speech.titles", body: []byte(`{"titles":[{"text":"hello","start":0}]}`)},
+		{name: "output/speech.extra", body: []byte(`{"audio_length":7440,"audio_format":"mp3"}`)},
+		{name: "output/speech.mp3", body: audio},
+	} {
+		header := &tar.Header{Name: entry.name, Mode: 0o600, Size: int64(len(entry.body)), Typeflag: tar.TypeReg}
+		if err := writer.WriteHeader(header); err != nil {
+			t.Fatalf("write tar header: %v", err)
+		}
+		if _, err := writer.Write(entry.body); err != nil {
+			t.Fatalf("write tar body: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func TestSpeechContentRepairsStoredProviderTar(t *testing.T) {
+	ts, st, dataDir := newTestServerWithDataDir(t)
+	audio, err := os.ReadFile(filepath.Join("..", "..", "scripts", "media", "demo.mp3"))
+	if err != nil {
+		t.Fatalf("read demo mp3 fixture: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dataDir, "speech"), 0o750); err != nil {
+		t.Fatalf("create speech dir: %v", err)
+	}
+	legacyPath := filepath.Join(dataDir, "speech", "legacy-async.mp3")
+	if err := os.WriteFile(legacyPath, buildServerSpeechTar(t, audio), 0o600); err != nil {
+		t.Fatalf("write legacy tar: %v", err)
+	}
+	clip := &store.SpeechClip{
+		ChannelName: "minimax", Model: "speech-2.8-hd", VoiceID: "English_expressive_narrator",
+		Text: "legacy long text", Status: "succeeded", Format: "mp3",
+		AudioPath: "speech/legacy-async.mp3", UpstreamTaskID: "task-1", UpstreamFileID: 1,
+		Characters: 16,
+	}
+	if err := st.CreateSpeechClip(clip); err != nil {
+		t.Fatalf("store legacy clip: %v", err)
+	}
+
+	client := newClient(t)
+	if resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/auth/login", map[string]any{
+		"username": "admin", "password": "admin-pass",
+	}, nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status %d: %s", resp.StatusCode, body)
+	}
+	resp, body := doJSON(t, client, http.MethodGet, ts.URL+fmt.Sprintf("/api/speech/%d/content", clip.ID), nil, nil)
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(body, audio) {
+		t.Fatalf("repaired content status %d, %d bytes", resp.StatusCode, len(body))
+	}
+	if got := resp.Header.Get("Content-Type"); got != "audio/mpeg" {
+		t.Fatalf("content type = %q", got)
+	}
+	updated, err := st.GetSpeechClip(clip.ID)
+	if err != nil {
+		t.Fatalf("reload clip: %v", err)
+	}
+	if updated.AudioPath == clip.AudioPath || updated.Format != "mp3" || updated.SizeBytes != int64(len(audio)) {
+		t.Fatalf("repair was not persisted: %+v", updated)
+	}
+	if _, err := os.Stat(legacyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy tar was not removed: %v", err)
+	}
+
+	resp, _ = doJSON(t, client, http.MethodGet, ts.URL+fmt.Sprintf("/api/speech/%d/content?download=1", clip.ID), nil, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Disposition"), "attachment") {
+		t.Fatalf("download status %d disposition %q", resp.StatusCode, resp.Header.Get("Content-Disposition"))
+	}
+}
+
+func TestSpeechContentRetriesMissingAsyncAudio(t *testing.T) {
+	ts, st, _ := newTestServerWithDataDir(t)
+	audio, err := os.ReadFile(filepath.Join("..", "..", "scripts", "media", "demo.mp3"))
+	if err != nil {
+		t.Fatalf("read demo mp3 fixture: %v", err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/files/retrieve_content" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer upstream-key" {
+			t.Errorf("unexpected upstream auth: %q", r.Header.Get("Authorization"))
+		}
+		if r.URL.Query().Get("file_id") != "424242" {
+			t.Errorf("file_id = %q", r.URL.Query().Get("file_id"))
+		}
+		w.Header().Set("Content-Type", "audio/mpeg")
+		_, _ = w.Write(audio)
+	}))
+	defer upstream.Close()
+
+	client := newClient(t)
+	if resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/auth/login", map[string]any{
+		"username": "admin", "password": "admin-pass",
+	}, nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status %d: %s", resp.StatusCode, body)
+	}
+	resp, body := doJSON(t, client, http.MethodPost, ts.URL+"/api/channels", map[string]any{
+		"name": "minimax-speech", "type": "minimax", "base_url": upstream.URL, "api_key": "upstream-key",
+		"models": []string{"speech-2.8-hd"}, "priority": 0, "weight": 1, "status": "enabled",
+	}, nil)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create channel status %d: %s", resp.StatusCode, body)
+	}
+	var channel struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(body, &channel); err != nil || channel.ID == 0 {
+		t.Fatalf("decode channel: %v %s", err, body)
+	}
+	clip := &store.SpeechClip{
+		ChannelID: channel.ID, ChannelName: "minimax-speech", Model: "speech-2.8-hd",
+		VoiceID: "English_expressive_narrator", Text: "missing audio", Status: "succeeded",
+		Format: "mp3", AudioPath: "speech/missing.mp3", UpstreamTaskID: "task-3", UpstreamFileID: 424242,
+		Characters: 13,
+	}
+	if err := st.CreateSpeechClip(clip); err != nil {
+		t.Fatalf("store clip: %v", err)
+	}
+
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+fmt.Sprintf("/api/speech/%d", clip.ID), nil, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"audio_ready":true`) ||
+		!strings.Contains(string(body), "content_url") {
+		t.Fatalf("missing-audio view status %d: %s", resp.StatusCode, body)
+	}
+	resp, body = doJSON(t, client, http.MethodGet, ts.URL+fmt.Sprintf("/api/speech/%d/content", clip.ID), nil, nil)
+	if resp.StatusCode != http.StatusOK || !bytes.Equal(body, audio) {
+		t.Fatalf("retried content status %d, %d bytes", resp.StatusCode, len(body))
+	}
+	updated, err := st.GetSpeechClip(clip.ID)
+	if err != nil {
+		t.Fatalf("reload clip: %v", err)
+	}
+	if updated.AudioPath == clip.AudioPath || updated.SizeBytes != int64(len(audio)) {
+		t.Fatalf("missing-audio retry was not persisted: %+v", updated)
 	}
 }
