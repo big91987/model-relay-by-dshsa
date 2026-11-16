@@ -5,11 +5,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
@@ -35,7 +33,12 @@ func main() {
 		logger.Warn("SECRET_KEY is not set; using an insecure development key. Set SECRET_KEY before exposing this instance.")
 	}
 	if cfg.TestMode {
-		logger.Warn("TEST_MODE=1：已启用本地测试环境，初始管理员账号为 admin/admin。该模式仅用于本地验收，请勿在生产环境启用。")
+		logger.Warn("TEST_MODE=1：已启用本地测试环境，初始管理员账号为 admin/admin。该模式仅用于本地验收，请勿在生产环境启用。",
+			"host", cfg.Host)
+		if !cfg.BindsLoopback() {
+			logger.Warn("TEST_MODE=1 uses admin/admin but HOST binds beyond loopback; use HOST=127.0.0.1 unless remote access is explicitly required.",
+				"host", cfg.Host)
+		}
 	} else if cfg.UsingDefaultPassword {
 		logger.Warn("ADMIN_PASSWORD is not set; the default development password is active. Set ADMIN_PASSWORD before exposing this instance.",
 			"username", cfg.AdminUsername)
@@ -99,7 +102,7 @@ func main() {
 	gw.ResumeMusicTasks()
 
 	httpServer := &http.Server{
-		Addr:              net.JoinHostPort("", strconv.Itoa(cfg.Port)),
+		Addr:              cfg.ListenAddress(),
 		Handler:           api.Handler(),
 		ReadHeaderTimeout: 15 * time.Second,
 		IdleTimeout:       120 * time.Second,

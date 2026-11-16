@@ -31,7 +31,7 @@ make build
 
 Open <http://localhost:8080> and sign in with the development credentials `admin` / `admin123`.
 
-> For the explicitly enabled local test environment, start with `TEST_MODE=1` to use `admin` / `admin`. Set `SECRET_KEY` and `ADMIN_PASSWORD` before exposing an instance; the admin password is only used when the database is first created. See [中文测试环境使用说明](docs/zh-CN/usage.md).
+> For the explicitly enabled local test environment, start with `TEST_MODE=1` to use `admin` / `admin`. In that mode the listener defaults to `127.0.0.1`; set `HOST` explicitly if you really need another interface. Set `SECRET_KEY` and `ADMIN_PASSWORD` before exposing an instance; the admin password is only used when the database is first created. See [中文测试环境使用说明](docs/zh-CN/usage.md).
 
 ### First request
 
@@ -171,7 +171,7 @@ docker run --rm -p 8080:8080 \
   model-relay
 ```
 
-For Compose, create a `.env` file containing `SECRET_KEY` and `ADMIN_PASSWORD` (see the configuration table), then run `docker compose up --build`. The compose file loads that file via `env_file` and refuses to start without it.
+For Compose, create a `.env` file containing `SECRET_KEY` and `ADMIN_PASSWORD` (see the configuration table), then run `docker compose up --build`. The compose file loads that file via `env_file` and refuses to start without it. With `TEST_MODE=1` the listener defaults to `127.0.0.1`; inside a container that means the published port cannot reach it. Set `HOST=0.0.0.0` inside the container only when needed, and bind the host port to `127.0.0.1` (for example `127.0.0.1:8080:8080`).
 
 ### PostgreSQL (optional)
 
@@ -199,12 +199,28 @@ The compose file reads everything from `.env`, so no credential value or credent
 
 Switching an existing SQLite installation to PostgreSQL starts with an empty database; there is no automatic cross-backend data migration. Keep the SQLite data directory if you need to roll back.
 
+### SQLite path and local listener
+
+For a local trial or evaluation instance that keeps SQLite in a specific location:
+
+```bash
+export SQLITE_PATH='/var/lib/model-relay/gateway.db'
+export DATA_DIR='/var/lib/model-relay/data'
+export TEST_MODE=1          # local admin/admin + Chinese console
+export SECRET_KEY="$(openssl rand -hex 32)"
+./bin/gateway
+```
+
+`SQLITE_PATH` is created together with its parent directory and is reused on restart. When it is unset the gateway keeps using `$DATA_DIR/gateway.db`, so existing installations need no changes. With `TEST_MODE=1` and no explicit `HOST`, the listener binds `127.0.0.1`; normal deployments (without `TEST_MODE`) still bind all interfaces as before. Set `HOST=127.0.0.1` explicitly to make the loopback intent visible. Do not set `HOST=0.0.0.0` together with `TEST_MODE=1` unless you deliberately want the admin/admin test login reachable from another machine.
+
 ## Configuration
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PORT` | `8080` | HTTP listen port. |
-| `DATA_DIR` | `./data` | Directory for `gateway.db` (SQLite), downloaded videos, generated speech, music, cloned-voice previews and voice-design previews (created automatically). |
+| `DATA_DIR` | `./data` | Directory for downloaded videos, generated speech, music, cloned-voice previews and voice-design previews. Also holds `gateway.db` when `SQLITE_PATH` is unset (created automatically). |
+| `SQLITE_PATH` | _(empty)_ | Exact SQLite file path. When set, the gateway creates/reuses that file and its parent directory; when empty it keeps using `$DATA_DIR/gateway.db`. Ignored when `DATABASE_URL` is set. |
+| `HOST` | _(empty)_ | HTTP listen host. Empty means all interfaces, preserving normal deployments. With `TEST_MODE=1` an empty `HOST` defaults to `127.0.0.1` so `admin`/`admin` is not exposed on every interface. |
 | `DATABASE_URL` | _(empty)_ | PostgreSQL URL (`postgres://` or `postgresql://`). When set, PostgreSQL replaces SQLite; the URL and its credentials are never logged. |
 | `SECRET_KEY` | `dev-secret-change-me` | Signs admin sessions and encrypts upstream API keys with AES-256-GCM. Use a stable secret. |
 | `ADMIN_USERNAME` | `admin` | Admin username created on first boot. |
@@ -438,7 +454,7 @@ docs/screenshots/      console screenshots used in this README
 
 The SQLite and PostgreSQL schemas are migrated automatically on startup: the gateway adds `logs.cost_status`, `logs.reserved_cost`, `logs.reservation_id` and the `token_reservations` table when they are missing, along with the per-key limit columns (`tpm_limit`, `max_concurrency`, `daily_quota`), the `video_tasks`, `speech_clips`, `voice_clones`, `voice_designs` and `music_tasks` tables, and the speech task columns (`speed`, `status`, `error`, `total_chunks`, `done_chunks`, `upstream_task_id`, `upstream_file_id`). Existing speech clips become `succeeded` rows and are not deleted; an older in-flight chunked job keeps its chunk progress and finishes through the legacy runner. An empty PostgreSQL database is initialized with the same tables on first start; data is not copied between backends. No manual database step is required.
 
-Existing keys and channels keep their configuration. Because the previous version had no reservations, the first boot after the upgrade has no pending reservations to recover; settled historical costs remain as recorded. New optional environment variables (`STREAM_TIMEOUT_SECONDS`, `QUOTA_DEFAULT_OUTPUT_TOKENS`) default to the values in the table above. Restart the binary (or rebuild the Docker image) as usual.
+Existing keys and channels keep their configuration. Because the previous version had no reservations, the first boot after the upgrade has no pending reservations to recover; settled historical costs remain as recorded. New optional environment variables (`STREAM_TIMEOUT_SECONDS`, `QUOTA_DEFAULT_OUTPUT_TOKENS`, `SQLITE_PATH`, `HOST`) default to the values in the table above. `SQLITE_PATH` unset keeps `$DATA_DIR/gateway.db`, and `HOST` unset keeps the original all-interface listener unless `TEST_MODE=1` is enabled. Restart the binary (or rebuild the Docker image) as usual.
 
 ## Design notes
 
