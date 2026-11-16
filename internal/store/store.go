@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -53,6 +55,13 @@ type Store struct {
 // Open opens (and migrates) the SQLite database at path. This is the original
 // single-file deployment mode and stays the default when DATABASE_URL is unset.
 func Open(path string) (*Store, error) {
+	// SQLITE_PATH may point into a directory that does not exist yet. Creating
+	// it here also keeps direct callers of Open working with a fresh path.
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			return nil, fmt.Errorf("create database dir: %w", err)
+		}
+	}
 	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {

@@ -67,6 +67,37 @@ func TestEnsureTestAdminAllowsShortTestPassword(t *testing.T) {
 	}
 }
 
+func TestSQLitePathCreatesFileAndReopens(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "custom", "state", "relay.db")
+	first, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open(%q): %v", path, err)
+	}
+	channel := &Channel{Name: "custom path", Type: "openai", BaseURL: "https://example.com/v1", Status: "enabled"}
+	if err := first.CreateChannel(channel); err != nil {
+		t.Fatalf("CreateChannel: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if info, err := os.Stat(path); err != nil || info.IsDir() {
+		t.Fatalf("SQLITE_PATH file was not created at %q: %v", path, err)
+	}
+
+	second, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen %q: %v", path, err)
+	}
+	defer second.Close()
+	got, err := second.GetChannel(channel.ID)
+	if err != nil {
+		t.Fatalf("GetChannel after restart: %v", err)
+	}
+	if got.Name != "custom path" {
+		t.Fatalf("channel did not persist across restart: %+v", got)
+	}
+}
+
 func TestVoiceCloneAuthorizedRoundTrip(t *testing.T) {
 	s := testStore(t)
 	authorized := &VoiceClone{

@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -13,7 +14,10 @@ import (
 
 // Config holds every runtime setting of the gateway.
 type Config struct {
-	Port    int
+	Port int
+	// Host is the HTTP listen address host. Empty means all interfaces for a
+	// normal deployment; TEST_MODE defaults it to loopback.
+	Host    string
 	DataDir string
 	// DBPath is the SQLite file used when DatabaseURL is empty.
 	DBPath string
@@ -52,10 +56,26 @@ type Config struct {
 // UsingPostgres reports whether PostgreSQL was selected through DATABASE_URL.
 func (c *Config) UsingPostgres() bool { return c.DatabaseURL != "" }
 
+// ListenAddress returns the host:port the HTTP server binds.
+func (c *Config) ListenAddress() string {
+	return net.JoinHostPort(c.Host, strconv.Itoa(c.Port))
+}
+
+// BindsLoopback reports whether Host restricts the listener to this machine.
+func (c *Config) BindsLoopback() bool {
+	host := strings.TrimSpace(strings.ToLower(c.Host))
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // Load reads configuration from environment variables, applying safe defaults.
 func Load(version string) (*Config, error) {
 	cfg := &Config{
 		Port:                     envInt("PORT", 8080),
+		Host:                     strings.Trim(strings.TrimSpace(env("HOST", "")), "[]"),
 		DataDir:                  env("DATA_DIR", "./data"),
 		SecretKey:                env("SECRET_KEY", ""),
 		AdminUsername:            env("ADMIN_USERNAME", "admin"),
@@ -78,6 +98,15 @@ func Load(version string) (*Config, error) {
 	}
 	if cfg.MusicTimeout <= 0 {
 		return nil, fmt.Errorf("MUSIC_TIMEOUT_SECONDS must be greater than zero")
+	}
+	if strings.Contains(cfg.Host, ":") && net.ParseIP(cfg.Host) == nil {
+		return nil, fmt.Errorf("HOST must be a hostname or IP address without a port")
+	}
+	// The explicitly enabled local test environment must not expose the
+	// admin/admin login on every interface by default. An explicit HOST still
+	// wins so a test instance can be reached from another machine on purpose.
+	if cfg.Host == "" && cfg.TestMode {
+		cfg.Host = "127.0.0.1"
 	}
 	if raw := os.Getenv("DATABASE_URL"); raw != "" {
 		u, err := url.Parse(raw)
@@ -104,7 +133,18 @@ func Load(version string) (*Config, error) {
 	if err := os.MkdirAll(cfg.DataDir, 0o750); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
-	cfg.DBPath = filepath.Join(cfg.DataDir, "gateway.db")
+	if sqlitePath := strings.TrimSpace(os.Getenv("SQLITE_PATH")); sqlitePath != "" {
+		cfg.DBPath = sqlitePath
+		if dir := filepath.Dir(sqlitePath); dir != "" && dir != "." {
+			if err := os.MkdirAll(dir, 0o750); err != nil {
+				return nil, fmt.Errorf("create sqlite path dir: %w", err)
+			}
+		}
+	} else {
+		// Preserve the original DATA_DIR/gateway.db location when SQLITE_PATH is
+		// unset, so existing single-file installs keep their data.
+		cfg.DBPath = filepath.Join(cfg.DataDir, "gateway.db")
+	}
 	return cfg, nil
 }
 

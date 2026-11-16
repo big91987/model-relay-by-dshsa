@@ -64,7 +64,35 @@ docker compose -f docker-compose.postgres.yml logs -f gateway
 
 该 compose 文件会启动 PostgreSQL，并把 `DATABASE_URL` 指向容器内的 `postgres:5432`。默认的 `docker-compose.yml` 仍保持原来的 SQLite 用法。
 
-## 4. 登录测试控制台
+如果需要在容器里启用 `TEST_MODE=1`，注意监听地址默认是容器内的 `127.0.0.1`，端口映射无法访问；确需从宿主机访问时在容器内显式设置 `HOST=0.0.0.0`，并只把宿主机端口绑定到回环地址（例如 `127.0.0.1:8080:8080`）。
+
+## 4. SQLite 路径与监听地址（本次评测环境）
+
+本次统一评测使用 SQLite，可以用两个环境变量固定数据库位置和监听地址：
+
+```bash
+export SQLITE_PATH='/srv/model-relay/state/gateway.db'
+export DATA_DIR='/srv/model-relay/data'
+export HOST=127.0.0.1
+export TEST_MODE=1
+export SECRET_KEY="$(openssl rand -hex 32)"
+./bin/gateway
+```
+
+- `SQLITE_PATH`：指定 SQLite 文件的完整路径。网关会在该路径创建或复用数据库文件，并自动创建父目录；重启时使用同一个 `SQLITE_PATH` 即可保留渠道、密钥和日志。未设置时保持原来的 `$DATA_DIR/gateway.db`，已有实例无需修改。
+- `HOST`：HTTP 监听地址，控制管理控制台、管理 API 和中继 API 共用的监听端口。正常部署不设置 `HOST` 时仍监听所有网卡，与之前一致；`TEST_MODE=1` 且未设置 `HOST` 时默认只监听 `127.0.0.1`，避免 `admin/admin` 暴露到其他网卡。显式设置 `HOST` 时以显式值为准；如果在 `TEST_MODE=1` 下绑定非回环地址，启动日志会给出警告。
+- 同时设置 `DATABASE_URL` 时仍优先使用 PostgreSQL，`SQLITE_PATH` 不生效。
+
+验证监听地址：
+
+```bash
+lsof -nP -iTCP:8080 -sTCP:LISTEN
+# TEST_MODE=1 且未设置 HOST 时应看到 127.0.0.1:8080
+```
+
+用于真实厂商凭证的本地试用实例时，建议显式设置 `HOST=127.0.0.1`，不要设置 `HOST=0.0.0.0`；只在本机浏览器访问测试控制台。
+
+## 5. 登录测试控制台
 
 浏览器打开 <http://localhost:8080>，使用：
 
@@ -74,7 +102,7 @@ docker compose -f docker-compose.postgres.yml logs -f gateway
 
 登录页会显示“本地测试环境”提示；登录后顶部会显示当前数据库后端（PostgreSQL 或 SQLite）。如果仍看到英文界面，请确认启动环境里确实设置了 `TEST_MODE=1`，并清除浏览器中该站点的 `mr-lang` 本地存储后刷新。
 
-## 5. 创建渠道
+## 6. 创建渠道
 
 1. 打开左侧“渠道”，点击“添加渠道”。
 2. 填写：
@@ -91,7 +119,7 @@ docker compose -f docker-compose.postgres.yml logs -f gateway
 python3 scripts/mock-upstream.py 19090
 ```
 
-## 6. 创建 API 密钥并验证请求
+## 7. 创建 API 密钥并验证请求
 
 1. 打开“API 密钥”，点击“创建密钥”。
 2. 名称填 `验收测试`，额度可勾选“不限额度”，点击“创建密钥”。
@@ -106,13 +134,13 @@ curl http://localhost:8080/v1/chat/completions \
 
 也可以在“概览”和“请求日志”页面看到这次请求的令牌数、费用和延迟。
 
-## 7. 语音与音乐新入口（可选验收）
+## 8. 语音与音乐新入口（可选验收）
 
 - **语音合成**：添加带 `speech-` 模型的 MiniMax 渠道后，可试听短文本的流式朗读；超过同步阈值的文本会作为一个异步 MiniMax 任务提交。任务 ID 保存在数据库和 `DATA_DIR`，刷新页面或重启网关后仍会继续跟踪。
 - **音乐生成**：添加 `minimax-music` 渠道（例如模型 `music-3.0`）后，在“音乐”页填写风格描述和歌词即可生成歌曲；完成后可试听和下载 MP3/WAV。
 - 两种任务的记录分别保存在 `speech_clips` 和 `music_tasks` 表中；PostgreSQL 与 SQLite 首次启动时都会自动建表。
 
-## 8. 重启验证
+## 9. 重启验证
 
 1. 记下已创建的渠道名称和 API 密钥名称。
 2. 停止网关（本机 `Ctrl+C`；Compose 使用 `docker compose -f docker-compose.postgres.yml restart gateway`）。
@@ -132,13 +160,13 @@ curl -s http://localhost:8080/api/status
 psql "$DATABASE_URL" -c 'select count(*) from channels;'
 ```
 
-SQLite 模式的重启验证方式相同，只是数据保存在 `$DATA_DIR/gateway.db`。
+SQLite 模式的重启验证方式相同：使用同一个 `SQLITE_PATH` 重启即可；未设置 `SQLITE_PATH` 时数据仍保存在 `$DATA_DIR/gateway.db`。
 
-## 9. 从 SQLite 切换到 PostgreSQL
+## 10. 从 SQLite 切换到 PostgreSQL
 
 两种后端的数据不会自动互相迁移。切到 PostgreSQL 会从一个空数据库开始；如需保留原 SQLite 数据用于回滚，请不要删除 `$DATA_DIR/gateway.db`。切换前建议先备份数据库和 `DATA_DIR`。
 
-## 10. 安全要求
+## 11. 安全要求
 
 - 生产环境不要设置 `TEST_MODE=1`，并始终设置强随机的 `SECRET_KEY` 和 `ADMIN_PASSWORD`。
 - `DATABASE_URL` 含有数据库密码，只放在环境变量或未提交的 `.env` 中。
