@@ -609,7 +609,7 @@ func logExportRow(l *store.Log) []string {
 	// An unverified charge means the real usage is unknown, so the row must not
 	// present the reserved upper bound as if it were a final cost.
 	cost := strconv.FormatFloat(l.Cost, 'f', -1, 64)
-	if l.CostStatus == store.CostUnverified {
+	if l.CostStatus == store.CostUnverified || l.CostStatus == store.CostUnpriced {
 		cost = "unknown"
 	}
 	return []string{

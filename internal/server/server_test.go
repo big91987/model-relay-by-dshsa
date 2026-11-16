@@ -1801,3 +1801,10 @@ func TestChannelPriceModeValidation(t *testing.T) {
 		t.Fatalf("implicit priced channel: status=%d body=%+v", code, decoded)
 	}
 }
+
+func TestLogExportMarksUnpricedAsUnknown(t *testing.T) {
+	row := logExportRow(&store.Log{Cost: 0, CostStatus: store.CostUnpriced})
+	if len(row) <= 9 || row[9] != "unknown" {
+		t.Fatalf("unpriced cost must be exported as unknown, got %q", row[9])
+	}
+}
